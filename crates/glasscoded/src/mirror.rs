@@ -314,19 +314,18 @@ pub fn is_primary(mac: &glasscode_core::paths::MachineId) -> bool {
     }
 }
 
-/// Keep the Mac's engine switch when it differs from this server's; the journal and the words
-/// ledger decide again.
+/// Keep the Mac's engine switch (its features) when it differs from this server's; the journal and
+/// the words ledger read the features again.
 fn keep_engine(engine: glasscode_core::store::EngineSwitch) {
     use glasscode_core::store::{EngineSwitch, Store as _};
     if EngineSwitch::load().ok().as_ref() == Some(&engine) {
         return;
     }
-    let to = format!("{:?}", engine.engine);
     match glasscode_core::store::update::<EngineSwitch, ()>(|switch| *switch = engine) {
         Ok(()) => {
-            let journal = glasscode_core::journal::decide_again();
+            glasscode_core::journal::decide_again();
             glasscode_core::words::decide_again();
-            log(format!("the engine is {to} here now, as on the Mac (journal {})", if journal { "on" } else { "off" }));
+            log("the manager's features here are the Mac's now".to_string());
         }
         Err(err) => log(format!("the Mac's engine switch was not kept: {err}")),
     }
@@ -343,9 +342,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     let here = glasscode_core::paths::MachineId::this().ok();
     let mut not_taken: Vec<String> = Vec::new();
     let journal = std::mem::take(&mut sync.journal);
-    if !journal.is_empty() && glasscode_core::journal::known_enabled() != Some(true) && !glasscode_core::journal::enabled() {
-        not_taken.push("journal".into());
-    } else if !journal.is_empty() {
+    if !journal.is_empty() {
         let mut seen = JOURNAL_SEEN.lock().unwrap_or_else(|p| p.into_inner());
         let seen = seen.get_or_insert_with(HashMap::new).entry(mac_id.to_string()).or_default();
         if seen.len() > 100_000 {
@@ -642,11 +639,10 @@ mod tests {
 
     use super::*;
 
-    /// M57: the server runs its manager stores as the Mac's engine says. Under v1 the Mac's
-    /// conversation is not taken, and the reply says so (the Mac sends it again); the Mac's v2
-    /// switch is kept, and the journal turns on.
+    /// M57: the server takes the Mac's conversation into its manager stores, and keeps the Mac's
+    /// engine switch: its features are the server's then.
     #[test]
-    fn the_server_takes_the_macs_engine() {
+    fn the_server_takes_the_macs_switch() {
         use glasscode_core::store::{Engine, EngineSwitch, Store as _};
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
         let machine = MachineId::parse("00000000000000aa").unwrap();
@@ -655,14 +651,14 @@ mod tests {
         sync.conversation = vec![record];
         let mut reply = MirrorSyncReply::default();
         manager_stores(&mut sync, "mac-1", &mut reply);
-        assert_eq!(reply.not_taken, ["conversation"], "v1 here: sent again");
+        assert!(reply.not_taken.is_empty(), "{:?}", reply.not_taken);
 
-        keep_engine(EngineSwitch { engine: Engine::V2, ..EngineSwitch::default() });
-        assert_eq!(EngineSwitch::load().unwrap().engine, Engine::V2);
-        assert_eq!(glasscode_core::journal::known_enabled(), Some(true));
-        // Back to v1 before the scratch home goes, so no later test keeps a journal.
+        keep_engine(EngineSwitch { engine: Engine::V2, switches: std::collections::BTreeMap::from([("turn_hooks".to_string(), true)]) });
+        assert!(EngineSwitch::load().unwrap().is_on("turn_hooks"));
+        assert!(glasscode_core::journal::feature_on("turn_hooks"));
+        // Back to every feature off before the scratch home goes.
         keep_engine(EngineSwitch::default());
-        assert_eq!(glasscode_core::journal::known_enabled(), Some(false));
+        assert!(!glasscode_core::journal::feature_on("turn_hooks"));
     }
 
     /// M57: the server keeps no record of what it sent a Mac. Its records go from where the Mac

@@ -64,8 +64,7 @@ glasscode manager message list
 
 ## Manager v2
 
-A new manager is being built beside this one. It is off for everyone until it ships (release 1).
-A scratch home can try it with `GLASSCODE_MANAGER_ENGINE=v2`. It keeps one memory per project
+The manager is Manager v2 (since M56, every home runs it). It keeps one memory per project
 that every agent shares, gives every turn of every session one report, follows each project's
 level (Careful, Standard or Autopilot), and asks you on a card before anything the level does not
 allow. [`architecture.md`](architecture.md#manager-v2) says how it is built.

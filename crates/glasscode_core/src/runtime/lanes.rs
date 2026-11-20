@@ -476,11 +476,10 @@ mod tests {
         assert_eq!(lane.context, 0);
         // The conversation store keeps the summary and the link (a v2 home of the test's own).
         let dir = tempfile::tempdir().unwrap();
-        let before = ["GLASSCODE_HOME", crate::store::ENGINE_VARIABLE].map(|name| (name, std::env::var_os(name)));
+        let before = ["GLASSCODE_HOME"].map(|name| (name, std::env::var_os(name)));
         // SAFETY: the core tests run one at a time (`--test-threads=1`).
         unsafe {
             std::env::set_var("GLASSCODE_HOME", dir.path());
-            std::env::set_var(crate::store::ENGINE_VARIABLE, "v2");
         }
         let rolled = Rolled { to: Some("brain-2".into()), ..rolled };
         let mut conversation = crate::conversation::Conversation::load();

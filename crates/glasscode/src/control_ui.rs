@@ -358,10 +358,6 @@ pub struct ControlUi {
     excluded: HashSet<PathBuf>,
     /// Answers for commands from server sessions, sent with the next sync.
     pub remote_out: Arc<Mutex<Vec<glasscode_core::remote::RemoteCallReply>>>,
-    /// The engine switch says v2 (read once, off the main thread, when the socket opens, before
-    /// any request is answered). The control files no longer read it (M56 row 7: callers by
-    /// channel, the gate); the files row 1 has not collapsed yet still do.
-    pub engine_v2: bool,
     /// What the replies of the last ops were, newest first: the journal's records of them, which
     /// M14 writes (ops-21). In memory only until then.
     pub actions: Vec<ops::Action>,
@@ -427,7 +423,6 @@ impl ControlUi {
             tx: None,
             excluded: HashSet::new(),
             remote_out: Default::default(),
-            engine_v2: false,
             actions: Vec::new(),
             project_keys: Default::default(),
             keys_at: None,
@@ -702,13 +697,11 @@ impl Workspace {
         let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
         let engine = cx.background_spawn(async move {
             let switch = glasscode_core::store::EngineSwitch::current();
-            // (Only the other files still read the engine; the control files are v2's alone, M56.)
-            let v2 = switch.engine == glasscode_core::store::Engine::V2;
             // M22: the app's own git calls on worktrees ignore what a session can configure.
             glasscode_core::sys::use_safe_git(true);
             // And this machine's id, for the brain runtime's host (M50).
             let machine = glasscode_core::paths::MachineId::this().ok();
-            (v2, switch.is_on("profiles"), bind_keys(&projects), (gate::load(), load_pending()), machine, switch.switches.clone())
+            (switch.is_on("profiles"), bind_keys(&projects), (gate::load(), load_pending()), machine, switch.switches.clone())
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -729,9 +722,9 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, profiles, keys, authority, machine, features) = engine.await;
+            let (profiles, keys, authority, machine, features) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
-                (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                this.control.project_keys = keys;
                 // The installed CLIs' argument contract, now that the engine is known (M22).
                 this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
@@ -1415,7 +1408,7 @@ impl Workspace {
                     let command = format!("glasscode mcp: {}", op.name());
                     self.control_gated_as(op, caller, vec![sink], command, None, Gated { detach: request.detach, op_id: request.op_id.clone(), ..Gated::default() }, window, cx);
                 }
-                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
+                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name))),
             }
             return;
         }
@@ -1522,7 +1515,7 @@ impl Workspace {
         let op_id = op_id.filter(|_| op.spec.dry_runs() && !op.dry_run());
         if let Some(id) = &op_id {
             if !control::valid_op_id(id) {
-                return sinks.iter().for_each(|sink| sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::usage("An op id is 1 to 64 letters, digits and ._:-.")), Some(op.name()), true)));
+                return sinks.iter().for_each(|sink| sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::usage("An op id is 1 to 64 letters, digits and ._:-.")), Some(op.name()))));
             }
             let key = (caller.channel.origin(), id.clone());
             let hash = ops::job::call_hash(&op);
@@ -1559,7 +1552,7 @@ impl Workspace {
         // could name several things, is the caller's to fix.
         let targets = match ops::targets(&op, &self.world(&caller)) {
             Ok(targets) => targets,
-            Err(error) => return answer(self, &sinks, done, crate::ops_run::with_op(crate::ops_run::error_reply(&error), Some(op.name()), true)),
+            Err(error) => return answer(self, &sinks, done, crate::ops_run::with_op(crate::ops_run::error_reply(&error), Some(op.name()))),
         };
         let mut decision = self.control_gate(&caller, &op, &targets);
         // "Allow for the rest of the session": this op on these targets from this session.
@@ -1624,7 +1617,7 @@ impl Workspace {
         {
             self.chat_show_me(&op);
             let text = format!("Not moved: {why}. The person has a “Show me” chip in the chat for it.");
-            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name()), true));
+            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name())));
         }
         if let Some((lane, wake)) = brain_lane {
             if let Some(wake) = wake {
@@ -1633,11 +1626,11 @@ impl Workspace {
                 touched.extend(targets.sessions.iter().filter_map(|id| set.sessions.get(id).and_then(|facts| facts.project.clone())));
                 let own = self.lanes.wake_projects(&wake);
                 if let Err(why) = glasscode_core::runtime::lanes::wake_may_touch(&touched, &|key| set.policy.of(key).level == gate::Level::Careful, &own) {
-                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name()), true));
+                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name())));
                 }
             }
             if !card && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, lane, op.spec.effect, &targets, op.spec.summary) {
-                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
+                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name())));
             }
         }
         let mut responder = Responder {
@@ -1670,7 +1663,7 @@ impl Workspace {
         self.after_check(plan, window, cx, move |ws, plan, window, cx| {
             let plan = match plan {
                 Ok(plan) => plan,
-                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name), true)),
+                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name))),
             };
             responder.what = plan.what.clone();
             responder.kind = plan.kind;
@@ -1804,7 +1797,7 @@ impl Workspace {
             done(self, &reply);
             return;
         }
-        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), true);
+        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name));
         // What takes it back (ops-18): the inverse op and its arguments, and the number `ops.undo`
         // takes it back by. The taking back of an op has none (no redo), and marks the op it took
         // back.
@@ -1915,7 +1908,7 @@ impl Workspace {
     fn control_called(&self, key: &(String, String), hash: &str, op: &str) -> Option<Again> {
         let called = match self.control.op_ids.seen(key, hash) {
             ops::job::Seen::New => return None,
-            ops::job::Seen::OtherCall => return Some(Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The op id {} was used for another call: give this one a new id.", key.1))), Some(op), true))),
+            ops::job::Seen::OtherCall => return Some(Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The op id {} was used for another call: give this one a new id.", key.1))), Some(op)))),
             ops::job::Seen::Is(called) => called,
         };
         let repeated = |reply: &Reply| match reply.clone() {
@@ -1938,7 +1931,7 @@ impl Workspace {
                 Some(running) => Again::Answer(running_reply(*id, running)),
                 None => Again::Answer(self.control.results.get(id).map(repeated).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
             },
-            Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op), true)),
+            Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op))),
         })
     }
 

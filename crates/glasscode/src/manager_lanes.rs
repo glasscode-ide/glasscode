@@ -129,7 +129,7 @@ impl Workspace {
         }
         // Only the home runs wakes (M57): this Mac while no server is paired or while it holds the
         // lease; else the server's worker does.
-        if !self.control.engine_v2 || !self.state.manager.enabled || !self.home_here() {
+        if !self.state.manager.enabled || !self.home_here() {
             return;
         }
         let Some(host) = self.brain_host.clone() else { return };

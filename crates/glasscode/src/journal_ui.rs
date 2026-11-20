@@ -203,7 +203,7 @@ impl Workspace {
     fn children_turn_ended(&mut self, report: turns::TurnReport, cx: &mut Context<Self>) {
         // Its summary, once it finished or failed: a turn cut off (a sleep, a quit, an interrupt,
         // a pause) is not its answer yet.
-        if !self.control.engine_v2 || !matches!(report.end, turns::TurnEnd::Completed | turns::TurnEnd::Failed(_)) {
+        if !matches!(report.end, turns::TurnEnd::Completed | turns::TurnEnd::Failed(_)) {
             return;
         }
         let child_title = self.state.session(&report.session).map(|s| self.session_title(s)).unwrap_or_else(|| report.session.clone());
@@ -222,7 +222,7 @@ impl Workspace {
     /// delivery queue, once each (the effect ledger keeps it to once per child turn and run); one
     /// that went is marked, and one whose parent is gone is let go.
     pub(crate) fn children_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.children_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30)) {
+        if self.children_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30)) {
             return;
         }
         self.children_at = Some(std::time::Instant::now());
@@ -878,9 +878,7 @@ impl Workspace {
     /// what it did, which `log --json` keeps the shape of.
     pub fn journal_op(&mut self, action: &Action, log: Option<&LogEntry>) {
         // An action changes what an earlier Undo would restore: that Undo ends (M52, ux-14).
-        if self.control.engine_v2 {
-            self.chat_expire_undos(action);
-        }
+        self.chat_expire_undos(action);
         // "Keep the log of what agents did" off (`agents.log_off`): no record of ops either.
         if !self.journal.on || self.state.agents.log_off {
             return;
@@ -1082,7 +1080,7 @@ impl Workspace {
         }
         self.journal.reconciler = Some(reconciler);
         // A worktree that went outside Glasscode: memory archives the work that names it (M24).
-        if self.control.engine_v2 && !gone.is_empty() {
+        if !gone.is_empty() {
             std::thread::spawn(move || {
                 for path in gone {
                     if let Err(err) = glasscode_core::memstore::Memory::open().archive_gone(&path, glasscode_core::clock::now_ms()) {

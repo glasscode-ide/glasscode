@@ -16,7 +16,7 @@ use glasscode_core::day::{self, Day};
 use glasscode_core::git;
 use glasscode_core::github;
 use glasscode_core::linear;
-use glasscode_core::manager::{Action, Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, memory, messages, scene, voice};
+use glasscode_core::manager::{Action, Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, scene, voice};
 use glasscode_core::model::{AgentKind, new_id, now};
 use glasscode_core::ops::{self, ErrorCode, Op, OpError, ParseCtx, SessionView, World};
 use glasscode_core::sys;
@@ -160,19 +160,17 @@ pub(crate) fn plan(kind: Kind, what: impl Into<String>, run: impl FnOnce(&mut Wo
     Ok(Plan { kind, what: what.into(), run: Box::new(run), check: None })
 }
 
-/// `data` with what it was before (`before`), for the undo of the v2 engine (`ops::undo_of`);
-/// v1's `--json` stays as it was.
-fn with_before(ws: &Workspace, mut data: Value, before: impl Into<Value>) -> Value {
-    if ws.control.engine_v2 && data.is_object() {
+/// `data` with what it was before (`before`), for the undo (`ops::undo_of`).
+fn with_before(mut data: Value, before: impl Into<Value>) -> Value {
+    if data.is_object() {
         data["before"] = before.into();
     }
     data
 }
 
-/// `data` saying it made nothing new (an undo would take back what was there before), with the
-/// v2 engine.
-fn not_created(ws: &Workspace, mut data: Value) -> Value {
-    if ws.control.engine_v2 && data.is_object() {
+/// `data` saying it made nothing new (an undo would take back what was there before).
+fn not_created(mut data: Value) -> Value {
+    if data.is_object() {
         data["created"] = Value::Bool(false);
     }
     data
@@ -221,9 +219,8 @@ pub(crate) fn error_reply(error: &OpError) -> Reply {
 
 /// A reply with the op that made it in `data` (`op`, and `error_code` for a failure). The command
 /// prints `data` only for `--json` on success, so failures always carry them; a success's data
-/// gains `op` only with the v2 engine, and only where it is an object, so that v1's `--json` stays
-/// as it was.
-pub(crate) fn with_op(reply: Reply, op: Option<&str>, v2: bool) -> Reply {
+/// gains `op` where it is an object.
+pub(crate) fn with_op(reply: Reply, op: Option<&str>) -> Reply {
     let Reply::Done { code, text, mut data } = reply else { return reply };
     if code != code::OK {
         if !data.is_object() {
@@ -239,7 +236,7 @@ pub(crate) fn with_op(reply: Reply, op: Option<&str>, v2: bool) -> Reply {
             };
             data["error_code"] = json!(class);
         }
-    } else if let (true, Some(op), Value::Object(map)) = (v2, op, &mut data) {
+    } else if let (Some(op), Value::Object(map)) = (op, &mut data) {
         map.insert("op".into(), json!(op));
     }
     Reply::Done { code, text, data }
@@ -313,11 +310,11 @@ pub(crate) fn what(op: &Op, n: &Names, today: Day) -> String {
 }
 
 impl Workspace {
+
     /// The op the words name, or the reply that says why not. Parsing runs nothing.
     pub fn control_parse(&self, caller: &Caller, words: &[String]) -> Result<Op, Reply> {
         let ctx = self.parse_ctx(caller);
-        let v2 = ctx.v2;
-        ops::parse(words, &ctx).map_err(|e| with_op(error_reply(&e), ops::name_of(words, v2), v2))
+        ops::parse(words, &ctx).map_err(|e| with_op(error_reply(&e), ops::name_of(words, ctx.v2)))
     }
 
     /// The plan of an op its caller has already named (the command's words, a key, a button, a
@@ -327,21 +324,20 @@ impl Workspace {
     /// With the caller's own op id for the call (`op_id`, ops-10), the effect ledger claims it under
     /// that id, so a call asked again after a restart does not run twice either.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
-        let v2 = self.control.engine_v2;
-        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).chain(crate::movein_ops::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
+        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).chain(crate::movein_ops::HANDLERS).find(|(name, _)| *name == op.name()) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
-            return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name()), v2));
+            return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name())));
         };
-        let plan = handler(self, caller, op).map_err(|reply| with_op(reply, Some(op.name()), v2))?;
+        let plan = handler(self, caller, op).map_err(|reply| with_op(reply, Some(op.name())))?;
         // v2 (M31): what a caller other than the person sets off goes through the effect ledger.
         let effect = !matches!(op.spec.effect, glasscode_core::ops::EffectClass::Read | glasscode_core::ops::EffectClass::Navigate);
-        Ok(if v2 && effect && !self.caller_is_person(caller) && op.name() != "session.send" { claimed(self, caller, op, op_id, plan) } else { plan })
+        Ok(if effect && !self.caller_is_person(caller) && op.name() != "session.send" { claimed(self, caller, op, op_id, plan) } else { plan })
     }
 
     /// Whether the caller may name things by the start of a name or words from a title (ops-17):
     /// with the v1 engine every caller may, as before; with v2 only the person.
     pub(crate) fn caller_is_person(&self, caller: &Caller) -> bool {
-        !self.control.engine_v2 || caller.is_person()
+        caller.is_person()
     }
 
     /// What the caller's words can mean: the day, who calls, the sessions a word may name.
@@ -364,7 +360,7 @@ impl Workspace {
             caller_session: caller.session.clone(),
             today: day::local((glasscode_core::clock::now_ms() / 1000) as i64),
             sessions,
-            v2: self.control.engine_v2,
+            v2: true,
         }
     }
 
@@ -840,7 +836,7 @@ fn session_rename(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
         }
         ws.save();
         cx.notify();
-        let data = with_before(ws, json!({ "id": id, "title": name }), old.clone());
+        let data = with_before(json!({ "id": id, "title": name }), old.clone());
         ws.reply(r, Reply::ok(format!("Renamed “{old}” to “{name}”."), data));
     })
 }
@@ -876,12 +872,7 @@ fn session_send(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     }
     let title = ws.state.session(&id).map(|s| ws.session_title(s)).unwrap_or_default();
     let from = caller.describe();
-    if ws.control.engine_v2 {
-        return session_send_queued(ws, caller, op, id, title, from, message);
-    }
-    plan(Kind::Send, what(op, &Names { title: title.clone(), ..Names::default() }, day::today()), move |ws, r, window, cx| {
-        ws.session_send(&id, &title, &from, message, r, window, cx);
-    })
+    session_send_queued(ws, caller, op, id, title, from, message)
 }
 
 /// v2 (M31): `session send` is a queued delivery, from every caller: the session's queue types it
@@ -999,7 +990,7 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, op_id: Option<&str>, plan: 
     // home is does not decide it (claimed here, as before).
     let manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
     let outward = manager && (op.spec.effect == glasscode_core::ops::EffectClass::Outward || op.spec.retry == glasscode_core::ops::Retry::AtMostOnce);
-    let arbiter = ws.server.client.clone().filter(|c| ws.control.engine_v2 && ws.server.config.is_some() && c.hello.features.iter().any(|f| f == "home"));
+    let arbiter = ws.server.client.clone().filter(|c| ws.server.config.is_some() && c.hello.features.iter().any(|f| f == "home"));
     let registered: Option<Option<(std::sync::Arc<glasscode_core::remote::RemoteClient>, u64)>> = match (outward, arbiter) {
         (true, Some(client)) => Some(ws.home.generation().map(|generation| (client, generation))),
         _ => None,
@@ -1148,7 +1139,7 @@ fn pr_review(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     spec.review = Some(n);
     // Already reviewing it here: say so instead of starting a second one.
     if let Some(s) = ws.state.sessions.iter().find(|s| s.review.as_ref().is_some_and(|r| r.number == n)) {
-        return answer(Reply::ok(format!("Already reviewing #{n} in “{}” ({}).", ws.session_title(s), short(&s.id)), not_created(ws, ws.session_json(s))));
+        return answer(Reply::ok(format!("Already reviewing #{n} in “{}” ({}).", ws.session_title(s), short(&s.id)), not_created(ws.session_json(s))));
     }
     let check = new_branch_free(ws, &spec);
     checked_if(ws.new_session_plan(spec), check)
@@ -1277,7 +1268,7 @@ fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let s = session_of(ws, op)?;
     // With the v2 engine, a push the manager or a session asks for sends only the commits that
     // session made on its own branch (M23, D13): never a tip it found (P07).
-    let own_only = ws.control.engine_v2 && !caller.channel.is_person();
+    let own_only = !caller.channel.is_person();
     let root = ws.state.project(&s.project_id).map(|p| p.root.clone()).unwrap_or_default();
     // The default branch is git's to say: read with the push, off the main thread.
     let base = op.text("base").map(str::to_string);
@@ -1363,7 +1354,7 @@ fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 let _ = this.update(cx, |ws, cx| {
                     let reply = match root.and_then(|root| ws.add_project_at_root(root, name, cx)) {
                         Ok((id, true)) => Reply::ok(format!("Imported {shown} as {}.", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
-                        Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), not_created(ws, json!({ "id": id }))),
+                        Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), not_created(json!({ "id": id }))),
                         Err(e) => failed(e),
                     };
                     ws.reply(r, reply);
@@ -1453,7 +1444,7 @@ fn project_set_account(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
         }
         ws.save();
         ws.configure_github(cx);
-        let data = with_before(ws, json!({ "id": id }), before);
+        let data = with_before(json!({ "id": id }), before);
         ws.reply(r, Reply::ok(format!("New sessions in {name} use {login} on GitHub."), data));
     })
 }
@@ -1564,7 +1555,7 @@ fn worktree_rename(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     ws.refresh_worktrees(cx);
                 }
                 ws.reply(r, match result {
-                    Ok(()) => Reply::ok(format!("Renamed {old} to {new} ({}).", home_relative(&wt.path)), with_before(ws, json!({ "path": wt.path, "branch": new }), old.clone())),
+                    Ok(()) => Reply::ok(format!("Renamed {old} to {new} ({}).", home_relative(&wt.path)), with_before(json!({ "path": wt.path, "branch": new }), old.clone())),
                     Err(e) => failed(format!("{e:#}")),
                 });
             });
@@ -1728,7 +1719,7 @@ fn ticket_move(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
                         ws.tickets_set_status(&ticket.identifier, status);
                         ws.tickets.last_fetch = None;
                         ws.tickets_refresh(cx);
-                        Reply::ok(format!("{} is {name} in Linear.", ticket.identifier), with_before(ws, json!({ "ticket": ticket.identifier, "status": name }), ticket.status.name.clone()))
+                        Reply::ok(format!("{} is {name} in Linear.", ticket.identifier), with_before(json!({ "ticket": ticket.identifier, "status": name }), ticket.status.name.clone()))
                     }
                     Err(e) => failed(format!("Could not move {}: {e:#}", ticket.identifier)),
                 };
@@ -2302,9 +2293,6 @@ impl Workspace {
 
     /// At start, and each hour after (v2): run the scheduled export when it is due.
     pub(crate) fn data_export_schedule_start(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         self.data_export_due(cx);
         cx.spawn(async move |this, cx| {
             loop {
@@ -2861,9 +2849,9 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
     // v2: from v2's own stores (M56.2); v1: data.json.
-    let mut made = if ws.control.engine_v2 { brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now()) } else { brief::build(&settings, &ws.data_with_follow_ups(), &ws.manager_snapshot(), now()) };
+    let mut made = brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now());
     // v2 (M42): what was told and still waits on the person, with its age, from code.
-    if ws.control.engine_v2 {
+    {
         let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
         if !waiting.is_empty() && !made.text.trim().is_empty() {
             made.text = format!("{} {}", made.text.trim(), waiting.iter().map(|l| format!("{}.", l.text)).collect::<Vec<_>>().join(" "));
@@ -2881,7 +2869,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let stops = if ws.control.engine_v2 { brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot()) } else { brief::tour(&ws.state.manager, &ws.data_with_follow_ups(), &ws.manager_snapshot()) };
+        let stops = brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot());
         if stops.is_empty() {
             ws.reply(r, Reply::ok("Nothing to walk through right now.", json!({ "stops": [] })));
             return;
@@ -2893,86 +2881,47 @@ pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 }
 
 fn manager_remember(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
-    if ws.control.engine_v2 {
-        // v2: the words of `manager remember` propose to memory (D1: no one's command makes a fact).
-        let ask = memory_ask(ws, caller, op)?;
-        let text = arg(op, "fact").trim().to_string();
-        return memory_plan(Kind::Board, format!("propose to memory: {}", short(&text)), move || {
-            let run = || -> Result<Reply, Reply> {
-                let memory = Memory::open();
-                let key = ask.key()?;
-                let file = key.map_or(MemFile::Profile, MemFile::Decisions);
-                let source = match &ask.who {
-                    Who::Session(id) => memstore::Source::Session(id.clone()),
-                    Who::Manager => memstore::Source::Session("manager".into()),
-                    Who::You => memstore::Source::PersonEdit,
-                };
-                let (id, _) = memory.propose(&ask.who, &file, None, &text, source).map_err(memory_reply)?;
-                Ok(Reply::ok(format!("Proposed for memory; it waits for the person's tick. Proposal {id}."), json!({ "id": id, "text": text, "proposed": true })))
-            };
-            run().unwrap_or_else(|reply| reply)
-        });
-    }
-    let settings = ws.manager_on()?;
+    // v2: the words of `manager remember` propose to memory (D1: no one's command makes a fact).
+    let ask = memory_ask(ws, caller, op)?;
     let text = arg(op, "fact").trim().to_string();
-    let source = source_of(caller);
-    plan(Kind::Board, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
-        let id = memory::remember(&mut ws.manager.harness.data, &text, &source, now());
-        ws.manager.harness.dirty = true;
-        cx.notify();
-        ws.reply(r, Reply::ok(format!("Remembered: {text}"), json!({ "id": id, "text": text })));
+    memory_plan(Kind::Board, format!("propose to memory: {}", short(&text)), move || {
+        let run = || -> Result<Reply, Reply> {
+            let memory = Memory::open();
+            let key = ask.key()?;
+            let file = key.map_or(MemFile::Profile, MemFile::Decisions);
+            let source = match &ask.who {
+                Who::Session(id) => memstore::Source::Session(id.clone()),
+                Who::Manager => memstore::Source::Session("manager".into()),
+                Who::You => memstore::Source::PersonEdit,
+            };
+            let (id, _) = memory.propose(&ask.who, &file, None, &text, source).map_err(memory_reply)?;
+            Ok(Reply::ok(format!("Proposed for memory; it waits for the person's tick. Proposal {id}."), json!({ "id": id, "text": text, "proposed": true })))
+        };
+        run().unwrap_or_else(|reply| reply)
     })
 }
 
-fn manager_forget(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
-    if ws.control.engine_v2 {
-        person_only(caller, "forget what memory keeps")?;
-        let which = arg(op, "which").trim().to_string();
-        return memory_plan(Kind::Board, format!("forget {which}"), move || Memory::open().forget(&[which.as_str()], false).map(|_| Reply::ok(format!("Forgot {which}."), json!({ "id": which }))).unwrap_or_else(memory_reply));
-    }
-    let settings = ws.manager_on()?;
+fn manager_forget(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    person_only(caller, "forget what memory keeps")?;
     let which = arg(op, "which").trim().to_string();
-    plan(Kind::Board, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
-        let reply = match memory::forget(&mut ws.manager.harness.data, &which, now()) {
-            Some(text) => {
-                ws.manager.harness.dirty = true;
-                cx.notify();
-                Reply::ok(format!("Forgot: {text}"), json!({ "text": text }))
-            }
-            None => failed(format!("Nothing in memory matches “{which}”. `glasscode manager memory` lists what is kept.")),
-        };
-        ws.reply(r, reply);
-    })
+    memory_plan(Kind::Board, format!("forget {which}"), move || Memory::open().forget(&[which.as_str()], false).map(|_| Reply::ok(format!("Forgot {which}."), json!({ "id": which }))).unwrap_or_else(memory_reply))
 }
 
 fn manager_memory(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
-    if ws.control.engine_v2 {
-        // v2: what memory holds, by search (the v1 notes are migrated into it, M20.3).
-        let ask = memory_ask(ws, caller, op)?;
-        let query = arg(op, "query").trim().to_string();
-        let limit = op.number("limit").unwrap_or(20).clamp(1, 50) as usize;
-        return memory_plan(Kind::Read, "search memory", move || {
-            let run = || -> Result<Reply, Reply> {
-                let snap = Memory::open().snapshot().map_err(memory_reply)?;
-                let key = if ask.everywhere { None } else { ask.key()? };
-                let scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
-                let hits = memstore::search::search(&snap, if query.is_empty() { "*" } else { &query }, &scope, limit).map_err(memory_reply)?;
-                Ok(Reply::ok(memstore::search::as_data(&hits, snap.commit()), json!({ "commit": snap.commit() })))
-            };
-            run().unwrap_or_else(|reply| reply)
-        });
-    }
-    ws.manager_on()?;
+    // v2: what memory holds, by search (the v1 notes are migrated into it, M20.3).
+    let ask = memory_ask(ws, caller, op)?;
     let query = arg(op, "query").trim().to_string();
-    let limit = op.number("limit").unwrap_or(20) as usize;
-    let data = &ws.manager.harness.data;
-    let notes = if query.is_empty() { memory::all(data) } else { memory::recall(data, &query, limit) };
-    let text = match (notes.is_empty(), query.is_empty()) {
-        (true, true) => "Nothing remembered yet. `glasscode manager remember \"<fact>\"` keeps one.".to_string(),
-        (true, false) => format!("Nothing in memory matches “{query}”."),
-        _ => notes.iter().take(limit.max(1)).map(|n| format!("{}  {}  ({}, {})", short(&n.id), n.text, n.source, day_of(n.updated.max(n.created)))).collect::<Vec<_>>().join("\n"),
-    };
-    answer(Reply::ok(text, Value::Array(notes.iter().take(limit.max(1)).map(|n| to_json(*n)).collect())))
+    let limit = op.number("limit").unwrap_or(20).clamp(1, 50) as usize;
+    memory_plan(Kind::Read, "search memory", move || {
+        let run = || -> Result<Reply, Reply> {
+            let snap = Memory::open().snapshot().map_err(memory_reply)?;
+            let key = if ask.everywhere { None } else { ask.key()? };
+            let scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
+            let hits = memstore::search::search(&snap, if query.is_empty() { "*" } else { &query }, &scope, limit).map_err(memory_reply)?;
+            Ok(Reply::ok(memstore::search::as_data(&hits, snap.commit()), json!({ "commit": snap.commit() })))
+        };
+        run().unwrap_or_else(|reply| reply)
+    })
 }
 
 /// `manager show <session> […]` and `manager show --view <screen>`: take the person there.
@@ -3112,7 +3061,7 @@ const NO_LEDGER_LIST: &str = "The work ledger is not running here (the journal i
 fn follow_up_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     // With the engine at v2, the work ledger's (M56.2).
-    if ws.control.engine_v2 && ws.work_ledger().is_none() {
+    if ws.work_ledger().is_none() {
         return Err(failed(NO_LEDGER_LIST));
     }
     let all = ws.follow_ups();
@@ -3171,13 +3120,9 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
 fn message_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     let all = op.on("all");
-    // v2: its own outbox alone (M56.2), empty until it is read; v1: data.json's.
+    // Its own outbox (M56.2), empty until it is read.
     let none = Vec::new();
-    let messages = match (&ws.round.outbox, ws.control.engine_v2) {
-        (Some(outbox), true) => &outbox.messages,
-        (None, true) => &none,
-        (_, false) => &ws.manager.harness.data.outbox,
-    };
+    let messages = ws.round.outbox.as_ref().map_or(&none, |outbox| &outbox.messages);
     let list: Vec<&OutMessage> = messages.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
     let text = if list.is_empty() { "No messages wait.".to_string() } else { list.iter().map(|m| message_line(m)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|m| to_json(*m)).collect())))
@@ -3198,15 +3143,11 @@ fn message_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let about = op.text("about").map(str::to_string);
     plan(Kind::Board, format!("draft a message to {to}: “{}”", clip(&body, 80)), move |ws, r, _, cx| {
         let settings = ws.state.manager.clone();
-        let message = if ws.control.engine_v2 {
+        let message = {
             match ws.v2_draft_message(&to, &body, &why, about.as_deref()) {
                 Some(message) => message,
                 None => return ws.reply(r, failed("The manager's outbox is not read yet (or could not be): nothing was drafted.")),
             }
-        } else {
-            let message = messages::draft(&mut ws.manager.harness.data, &settings, &to, &body, &why, about.as_deref(), now());
-            ws.manager.harness.dirty = true;
-            message
         };
         cx.notify();
         let text = match (message.state, message.tier) {
@@ -3232,11 +3173,9 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     if !caller.is_person() {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
-    // v2: its own outbox alone (M56.2); one not read holds every decision. v1: data.json's.
-    let outbox = match (&ws.round.outbox, ws.control.engine_v2) {
-        (Some(outbox), true) => &outbox.messages,
-        (None, true) => return Err(failed("The manager's outbox is not read yet (or could not be): nothing was decided.")),
-        (_, false) => &ws.manager.harness.data.outbox,
+    // Its own outbox (M56.2); one not read holds every decision.
+    let Some(outbox) = ws.round.outbox.as_ref().map(|outbox| &outbox.messages) else {
+        return Err(failed("The manager's outbox is not read yet (or could not be): nothing was decided."));
     };
     let message = pick(outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
     if !matches!(message.state, MsgState::Draft | MsgState::Failed) {
@@ -3246,15 +3185,12 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
         return Err(failed(format!("{} never sends a message like this one. Write to {} yourself.", settings.name, message.to)));
     }
     let edited = op.text("text").map(str::to_string).filter(|_| allow);
-    plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, cx| {
-        let after = if ws.control.engine_v2 {
+    plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, _| {
+        let after = {
             match ws.v2_decide_message(&message.id, allow, edited) {
                 Some(after) => after,
                 None => return ws.reply(r, failed(format!("The message to {} is no longer in the outbox: nothing was decided.", message.to))),
             }
-        } else {
-            ws.manager_decide_message(&message.id, allow, edited, cx);
-            ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message)
         };
         let text = if allow { format!("Allowed. The message to {} goes out.", after.to) } else { format!("Rejected the message to {}.", after.to) };
         ws.reply(r, Reply::ok(text, to_json(&after)));
@@ -3348,10 +3284,6 @@ pub(crate) fn to_json<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or_default()
 }
 
-/// "12 Nov" of a Unix time.
-pub(crate) fn day_of(unix: u64) -> String {
-    glasscode_core::day::short(glasscode_core::day::local(unix as i64))
-}
 
 /// A relative path is from where the command was run.
 pub(crate) fn expand(path: &str, base: Option<&Path>) -> PathBuf {
@@ -3669,10 +3601,15 @@ mod tests {
                 .map(|(i, _)| body[i + 6..].split(|c: char| !c.is_alphanumeric()).next().unwrap())
                 .collect();
             let starts = body.contains("new_session_plan(");
-            // `answer` and `read_later` plan a read.
+            // `answer` and `read_later` plan a read; a send is a queued delivery
+            // (`session_send_queued`, whose plan is `Kind::Send`).
             let reads = body.contains("answer(") || body.contains("read_later(");
-            assert!(!kinds.is_empty() || starts || reads, "{op} plans nothing");
-            if kinds.is_empty() && !starts {
+            let queued = body.contains("session_send_queued(");
+            if queued {
+                assert_eq!(spec.kind_v1, Kind::Send, "{op}");
+            }
+            assert!(!kinds.is_empty() || starts || reads || queued, "{op} plans nothing");
+            if kinds.is_empty() && !starts && !queued {
                 assert_eq!(spec.kind_v1, Kind::Read, "{op} reads, its v1 kind is {:?}", spec.kind_v1);
             }
             for kind in &kinds {
@@ -3760,22 +3697,22 @@ mod tests {
 
     #[test]
     fn replies_say_their_op() {
-        let failed_reply = with_op(failed("No."), Some("board.done"), false);
+        let failed_reply = with_op(failed("No."), Some("board.done"));
         let Reply::Done { code: 1, data, .. } = &failed_reply else { panic!("{failed_reply:?}") };
         assert_eq!(*data, json!({ "op": "board.done", "error_code": "failed" }));
         // A registry error keeps its own class and candidates.
         let ambiguous = OpError::new(ErrorCode::Ambiguous { candidates: vec![ops::Candidate { id: "a".into(), title: "A".into(), project: None }] }, "which?");
-        let Reply::Done { code, data, text } = with_op(error_reply(&ambiguous), Some("session.show"), false) else { panic!() };
+        let Reply::Done { code, data, text } = with_op(error_reply(&ambiguous), Some("session.show")) else { panic!() };
         assert_eq!((code, text.as_str()), (2, "which?"));
         assert_eq!(data["error_code"], json!("ambiguous"));
         assert_eq!(data["candidates"][0]["id"], json!("a"));
         assert_eq!(data["op"], json!("session.show"));
-        // A success's data stays as it was with v1 (the command prints it for --json).
-        for data in [json!({ "id": "x" }), json!([1, 2]), Value::Null] {
-            assert_eq!(with_op(Reply::ok("Done.", data.clone()), Some("board.add"), false).clone_data(), data);
+        // A success's data gains its op where it is an object, and is as it was otherwise.
+        for data in [json!([1, 2]), Value::Null] {
+            assert_eq!(with_op(Reply::ok("Done.", data.clone()), Some("board.add")).clone_data(), data);
         }
-        assert_eq!(with_op(Reply::ok("Done.", json!({ "id": "x" })), Some("board.add"), true).clone_data(), json!({ "id": "x", "op": "board.add" }));
-        assert_eq!(with_op(Reply::ok("Done.", json!([1])), Some("session.list"), true).clone_data(), json!([1]));
+        assert_eq!(with_op(Reply::ok("Done.", json!({ "id": "x" })), Some("board.add")).clone_data(), json!({ "id": "x", "op": "board.add" }));
+        assert_eq!(with_op(Reply::ok("Done.", json!([1])), Some("session.list")).clone_data(), json!([1]));
     }
 
     trait Data {
@@ -3888,7 +3825,7 @@ mod tests {
                 let at = format!("{file} {}", case["words"]);
                 if let Some(error) = case.get("error") {
                     let error: OpError = serde_json::from_value(error.clone()).unwrap();
-                    let Reply::Done { code, text, .. } = with_op(error_reply(&error), None, false) else { unreachable!() };
+                    let Reply::Done { code, text, .. } = with_op(error_reply(&error), None) else { unreachable!() };
                     if (code, text.as_str()) != (v1["exit"].as_i64().unwrap() as i32, v1["says"].as_str().unwrap_or_default()) {
                         failures.push(format!("{at}: the app replies {code} {text:?}"));
                     }

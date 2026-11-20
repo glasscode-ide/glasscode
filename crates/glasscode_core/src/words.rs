@@ -572,8 +572,6 @@ impl InputLine {
 /// What the ledger keeps in this process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Nothing (the engine is v1, and no measuring).
-    Off,
     /// Counts only, never text (proof P09).
     Measure,
     /// Records with their text (a v2 home).
@@ -583,22 +581,15 @@ pub enum Mode {
 /// `GLASSCODE_WORDS_MEASURE=1`: measure-only mode, in any home.
 pub const MEASURE_VARIABLE: &str = "GLASSCODE_WORDS_MEASURE";
 
-/// The mode, once decided: 0 not yet, then [`Mode`] as 1, 2, 3.
+/// The mode, once decided: 0 not yet, then [`Mode`] as 1, 2.
 static MODE: AtomicU8 = AtomicU8::new(0);
 
-/// The mode of this process, decided at the first ask: [`MEASURE_VARIABLE`], else a v2 engine,
-/// else off. The first ask reads the engine switch: the writer thread asks, never a caller.
+/// The mode of this process, decided at the first ask: [`MEASURE_VARIABLE`], else the ledger.
 pub fn mode() -> Mode {
     if let Some(mode) = known_mode() {
         return mode;
     }
-    let mode = if std::env::var(MEASURE_VARIABLE).is_ok_and(|v| v == "1") {
-        Mode::Measure
-    } else if crate::store::EngineSwitch::current().engine == crate::store::Engine::V2 {
-        Mode::Ledger
-    } else {
-        Mode::Off
-    };
+    let mode = if std::env::var(MEASURE_VARIABLE).is_ok_and(|v| v == "1") { Mode::Measure } else { Mode::Ledger };
     MODE.store(mode as u8 + 1, Ordering::Relaxed);
     mode
 }
@@ -610,9 +601,8 @@ pub fn decide_again() {
 
 fn known_mode() -> Option<Mode> {
     match MODE.load(Ordering::Relaxed) {
-        1 => Some(Mode::Off),
-        2 => Some(Mode::Measure),
-        3 => Some(Mode::Ledger),
+        1 => Some(Mode::Measure),
+        2 => Some(Mode::Ledger),
         _ => None,
     }
 }
@@ -650,7 +640,7 @@ pub fn record(origin: Origin, text: &str, session: Option<&str>, project: Option
 pub fn record_with(origin: Origin, text: &str, untyped: &[Range<usize>], session: Option<&str>, project: Option<&ProjectKey>) -> WordsId {
     let id = WordsId::new();
     let mode = known_mode();
-    if mode == Some(Mode::Off) || text.is_empty() {
+    if text.is_empty() {
         return id;
     }
     let spans = spans_of(&origin, text, untyped);
@@ -778,9 +768,6 @@ fn machine() -> Option<MachineId> {
 }
 
 fn write_batch(drafts: Vec<Draft>) {
-    if mode() == Mode::Off {
-        return;
-    }
     let Some(machine) = machine() else { return };
     let stamps = match crate::identity::next_stamps(&machine, drafts.len()) {
         Ok(stamps) => stamps,
@@ -1116,24 +1103,20 @@ mod tests {
 
     use super::*;
 
-    /// A v2 scratch home of the test's own (or a v1 one, or one measuring), until dropped.
+    /// A scratch home of the test's own (or one measuring), until dropped.
     struct Home {
         dir: tempfile::TempDir,
         before: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl Home {
-        fn new(engine: Option<&str>, measure: bool) -> Home {
+        fn new(measure: bool) -> Home {
             let dir = tempfile::tempdir().unwrap();
-            let names = ["GLASSCODE_HOME", crate::store::ENGINE_VARIABLE, MEASURE_VARIABLE];
+            let names = ["GLASSCODE_HOME", MEASURE_VARIABLE];
             let before = names.map(|name| (name, std::env::var_os(name))).to_vec();
             // SAFETY: the core tests run one at a time (`--test-threads=1`).
             unsafe {
                 std::env::set_var("GLASSCODE_HOME", dir.path());
-                match engine {
-                    Some(engine) => std::env::set_var(crate::store::ENGINE_VARIABLE, engine),
-                    None => std::env::remove_var(crate::store::ENGINE_VARIABLE),
-                }
                 if measure {
                     std::env::set_var(MEASURE_VARIABLE, "1");
                 } else {
@@ -1145,7 +1128,7 @@ mod tests {
         }
 
         fn v2() -> Home {
-            Home::new(Some("v2"), false)
+            Home::new(false)
         }
 
         fn files(&self) -> Vec<PathBuf> {
@@ -1211,11 +1194,6 @@ mod tests {
         // The next such prompt is the typed one.
         assert_eq!(match_prompt("s1", "run   the tests ", now()), Some(typed.clone()));
         assert_eq!(get(&typed).tier(), Tier::One);
-        // Nothing matches with the ledger off (a v1 home).
-        drop(_home);
-        let _v1 = Home::new(None, false);
-        record(Origin::Composer(ComposerKind::ChatView), "run the tests", Some("s1"), None);
-        assert_eq!(match_prompt("s1", "run the tests", now()), None);
     }
 
     #[test]
@@ -1382,7 +1360,7 @@ mod tests {
 
     #[test]
     fn measure_only_mode_keeps_no_text_even_in_a_v1_home() {
-        let home = Home::new(None, true);
+        let home = Home::new(true);
         let id = record_with(Origin::TerminalKeys, "deploy with API_KEY=abcdef123456 please", &[7..10], Some("s1"), None);
         record(Origin::Composer(ComposerKind::TodayBox), "fix the login bug", None, None);
         flush();
@@ -1398,14 +1376,6 @@ mod tests {
         assert_eq!(measured.quote("deploy"), None);
     }
 
-    #[test]
-    fn a_v1_home_writes_nothing() {
-        let home = Home::new(None, false);
-        record(Origin::Composer(ComposerKind::TodayBox), "fix the login bug", None, None);
-        flush();
-        assert!(home.files().is_empty(), "{:?}", home.files());
-        assert_eq!(mode(), Mode::Off);
-    }
 
     #[test]
     fn bad_and_torn_lines_are_skipped() {

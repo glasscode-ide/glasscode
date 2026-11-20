@@ -19,6 +19,8 @@
 #      chip
 #   5  a memory note is proposed and accepted; a new session's SessionStart brief has it
 #   6  data export, forget a project, import: the note goes and comes back
+#   8  a smoke test of the chat and Today: a task on the board, Today shown, the chat answering
+#      from code and from its brain
 #   7  quiet hours hold a notification; when they end (the app's debug clock starts at 06:58, so
 #      22-7 ends a couple of minutes in), the digest follows
 #
@@ -33,8 +35,8 @@ for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
     --keep) KEEP=1 ;;
-    [1-7]) ONLY+=("$arg") ;;
-    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-7]…" >&2; exit 2 ;;
+    [1-8]) ONLY+=("$arg") ;;
+    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-8]…" >&2; exit 2 ;;
   esac
 done
 wanted() { [ ${#ONLY[@]} -eq 0 ] && return 0; local j; for j in "${ONLY[@]}"; do [ "$j" = "$1" ] && return 0; done; return 1; }
@@ -84,7 +86,7 @@ mkdir -p "$T/bin" && ln -sf "$APPBIN" "$T/bin/glasscode"
 scratch() {
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" "$@" )
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" "$@" )
 }
 gc() { scratch "$APPBIN" cli "$@"; }
 # keys <line>: the person types it (in the active terminal; `chat:<text>` in the Manager chat box).
@@ -168,6 +170,7 @@ json.dump({
     "replies": [
         {"when": "go to the session", "steps": [init, think, {"at": 0, "to": "mcp", "tool": "ui_open", "arguments": {"place": session}}, *answer("Opened it: {{tool_result}}")]},
         {"when": "what's happening there", "steps": [init, think, {"at": 0, "to": "mcp", "tool": "session_show", "arguments": {"session": session}}, *answer("There: {{tool_result}}")]},
+        {"when": "plan my afternoon", "steps": [init, *answer("Start with the release notes, then the review.")]},
     ],
 }, open(path, "w"), indent=1)
 EOF
@@ -182,7 +185,7 @@ start_app() {
   fi
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" GLASSCODE_DEBUG_CLOCK="${CLOCK:-}" RUST_LOG=info \
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" GLASSCODE_DEBUG_CLOCK="${CLOCK:-}" RUST_LOG=info \
       "$APPBIN" ) > "$T/app.log" 2>&1 &
   APP=$!
   if ! wait_for 60 own_socket; then say "the scratch app did not open its socket (log: $T/app.log)"; exit 1; fi
@@ -360,6 +363,30 @@ journey7() {
 
 # Journeys 2, 4, 5 and 6 share one app (and its shell tab).
 
+# chat_said <words>: the manager said them in the conversation.
+chat_said() { cat "$T"/home/glasscode/manager/conversation/*.jsonl 2>/dev/null | python3 -c "
+import json, sys
+sys.exit(0 if any(d.get('record') == 'item' and d['kind'].get('type') == 'manager' and sys.argv[1] in d['text'] for d in map(json.loads, sys.stdin)) else 1)" "$1"; }
+
+on_board() { [ "$(board_count "$1")" -ge 1 ]; }
+
+journey8() {
+  say "8. Smoke: the chat and Today"
+  make_home
+  start_app allow
+  gc board add "Ship the release notes" --due tomorrow > "$T/j8-add.txt" 2>&1
+  check "a task goes on the board" on_board "Ship the release notes"
+  # A program's "show Today" waits while the person is in a session; the person's own click goes.
+  gc ui open today > "$T/j8-today.txt" 2>&1
+  check "a program's \"show Today\" does not take the window from a session" grep -q "Not shown now" "$T/j8-today.txt"
+  keys 'op:ui.open {"place":"today","go":true}'
+  check "the person's Today is shown" wait_for 10 shown "today"
+  keys "chat:what needs me?"
+  check "the chat answers from code" wait_for 30 chat_said "need"
+  keys "chat:plan my afternoon"
+  check "the chat answers from its brain" wait_for 60 chat_said "Start with the release notes"
+}
+
 say "Journeys in $T"
 wanted 1 && journey1
 if wanted 2 || wanted 4 || wanted 5 || wanted 6; then
@@ -374,6 +401,7 @@ if wanted 2 || wanted 4 || wanted 5 || wanted 6; then
 fi
 wanted 3 && journey3
 wanted 7 && journey7
+wanted 8 && journey8
 say ""
 say "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

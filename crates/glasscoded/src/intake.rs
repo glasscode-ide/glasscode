@@ -39,10 +39,6 @@ static WHY_NOT: Mutex<Option<String>> = Mutex::new(None);
 
 /// Why intake does not run here now (none: it may), and the home's generation when it may.
 fn not_here() -> Result<u64, String> {
-    use glasscode_core::store::{Engine, EngineSwitch};
-    if EngineSwitch::current().engine != Engine::V2 {
-        return Err("the engine here is v1".into());
-    }
     let generation = crate::home::server_generation().ok_or("the manager's home is the Mac, which runs intake")?;
     let copy = glasscode_core::gate::FromMac::load().map_err(|err| format!("the Mac's approved authority cannot be read ({err})"))?;
     if copy.from.is_none() {

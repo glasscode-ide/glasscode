@@ -48,10 +48,6 @@ static NOTICES: Mutex<Vec<ServerNotice>> = Mutex::new(Vec::new());
 /// Why the follow-ups do not run here now (none: they may), and the home's generation and what
 /// the Mac said for them when they may.
 fn not_here() -> Result<(u64, FollowUpsFromMac), String> {
-    use glasscode_core::store::{Engine, EngineSwitch};
-    if EngineSwitch::current().engine != Engine::V2 {
-        return Err("the engine here is v1".into());
-    }
     let generation = crate::home::server_generation().ok_or("the manager's home is the Mac, which follows them")?;
     let said = crate::brain::from_mac().ok_or("the Mac has not said how the manager runs yet")?;
     if !said.enabled {
@@ -213,7 +209,6 @@ mod tests {
     use super::*;
     use glasscode_core::manager::Blocker;
     use glasscode_core::remote::{ManagerFromMac, Teammate};
-    use glasscode_core::store::{Engine, EngineSwitch};
 
     fn said() -> FollowUpsFromMac {
         FollowUpsFromMac { me: Some("robin".into()), people: vec![Teammate { name: "Sam".into(), github: "sam-dev".into() }] }
@@ -247,11 +242,8 @@ mod tests {
     }
 
     #[test]
-    fn they_run_here_only_on_a_v2_server_that_is_home_with_them_on() {
+    fn they_run_here_only_on_a_server_that_is_home_with_them_on() {
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
-        assert!(not_here().unwrap_err().contains("v1"));
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
         assert!(not_here().unwrap_err().contains("not said"));
         crate::brain::keep_from_mac(ManagerFromMac { enabled: true, ..ManagerFromMac::default() });
         assert!(not_here().unwrap_err().contains("off on the Mac"));
@@ -260,7 +252,6 @@ mod tests {
         crate::brain::keep_from_mac(ManagerFromMac { enabled: true, follow_ups: Some(said()), ..ManagerFromMac::default() });
         // With no home record, the server is home (generation 0).
         assert_eq!(not_here(), Ok((0, said())));
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
     }
 
     /// A round here: the reviews the person gave become follow-ups (stamped, so the sync takes
@@ -270,7 +261,6 @@ mod tests {
     #[test]
     fn a_round_here_follows_the_reviews_and_tells_once() {
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
         crate::brain::keep_from_mac(ManagerFromMac { enabled: true, follow_ups: Some(said()), ..ManagerFromMac::default() });
         let _ = take_notices();
         let machine = crate::owners::machine().unwrap();
@@ -310,6 +300,5 @@ mod tests {
         assert_eq!(lines.iter().filter(|l| l.contains("ready for you to look again")).count(), 1, "{lines:?}");
         let fixed_mark = WorkLedger::load().unwrap().follow_changed(&machine, None).into_iter().find(|f| f.follow.number == 1111).and_then(|f| f.fixed);
         assert!(fixed_mark.is_some(), "the mark goes with the follow-up");
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
     }
 }

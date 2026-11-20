@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 use glasscode_core::github::{self, PreviewConfig};
-use glasscode_core::manager::gh::GivenReview;
 use glasscode_core::manager::harness::Harness;
 use glasscode_core::control::Reply;
 use glasscode_core::manager::{ChatLine, InMessage, PanelTab, Scene, Settings, Show, TestLine, TourStop, Who, followups, messages, scene};
@@ -74,12 +73,9 @@ pub struct ScenePlay {
 
 /// What a background job hands back to the main thread (through `ManagerUi::jobs`).
 pub enum Done {
-    Reviews(Result<Vec<GivenReview>, String>),
     Inbox(Result<Vec<InMessage>, String>),
     /// An outbox message was sent, or not.
     Sent { id: String, result: Result<(), String> },
-    /// The person's GitHub login.
-    Me(Option<String>),
 }
 
 pub struct ManagerUi {
@@ -106,9 +102,7 @@ pub struct ManagerUi {
     /// Background jobs report here; `manager_tick` reads it.
     pub jobs: (async_channel::Sender<Done>, async_channel::Receiver<Done>),
     pub last_round: Option<Instant>,
-    pub last_reviews: Option<Instant>,
     pub last_inbox: Option<Instant>,
-    pub reviews_running: bool,
     pub inbox_running: bool,
     /// The server test in Settings: running, and its lines.
     pub testing: bool,
@@ -149,9 +143,7 @@ impl ManagerUi {
             me: None,
             jobs: async_channel::unbounded(),
             last_round: None,
-            last_reviews: None,
             last_inbox: None,
-            reviews_running: false,
             inbox_running: false,
             testing: false,
             test: None,
@@ -336,7 +328,7 @@ impl Workspace {
         let text = text.into();
         // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
         // still say goes there too (the person's own lines are posted by the chat, M52.1).
-        if self.control.engine_v2 && who != Who::You {
+        if who != Who::You {
             self.chat_post_line(who == Who::System, text.clone());
         }
         let chat = &mut self.manager.harness.data.chat;
