@@ -452,6 +452,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "try a paused study again", "move_in_study_step", "Only you can start the study again.", Place::Settings(Section::Manager)),
     person("Manager", "answer or skip a question of moving in", "move_in_answer", "Only you can answer what moving in asks.", Place::Settings(Section::Manager)),
     person("Manager", "export your data to Downloads", "data_export_now", "Only you can export your data.", Place::Settings(Section::Manager)),
+    person("Manager", "import an export", "data_import_pick", "Only you can import an export.", Place::Settings(Section::Manager)),
     person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
     person("Manager", "set how often your data is exported by itself", "data_schedule_set", "Only you choose where your data goes.", Place::Settings(Section::Manager)),
     person("Manager", "give Claude its notes back (move out)", "data_move_out_now", "Only you move your notes out.", Place::Settings(Section::Manager)),
