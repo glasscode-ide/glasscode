@@ -499,6 +499,11 @@ impl Workspace {
                         Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
                     ),
                     row(
+                        "Import",
+                        "An export from another Mac (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
+                        Some(crate::ui::button("data-import", "Import an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_import_pick(cx))).into_any_element()),
+                    ),
+                    row(
                         "Export by itself",
                         self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
                         Some(

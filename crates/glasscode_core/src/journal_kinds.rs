@@ -160,7 +160,7 @@ kinds! {
     MESSAGE_SENT = "message.sent", Notice, "crates/glasscode/src/journal_ui.rs", "message id, to, channel", "Activity";
     MESSAGE_FAILED = "message.failed", Warn, "crates/glasscode/src/journal_ui.rs", "message id, why", "Activity";
     TICKET_CHANGED = "ticket.changed", Info, "planned:M33.2", "ticket, state, before", "M32";
-    USAGE_THRESHOLD = "usage.threshold", Warn, "planned:M41", "account, window, percent", "M41";
+    USAGE_THRESHOLD = "usage.threshold", Warn, "crates/glasscode_core/src/journal.rs", "account, window, percent", "M41";
     // ----- the app and the machine
     APP_STARTED = "app.started", Info, "crates/glasscode/src/journal_ui.rs", "version, build", "reconciler";
     APP_QUIT = "app.quit", Info, "crates/glasscode/src/journal_ui.rs", "running sessions", "M30 (AppQuit turns)";
@@ -172,8 +172,8 @@ kinds! {
     // ----- the manager's wakes: M51
     CHAT_TURN = "chat.turn", Info, "crates/glasscode_core/src/runtime/chat.rs", "first text (ms after the message), whole turn (ms), how it ended, the brain", "the time budget (ux-m3)";
     WAKE_DROPPED = "wake.dropped", Info, "crates/glasscode_core/src/runtime/lanes.rs", "key, why (stale, past its deadline, cancelled), events", "Activity";
-    LINK_LOST = "link.lost", Warn, "planned:M58", "the server, since", "M58";
-    LINK_BACK = "link.back", Info, "planned:M58", "the server, after (ms)", "M58";
+    LINK_LOST = "link.lost", Warn, "crates/glasscode_core/src/journal.rs", "the server, since", "M58";
+    LINK_BACK = "link.back", Info, "crates/glasscode_core/src/journal.rs", "the server, after (ms)", "M58";
     CLOCK_JUMPED = "clock.jumped", Warn, "crates/glasscode_core/src/journal.rs", "by (ms)", "M41";
     CLOCK_ZONE = "clock.zone", Notice, "crates/glasscode_core/src/journal.rs", "offset before and after (minutes)", "M41";
     // ----- the reconciler (D24's safety net): what no event explained

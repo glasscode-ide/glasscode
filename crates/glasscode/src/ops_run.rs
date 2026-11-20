@@ -2211,6 +2211,32 @@ impl Workspace {
         .detach();
     }
 
+    /// Settings › Manager › Your data: an export picked in the file dialog, imported as
+    /// `glasscode data import <file>` does (the person's own click).
+    pub(crate) fn data_import_pick(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |ws, cx| {
+                ws.show_toast(format!("Importing {}…", home_relative(&path)), cx);
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |ws, cx| match result {
+                        Ok(done) => ws.show_toast(
+                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.", done.memory_files, done.project_keys, done.words_records, done.set_aside),
+                            cx,
+                        ),
+                        Err(err) => ws.show_toast(format!("Could not import: {err:#}"), cx),
+                    });
+                })
+                .detach();
+            });
+        })
+        .detach();
+    }
+
     /// Settings › Manager › Your data: what uninstall would do, to confirm.
     pub(crate) fn data_uninstall_ask(&mut self, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move { glasscode_core::portability::uninstall_plan() });
