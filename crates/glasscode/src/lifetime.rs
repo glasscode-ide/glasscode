@@ -36,6 +36,77 @@ const EVERY: Duration = Duration::from_secs(30);
 pub const RESTART_WAIT: Duration = Duration::from_secs(10 * 60);
 /// A wall clock ahead of the monotonic one by more than this between two ticks: the Mac slept.
 const WOKE_GAP_MS: u64 = 60_000;
+/// A move of v1's data that failed runs again after this long.
+const MIGRATE_AGAIN: Duration = Duration::from_secs(60);
+/// After this many failed moves in a row the person is told, and v2 takes over on what moved.
+pub const MIGRATE_TRIES: u32 = 3;
+
+/// v1's data on its way into the v2 stores (M44's `migrate_v2::run`, then M20.3's notes), at each
+/// start on the home, again every minute until both worked. Each step is idempotent, so a later
+/// run fills in what an earlier one left.
+#[derive(Default)]
+pub struct Migration {
+    /// A run is in flight.
+    running: bool,
+    /// When the last run started, or the home was last looked for.
+    at: Option<Instant>,
+    /// Both moves worked in this run (or a run before did them: the marker).
+    pub done: bool,
+    /// `data.json`'s move worked (the notes may still wait).
+    pub data_ok: bool,
+    /// The runs that failed in a row, and the last reason.
+    pub failures: u32,
+    pub error: Option<String>,
+    /// The person was told about the failures (once a run).
+    told: bool,
+}
+
+impl Migration {
+    /// Whether v2 may take over from v1's harness: once the data moved, or after
+    /// [`MIGRATE_TRIES`] failed runs, on what did move. The take-over never waits longer: with
+    /// v1's rules gone (M56 row 2) nobody would act meanwhile.
+    pub fn may_take_over(&self) -> bool {
+        self.data_ok || self.failures >= MIGRATE_TRIES
+    }
+
+    /// Whether a run is in flight.
+    pub fn running_now(&self) -> bool {
+        self.running
+    }
+
+    /// Whether a run is due now.
+    fn due(&self) -> bool {
+        !self.done && !self.running && self.at.is_none_or(|at| at.elapsed() >= MIGRATE_AGAIN)
+    }
+
+    /// A run came back: the data's move and the notes' move. True when the person is to be told
+    /// now (the [`MIGRATE_TRIES`]th failure in a row, once).
+    fn finished(&mut self, data: Result<(), String>, notes: Result<(), String>) -> bool {
+        self.running = false;
+        self.data_ok |= data.is_ok();
+        match data.and(notes) {
+            Ok(()) => {
+                self.done = true;
+                self.failures = 0;
+                self.error = None;
+                false
+            }
+            Err(why) => {
+                self.failures += 1;
+                self.error = Some(why);
+                let tell = self.failures >= MIGRATE_TRIES && !self.told;
+                self.told |= tell;
+                tell
+            }
+        }
+    }
+}
+
+/// The notice after the failed runs.
+pub fn migration_notice(why: &str) -> String {
+    let why = why.trim().trim_end_matches('.');
+    format!("Moving the old manager's data failed: {why}. Retrying; nothing is lost.")
+}
 
 #[derive(Default)]
 pub struct Lifetime {
@@ -62,15 +133,12 @@ pub struct Lifetime {
     /// "Restart to update" waits until this time at the latest.
     pub restart_by: Option<Instant>,
     restart_now: bool,
-    /// v1's data was moved into the v2 stores in this run (or it was done before) (M44).
-    migrated: bool,
-    /// ... and the move worked: v2 may take over from v1's harness (`handover`).
-    pub migrated_ok: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// v1's data into the v2 stores (M44, M20.3): v2 takes over from v1's harness once
+    /// `may_take_over` (`handover`).
+    pub migration: Migration,
     /// The schedules that run here now (approved and on), from the last schedule round: a v1
     /// check whose schedule runs is left to it.
     pub scheduled: std::collections::BTreeSet<String>,
-    /// When the migration was last looked at (it waits for this Mac to be home).
-    migrate_at: Option<Instant>,
 }
 
 /// Where "Switch now" is (M56 step 1).
@@ -118,6 +186,63 @@ impl Workspace {
         .detach();
     }
 
+    /// Move v1's data and notes into the v2 stores, off the main thread (`Migration`).
+    fn migration_run(&mut self, cx: &mut Context<Self>) {
+        self.lifetime.migration.running = true;
+        let task = cx.background_spawn(async move {
+            let data = match glasscode_core::manager::migrate_v2::run(true) {
+                Ok(report) => {
+                    log::info!("manager: v1's data is in the v2 stores ({report:?})");
+                    Ok(())
+                }
+                Err(why) => {
+                    log::info!("manager: v1's data was not moved: {why}");
+                    Err(why)
+                }
+            };
+            // M20.3: v1's notes and the voice copilot's facts into memory, as "learned (v1)"
+            // entries and proposals. Running it again adds nothing (the same text is there).
+            let notes = match glasscode_core::memstore::migrate::run(&glasscode_core::memstore::Memory::open()) {
+                Ok(report) => {
+                    if report != Default::default() {
+                        log::info!("memory: v1's notes are in memory ({report:?})");
+                    }
+                    Ok(())
+                }
+                Err(why) => {
+                    log::info!("memory: v1's notes were not brought in: {why}");
+                    Err(format!("v1's notes did not move into memory ({why})"))
+                }
+            };
+            (data, notes)
+        });
+        cx.spawn(async move |this, cx| {
+            let (data, notes) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.lifetime.migration.finished(data, notes) {
+                    let why = this.lifetime.migration.error.clone().unwrap_or_default();
+                    this.notify_manager("The old manager's data".to_string(), migration_notice(&why), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Try again" in Settings › Manager: the move runs now (on the home), not in a minute.
+    pub(crate) fn migration_retry(&mut self, cx: &mut Context<Self>) {
+        if self.lifetime.migration.running || self.lifetime.migration.done {
+            return;
+        }
+        self.lifetime.migration.at = Some(Instant::now());
+        if self.acts_as_home() {
+            self.migration_run(cx);
+        } else {
+            self.show_toast("This Mac is not the manager's home right now: the move runs once it is.", cx);
+        }
+        cx.notify();
+    }
+
     /// The titles of the sessions an automation turn runs in now: started or driven by a playbook
     /// or the manager (`gate::SessionOrigin`), and working.
     /// While the origins are not read (or could not be), none counts: a quit is never held on a
@@ -146,31 +271,13 @@ impl Workspace {
         if !self.control.engine_v2 {
             return;
         }
-        // M44: v1's data.json moves into the v2 stores, on the home, off the main thread: once a
-        // run, and again a minute later when this Mac was not home yet (it may gain the lease).
-        if !self.lifetime.migrated && self.lifetime.migrate_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
-            self.lifetime.migrate_at = Some(Instant::now());
+        // M44: v1's data.json moves into the v2 stores, on the home, off the main thread: at the
+        // start, and again a minute later when this Mac was not home yet (it may gain the lease)
+        // or the move failed.
+        if self.lifetime.migration.due() {
+            self.lifetime.migration.at = Some(Instant::now());
             if self.acts_as_home() {
-                self.lifetime.migrated = true;
-                let ok = self.lifetime.migrated_ok.clone();
-                cx.background_spawn(async move {
-                    match glasscode_core::manager::migrate_v2::run(true) {
-                        Ok(report) => {
-                            log::info!("manager: v1's data is in the v2 stores ({report:?})");
-                            ok.store(true, std::sync::atomic::Ordering::SeqCst);
-                        }
-                        Err(why) => log::info!("manager: v1's data was not moved: {why}"),
-                    }
-                    // M20.3: v1's notes and the voice copilot's facts into memory, as "learned
-                    // (v1)" entries and proposals. Running it again adds nothing (the same text is
-                    // there), so it keeps in step while v1's manager still writes notes.
-                    match glasscode_core::memstore::migrate::run(&glasscode_core::memstore::Memory::open()) {
-                        Ok(report) if report != Default::default() => log::info!("memory: v1's notes are in memory ({report:?})"),
-                        Ok(_) => {}
-                        Err(why) => log::info!("memory: v1's notes were not brought in: {why}"),
-                    }
-                })
-                .detach();
+                self.migration_run(cx);
             }
         }
         // M42: what the quiet hours held, as one notification when they end.
@@ -454,5 +561,39 @@ fn schedule_caller(schedule: &Schedule) -> crate::control_ui::Caller {
         cwd: None,
         project: None,
         drive: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M56: a move of v1's data that fails runs again, the person hears of it once at the third
+    /// failure in a row, and v2 takes over then on what moved, or as soon as the data moved; the
+    /// notes alone failing never holds the take-over.
+    #[test]
+    fn a_failed_migration_is_retried_told_once_and_never_blocks_v2() {
+        let mut m = Migration::default();
+        assert!(m.due() && !m.may_take_over());
+        m.running = true;
+        assert!(!m.due(), "one run at a time");
+        assert!(!m.finished(Err("data.json does not read".into()), Ok(())));
+        assert!(!m.finished(Err("data.json does not read".into()), Ok(())));
+        assert!(!m.may_take_over(), "two failures: v1's rules still act");
+        assert!(m.finished(Err("data.json does not read".into()), Ok(())), "the third failure tells the person");
+        assert!(m.may_take_over(), "after three failures v2 takes over on what moved");
+        assert!(!m.finished(Err("still".into()), Ok(())), "told once");
+        assert_eq!((m.failures, m.error.as_deref()), (4, Some("still")));
+        m.at = Some(Instant::now());
+        assert!(!m.due(), "the next run waits a minute");
+        m.at = Instant::now().checked_sub(MIGRATE_AGAIN);
+        assert!(m.due());
+        // The data moved, the notes did not: v2 takes over, and the notes run again.
+        let mut m = Migration::default();
+        assert!(!m.finished(Ok(()), Err("v1's notes did not move into memory (busy)".into())));
+        assert!(m.may_take_over() && !m.done && m.due());
+        assert!(!m.finished(Ok(()), Ok(())));
+        assert!(m.done && !m.due() && m.failures == 0 && m.error.is_none());
+        assert_eq!(migration_notice("data.json does not read."), "Moving the old manager's data failed: data.json does not read. Retrying; nothing is lost.");
     }
 }
