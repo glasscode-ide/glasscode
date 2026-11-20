@@ -349,6 +349,12 @@ impl Workspace {
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
+        // Going to sleep: the server hears it in one last sync (best effort).
+        let weak = cx.entity().downgrade();
+        let sleep = cx.on_system_sleep(move |cx| {
+            let _ = weak.update(cx, |this, cx| this.mirror_before_sleep(cx));
+        });
+        this.keep_subscription(sleep);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
         cx.on_app_quit(|this: &mut Workspace, cx| {
             this.update_on_quit();

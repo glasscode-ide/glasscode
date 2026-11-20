@@ -468,11 +468,16 @@ pub(crate) fn send_conversation(
                         .map(Path::to_path_buf)
                         .map_err(|_| anyhow!("unexpected conversation location"))?,
                 };
-                let target: PathBuf = client.call(
-                    "conversations.import_path",
-                    json!({ "account_id": server_account, "rel": rel }),
-                )?;
-                config.upload(&content, &target)?;
+                // The mirror holds most of it already: only the rest travels, else all of it.
+                let tail = send_tail(client, session, &file, server_account, &rel, server_worktree);
+                if let Err(err) = tail {
+                    log::info!("the whole conversation goes ({err:#})");
+                    let target: PathBuf = client.call(
+                        "conversations.import_path",
+                        json!({ "account_id": server_account, "rel": rel }),
+                    )?;
+                    config.upload(&content, &target)?;
+                }
                 resume = Some(id.clone());
             }
             // A Claude session without a transcript yet keeps its id (`--session-id`).
@@ -481,6 +486,27 @@ pub(crate) fn send_conversation(
         }
     }
     Ok((server_account, resume))
+}
+
+/// Send only what the server's mirror of this session's conversation lacks, then have it put the
+/// mirrored copy in place (`mirror.conversation_into`). An error: send the whole file instead.
+fn send_tail(client: &RemoteClient, session: &Session, file: &Path, server_account: &str, rel: &Path, server_worktree: &Path) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let have: u64 = client.call("mirror.conversation_size", json!({ "session_id": session.id }))?;
+    let bytes = std::fs::read(file)?;
+    let from = usize::try_from(have)?;
+    if from > bytes.len() {
+        bail!("the mirror's copy is longer than the conversation here");
+    }
+    for (i, chunk) in bytes[from..].chunks(crate::mirror::CHUNK).enumerate() {
+        let offset = from + i * crate::mirror::CHUNK;
+        client.call::<Value>("mirror.conversation", json!({ "session_id": session.id, "offset": offset, "data": base64::engine::general_purpose::STANDARD.encode(chunk) }))?;
+    }
+    client.call::<Value>(
+        "mirror.conversation_into",
+        json!({ "session_id": session.id, "account_id": server_account, "rel": rel, "from": session.worktree, "to": server_worktree }),
+    )?;
+    Ok(())
 }
 
 /// The request that resumes a session on the server.

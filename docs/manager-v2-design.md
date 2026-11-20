@@ -259,7 +259,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
-| `manager/conversation/` | `conversation` | JSON lines per topic | 90 days of text, summaries lasting | skip bad lines | yes | — | person | changes both ways (M57) |
+| `manager/conversation/` | `conversation` | JSON lines per topic (`<topic>.jsonl`): each line a whole version of an item or a topic, with its HLC stamp | 90 days of text, summaries and rollover links lasting | skip bad lines (and lines of a newer schema), which retention leaves in place | yes | — | person | changes both ways (M57): the newest stamp of each item and topic wins |
 | `manager/work.json` | `work` | JSON | until done plus 30 days | refuse; rebuilt by the reconciler | no | — | — | both ways (M57) |
 | `manager/data.json` (v1) | v1 `store` | JSON | read once by migration, then kept as `data.v1.json` | migration stops | — | — | — | — |
 | `glasscode-memory.json` (voice copilot) | `voice/memory.mjs` | JSON | migrated in M20.3, kept until D25 | — | — | — | — | — |
@@ -473,6 +473,12 @@ pub fn outside_rule(kind: control::Kind, settings: &AgentSettings) -> control::R
 pub const SHELL_WINDOW_MS: u64;       // 15 s
 pub fn note_typed_command(session: &str); pub fn typed_command_recently(session: &str) -> bool;  // only the time, never the line
 pub fn runs_glasscode(line: &str) -> bool;                                    // the line the cursor is on names the command
+// glasscoded's caller per connection (M13.2, the server-sync plan's phase 0a)
+pub const DAEMON_FEATURE: &str = "caller"; pub const DECLARE_METHOD: &str = "caller.declare";  // params: the Caller JSON
+pub struct DaemonConnection;          // undeclared is Ui; the first declaration wins; only machine, phone and ui are declared
+impl DaemonConnection { pub fn caller(&self) -> Caller; pub fn declare(&mut self, params: &Value) -> Result<Caller, String>; }
+pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: restart, shutdown, phones.add, caller.declare; owners.*: Machine only
+pub fn device_id_for_key(blob: &str) -> String; pub fn device_id_ok(id: &str) -> bool;  // gate --device <id>; "unknown" for older lines
 
 // glasscode_core::words
 pub enum ComposerKind { TodayBox, ManagerChat, ChatView }
@@ -498,6 +504,48 @@ pub fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()>;      
 pub struct Typed;      // a text box's untyped ranges: edit(replaced, inserted, typed), set(len, typed), untyped(), within(part)
 pub fn trimmed<'a>(text: &'a str, typed: &Typed) -> (&'a str, Vec<Range<usize>>);
 pub struct InputLine;  // a terminal view's line from the person's own keys and pastes: key(bytes) gives the line on Enter, paste, typed, clear
+
+// glasscode_core::conversation (M43) — manager/conversation/<topic>.jsonl; not a Store (JSON lines, newest stamp wins)
+pub struct ItemId(String);                                  // 24 hex, random; "v1-" + 21 hex of the content for an imported v1 line
+pub struct TopicId(String);                                 // a safe file name (ProjectKey's rules); parse and deserialize check it
+impl TopicId { pub fn parse(text: &str) -> Option<TopicId>; pub fn general() -> TopicId; }
+pub enum Ref { Session(String), Pr { repo: String, number: u64 }, Project(ProjectKey) }
+impl Ref { pub fn pr(repo: &str, number: u64) -> Ref; pub fn topic_id(&self) -> TopicId; }  // "pr-acme-app-42-1a2b3c": the same on every machine
+pub enum Author { Person, Chat, Wake(String), App, V1 }   // set by the writing side, never from the text
+pub enum Stream { Streaming, Stopped, Done }
+pub enum Kind { You { words: WordsId, reply_to: Option<ItemId> }, Manager { state: Stream }, Action { effect: String /* 64 hex */, event: Option<String> },
+                Nudge { matter: String }, Card { pending: String }, System, Error, Summary { through: Option<Hlc> },
+                Rollover { brain: String, summary: Option<ItemId> }, V1 { who: manager::Who } }  // Summary and Rollover last past retention
+pub struct Item { pub v: u16, pub id: ItemId, pub topic: TopicId, pub posted: Hlc, pub at: Hlc, pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub closed: bool }
+impl Item { pub fn words(&self) -> Option<&WordsId>; pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }  // no tier on disk: read from the words ledger, only while the text is the record's
+pub struct Topic { pub v: u16, pub id: TopicId, pub at: Hlc, pub title: String, pub key: Option<Ref>, pub merged_into: Option<TopicId>, pub split_from: Option<TopicId> }
+pub enum Record { Item(Item), Topic(Topic) }                // one line; an item goes to its topic's file, a topic to its own
+pub struct Draft { pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub topic: Option<TopicId> }
+pub const TEXT_DAYS: u64; /* 90 */ pub const SINCE_LIMIT: usize; /* 20 */ pub const IDLE_ROLLOVER_MS: u64; /* 4 h */ pub const ROLLOVER_ITEMS: usize; /* 200 */
+pub enum RollReason { NewDay, Idle, Size }
+pub fn rollover_due(started_ms: u64, last_ms: u64, now_ms: u64, items: usize) -> Option<RollReason>;  // the brain's conversation is fresh per day, after idling, past a size
+impl Conversation {                                         // pure, but the methods marked IO (never on the main thread; they refuse while the engine is v1)
+    pub fn from_records(now_ms: u64, records: impl IntoIterator<Item = Record>) -> Conversation;  // any order gives the same
+    pub fn take(&mut self, record: Record) -> bool;         // newest `at` of each id wins; an item posted more than 90 days ago is not taken
+    pub fn topic_for(&self, refs: &[Ref]) -> TopicId;       // a PR's or session's topic, or the PR or session topic of the first item naming it; a project only its own; else general
+    pub fn resolve(&self, topic: &TopicId) -> TopicId;      // through merges; a circle of merges holds for neither
+    pub fn topics(&self) -> Vec<&Topic>; pub fn topic_items(&self, topic: &TopicId) -> Vec<&Item>; pub fn items(&self) -> Vec<&Item>;
+    pub fn search(&self, query: &str, topic: Option<&TopicId>, limit: usize) -> Vec<&Item>;  // every word, from its start; summaries too
+    pub fn since_last_spoke(&self) -> Vec<&Item>;           // what wakes and the app posted after the chat lane's last message, with ids
+    pub fn open(&self) -> Vec<&Item>; pub fn reply_target(&self, on: Option<&ItemId>) -> Option<ItemId>;  // a bare reply binds only when one is open
+    pub fn started_from(&self, brain: &str) -> Option<&Item>; pub fn last_rollover(&self) -> Option<&Item>; pub fn items_since_rollover(&self) -> usize;
+    pub fn changes_after(&self, after: Option<&Hlc>) -> Vec<Record>;  // for M57
+    pub fn plan_v1(&self, lines: &[ChatLine], machine: &MachineId) -> Vec<Record>;  // v1 lines: Author::V1, no words, ids from content
+    pub fn load() -> Conversation;                                                  // IO: skip bad lines
+    pub fn post(&mut self, draft: Draft) -> io::Result<Item>;                       // IO, and the rest below; text kept with secrets replaced (words::scrub)
+    pub fn finish(&mut self, id: &ItemId, text: &str, state: Stream) -> io::Result<()>; pub fn close(&mut self, id: &ItemId) -> io::Result<()>;
+    pub fn retitle(&mut self, topic: &TopicId, title: &str) -> io::Result<()>;
+    pub fn split(&mut self, items: &[ItemId], title: &str) -> io::Result<TopicId>; pub fn merge(&mut self, from: &TopicId, into: &TopicId) -> io::Result<()>;
+    pub fn roll_over(&mut self, brain: &str, summary: Option<&str>, through: Option<Hlc>) -> io::Result<ItemId>;  // D8 rollover link
+    pub fn take_theirs(&mut self, records: Vec<Record>) -> io::Result<usize>;       // M57; stamps too far ahead are quarantined
+    pub fn import_v1(&mut self, lines: &[ChatLine], machine: &MachineId) -> io::Result<usize>;  // M44
+    pub fn prune(&mut self) -> io::Result<usize>;                                   // retention and older versions; unreadable lines stay
+}
 
 // glasscode_core::ops (M12.1, M12.2)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }
@@ -698,6 +746,7 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path,
 | The clock jumps or the time zone changes | the HLC and the scheduler | One Activity line | Schedules re-plan from UTC; the order of events is kept | M41 |
 | The server cannot be reached | sync heartbeat | "Manager: server unreachable" in the status bar | Under Automatic the Mac runs Degraded, with nothing outward; it may act alone after N minutes only if you turned that on | M58 |
 | A hook is not reporting | the reconciler | "This session is not reporting" on the session | Transcript or rollout tail plus the reconciler | M14, M30 |
+| A line of the conversation does not read | `conversation::load` | Nothing; one log line naming the file | The line is skipped and left in place (retention keeps it), so a newer build can still read it | M43 `bad_lines_are_skipped` |
 
 ## 10. Lifetime: quit, update, sleep
 

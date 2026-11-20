@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use glasscode_core::agents::AgentActivity;
+use glasscode_core::caller::Caller;
 use glasscode_core::model::AgentKind;
 use glasscode_core::paths;
 use glasscode_core::remote::{CreateSession, MirrorInput, MirrorMeta, MirrorSync, MirrorSyncReply, RemoteSession};
@@ -43,6 +44,9 @@ pub struct Mirror {
     /// The Mac's machine id, for the owner record when a session is continued here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<glasscode_core::paths::MachineId>,
+    /// Its Mac said it is going to sleep (the last sync before it).
+    #[serde(default)]
+    pub asleep: bool,
     #[serde(skip)]
     pub inbox: Vec<MirrorInput>,
     /// The last reply, read from the conversation when it changes.
@@ -137,11 +141,24 @@ pub fn listed(mirrors: &HashMap<String, Mirror>) -> Vec<RemoteSession> {
 }
 
 /// `mirror.*` requests, and session requests for a mirror's id (phones treat mirrors like
-/// sessions). None: not ours, the daemon answers it.
-pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+/// sessions). None: not ours, the daemon answers it. What a phone types waits with the device its
+/// connection declared, so the Mac records it as that phone's words (M13.2).
+pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+    let device = match caller {
+        Caller::Phone { device } => Some(device.clone()),
+        _ => None,
+    };
     match method {
         "mirror.sync" => Some(sync_from_mac(shared, params)),
         "mirror.conversation" => Some(append_conversation(shared, params)),
+        "mirror.conversation_size" => Some((|| {
+            let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+            if !crate::daemon::lock(shared).mirrors.contains_key(&id) {
+                bail!("no synced session {id}");
+            }
+            Ok(json!(std::fs::metadata(conversation_path(&id)).map(|m| m.len()).unwrap_or(0)))
+        })()),
+        "mirror.conversation_into" => Some(conversation_into(shared, params)),
         "mirror.take_over" => Some(take_over(shared, params)),
         "sessions.send" | "sessions.answer" | "sessions.keys" | "sessions.transcript" | "sessions.attach" | "sessions.stop" | "sessions.close" | "sessions.rename" | "sessions.peek" => {
             let id = params.get("session_id").and_then(Value::as_str)?.to_string();
@@ -156,10 +173,12 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
                 "sessions.send" => queue(shared, &id, MirrorInput::Text {
                     text: params.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
                     enter: params.get("enter").and_then(Value::as_bool).unwrap_or(true),
+                    device,
                 }),
                 "sessions.answer" => queue(shared, &id, MirrorInput::Answer {
                     option: params.get("option").and_then(Value::as_u64).unwrap_or(1) as u32,
                     text: params.get("text").and_then(Value::as_str).map(str::to_string),
+                    device,
                 }),
                 "sessions.keys" => queue(shared, &id, MirrorInput::Keys {
                     keys: params.get("keys").and_then(Value::as_array).map(|k| k.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default(),
@@ -201,6 +220,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             synced_at: at,
             moved_to: None,
             machine: sync.machine.clone(),
+            asleep: sync.asleep,
             inbox: Vec::new(),
             reply: None,
         });
@@ -211,6 +231,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mirror.mac = sync.mac.clone();
         mirror.mac_id = mac_id.clone();
         mirror.machine = sync.machine.clone();
+        mirror.asleep = sync.asleep;
         mirror.home = sync.home.clone();
         mirror.synced_at = at;
         if let Some(moved) = &mirror.moved_to {
@@ -271,6 +292,32 @@ fn append_conversation(shared: &Shared, params: &Value) -> anyhow::Result<Value>
     Ok(json!({ "size": offset + data.len() as u64 }))
 }
 
+/// A move to this server: the mirrored copy of a Mac session's conversation (the Mac sent only
+/// what it lacked) goes into an account here, with its folder paths rewritten to the worktree
+/// here. Returns where it is.
+fn conversation_into(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
+    let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+    let account_id = params.get("account_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let rel = PathBuf::from(params.get("rel").and_then(Value::as_str).unwrap_or_default());
+    if rel.as_os_str().is_empty() || rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        bail!("bad conversation path");
+    }
+    let from = PathBuf::from(params.get("from").and_then(Value::as_str).unwrap_or_default());
+    let to = PathBuf::from(params.get("to").and_then(Value::as_str).unwrap_or_default());
+    let account = {
+        let daemon = crate::daemon::lock(shared);
+        if !daemon.mirrors.contains_key(&id) {
+            bail!("no synced session {id}");
+        }
+        daemon.accounts().0.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no account {account_id}"))?
+    };
+    let content = sync::rewrite_cwd(&std::fs::read(conversation_path(&id))?, &from, &to);
+    let target = account.effective_dir().join(rel);
+    std::fs::create_dir_all(target.parent().unwrap_or(Path::new("/")))?;
+    std::fs::write(&target, content)?;
+    Ok(serde_json::to_value(target)?)
+}
+
 fn queue(shared: &Shared, id: &str, input: MirrorInput) -> anyhow::Result<Value> {
     let mut daemon = crate::daemon::lock(shared);
     let mirror = daemon.mirrors.get_mut(id).ok_or_else(|| anyhow!("no synced session {id}"))?;
@@ -310,7 +357,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         let (accounts, defaults) = daemon.accounts();
         (mirror, project, paths::home(), accounts, defaults)
     };
-    let away = now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
+    // Asleep (its last sync said so) or silent for a while: a working session continues here.
+    let away = mirror.asleep || now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
     if mirror.meta.activity == Some(AgentActivity::Working) && !away {
         bail!("{} is working on {} right now; continue it here when it finishes", mirror.meta.session.title, mirror.mac);
     }
