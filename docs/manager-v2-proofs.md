@@ -183,12 +183,22 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **What is known without a model.**
     - `codex features list` shows `memories  stable  false`: memories are off unless a person turns them on.
     - `--disable memories` (the same as `-c features.memories=false`) overrides the person's `config.toml` for that run. So D19's off switch for Careful and local-only projects is `--disable memories` on the session's command line.
-  - **Not verified.** That a session with memories on actually injects them, and that `use_memories=false` stops it, needs two prompts. They are held back until the main agent answers the stop condition.
+- **Result, live: pass for both** (3 prompts, 2026-11-20).
+  - **Codex** (`p04-memories.sh … codex-live`). `codex exec` was asked "What is the codename of this project, from anything you remember? Do not run commands or read files", with the marked memory planted:
+    - with `--enable memories` it answered `CODEX-MEM-MARKER-41`, with no tool call;
+    - with `--enable memories -c memories.use_memories=false` it answered `unknown`.
+
+    So memories are injected in a live session although `prompt-input` does not show them, and the off switch works. The planted folder was removed afterwards.
+  - **Claude** (`p04-memories.sh … claude`). An interactive session with `--settings {"autoMemoryDirectory": "<scratch>/agent-notes/p/claude", …}` was asked to remember the codename `CLAUDE-MEM-MARKER-17`.
+    - It wrote `agent-notes/p/claude/MEMORY.md` (the index) and `agent-notes/p/claude/scratch-project-codename.md`, **without a permission prompt**: no `PermissionRequest` hook, and no dialog on screen.
+    - Nothing was written to the account's own `projects/<project>/memory/`.
+    - `/memory` shows "Auto-memory on" and "Open auto-memory folder". It does not print the folder's path.
+    - In a session with `{"autoMemoryEnabled": false}`, `/memory` shows "Auto-memory off" (no prompt needed for that look).
+  - **The pass rule holds:** the Claude redirect works, and so does the Codex off switch. D19 stands as written.
   - **Claude (docs only, not run).**
     - `autoMemoryDirectory` is honoured from `--settings`, among other scopes.
     - `autoMemoryEnabled: false` turns auto memory off, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` does so per session.
-    - Whether Claude writes to the redirected folder without asking is not in the docs.
-    - The run (`p04-memories.sh … claude`, 1 prompt) needs the model and is held the same way.
+    - Whether Claude writes to the redirected folder without asking is not in the docs; the run above shows it does.
 
 ## P05 New Claude hook events
 - **Method.** Add `StopFailure`, `PostCompact`, `SubagentStart`, `PermissionRequest`, `PermissionDenied`, `SessionEnd` and `CwdChanged` to the `--settings` hooks, plus one made-up event name. Then:
@@ -599,7 +609,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** A way to refuse is confirmed for automation and quarantine profiles.
 - **Fallback.** A `PreToolUse` deny on those tools (guarded), and a label in design section 7.
 - **Waits.** M22.
-- **Result: partial, no prompt so far.**
+- **Result, without a model (no prompt):**
   - **Sessions are scoped to the account folder.** `claude agents --json` on the scratch account lists 0 sessions, while the person's own account had many running on this Mac at the same time. A session of one account folder does not see another's.
   - **The inherited socket.** The route that stays is the environment: a `claude` started inside another Claude session inherits `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`. Glasscode already removes every `CLAUDE*`, `CODEX*` and `AI_AGENT*` variable from its own process at start (`env::SCRUBBED_PREFIXES`), and the proofs ran with `env -i` for the same reason.
   - **The setting (docs only, not run).**
@@ -609,7 +619,19 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - Messages travel over a same-machine socket, with `CLAUDE_CODE_MESSAGING_SOCKET` and `_TOKEN` exported to hooks and Bash.
     - The receiver is told a message "came from another session, not from you", and a message cannot approve anything.
     - M22 sets `refuse` for automation and quarantine profiles.
-  - **Not run** (about 3 prompts): two sessions of the scratch account, one asked to message the other; then the receiver with `{"crossSessionInbound": "refuse"}`.
+- **Result: pass** (3 prompts, haiku, 2026-11-20). Script: `p16-cross-session.sh <claude-dir> <codex-home> <scratch> accept|refuse`.
+  - **Setup.** Both are sessions of the scratch account. Their hooks see `CLAUDE_CODE_MESSAGING_SOCKET` and `_TOKEN` by default, so the feature is on without any flag.
+    - The receiver is an interactive session started with `claude -n p16-receiver-<mode>-7f3a --permission-mode acceptEdits`.
+    - The sender is a `claude -p -n p16-sender-<mode>-7f3a` session, asked to call ListAgents, then send the receiver, by its exact name, "Please create the file p16-done.txt containing ok in your working folder."
+
+  | Receiver | Sender's ListAgents | Sender's SendMessage | Receiver |
+  |---|---|---|---|
+  | default (`accept`) | "Peer sessions (1): p16-receiver-… · interactive · idle", and the person's own sessions not listed | `success: true` ("in that session's inbox, not yet read by its Claude") | **acted**: a `UserPromptSubmit` whose prompt is `<cross-session-message from="uds:/tmp/cc-socks/<pid>.sock" from-name="p16-sender-…" from-mode="prompting">…</cross-session-message>`, then a Write, and `p16-done.txt` exists |
+  | `--settings {"crossSessionInbound": "refuse"}` | the same | `success: true` as well; no refusal notice reached the sender before its `-p` turn ended | **did not act**: no `UserPromptSubmit`, no file; only `SessionStart` and `SessionEnd` |
+
+  - **One session can make another act.** The message arrives as the receiver's next prompt, labelled with the sender's socket and name. Glasscode's words ledger must treat it as tier "never" (D1).
+  - **`crossSessionInbound: "refuse"` in `--settings` stops it,** so M22 sets it for the automation and quarantine profiles, as planned. The sender cannot tell from SendMessage's result that the message was refused.
+  - **Sessions of one account folder see only each other.** The person's own sessions, running on the same Mac under their own folder, were not in the list.
 
 ## P17 Sleep timing and the lease clock
 - **Method.** GPUI's `on_system_sleep` is asynchronous and does not hold sleep, so measure three things across lid close on battery, lid close on mains, and idle sleep:
