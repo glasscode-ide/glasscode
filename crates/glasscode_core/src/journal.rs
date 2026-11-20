@@ -324,6 +324,25 @@ pub fn expect_drive(session: &str, marker: &str, depth: u8, causes: &[String]) {
     list.push((marker.to_string(), Driven { depth, causes: causes.to_vec(), since_ms: now }));
 }
 
+/// The parameters of `caller::DRIVE_METHOD` (the Mac to the server): [`expect_drive`] there.
+pub fn drive_params(session: &str, marker: &str, depth: u8, causes: &[String]) -> Value {
+    json!({ "session": session, "marker": marker, "depth": depth, "causes": causes })
+}
+
+/// The server's side of `caller::DRIVE_METHOD`: the session's next prompt with the marker makes
+/// its events descend from it, as on the Mac.
+pub fn expect_drive_from(params: &Value) -> Result<(), String> {
+    let text = |name: &str| params.get(name).and_then(Value::as_str).filter(|t| !t.is_empty()).ok_or_else(|| format!("{name} is missing"));
+    let (session, marker) = (text("session")?, text("marker")?);
+    if !marker.starts_with("[gc:") {
+        return Err("a marker is [gc:…]".into());
+    }
+    let depth = params.get("depth").and_then(Value::as_u64).unwrap_or(1).min(u64::from(u8::MAX)) as u8;
+    let causes: Vec<String> = params.get("causes").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.as_str().map(str::to_string)).collect();
+    expect_drive(session, marker, depth, &causes);
+    Ok(())
+}
+
 /// What `session`'s events descend from now, if anything.
 pub fn driven(session: &str) -> Option<Driven> {
     let mut driven = DRIVEN.lock().unwrap_or_else(|p| p.into_inner());
@@ -1193,6 +1212,22 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    /// A server session the Mac types into (M31): the Mac's call names the marker, and the server's
+    /// own hook reader stamps what the session does next; a phone may not make the call.
+    #[test]
+    fn a_server_session_is_stamped_by_the_macs_call() {
+        reset_driven();
+        let params = drive_params("s9", "[gc:9a8b7c6d]", 2, &["ab".repeat(32)]);
+        assert!(expect_drive_from(&json!({ "session": "s9", "marker": "nope" })).is_err());
+        expect_drive_from(&params).unwrap();
+        hook_events("s9", None, &json!({ "hook_event_name": "UserPromptSubmit", "prompt": "Fix the lint. [gc:9a8b7c6d]" }));
+        let asks = hook_events("s9", None, &json!({ "hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "May I?" })).pop().unwrap();
+        assert_eq!((asks.data["depth"].clone(), asks.data["causes"][0].clone()), (json!(2), json!("ab".repeat(32))));
+        let phone = crate::caller::Caller::Phone { device: "p1".into() };
+        assert!(crate::caller::daemon_refusal(&phone, crate::caller::DRIVE_METHOD).is_some());
+        reset_driven();
+    }
 
     /// An account's window over the threshold says so once, and again only after it fell below;
     /// the server link's loss and return are events of their own.

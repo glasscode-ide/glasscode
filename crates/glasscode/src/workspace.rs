@@ -165,6 +165,8 @@ pub struct Workspace {
     /// v2 (M41): schedules, the idle-sleep assertion, and a quit or restart that waits for
     /// automation turns.
     pub lifetime: crate::lifetime::Lifetime,
+    /// v2 (M61): when the children's waiting summaries were last looked at.
+    pub children_at: Option<Instant>,
     /// v2 (M60): the manager finds work on Autopilot projects.
     pub intake: crate::intake_ui::IntakeUi,
     pub auto_review: crate::auto_review::AutoReview,
@@ -311,6 +313,7 @@ impl Workspace {
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
             lifetime: Default::default(),
+            children_at: None,
             intake: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
             removing: HashSet::new(),
@@ -1524,6 +1527,7 @@ impl Workspace {
         self.gh_tick(cx);
         self.ci_fix_tick(cx);
         self.lifetime_tick(cx);
+        self.children_tick(cx);
         self.intake_tick(cx);
         self.auto_review_tick(cx);
         self.titles_tick(cx);

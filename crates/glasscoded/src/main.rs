@@ -78,8 +78,7 @@ Usage:
   glasscoded relay off      stop using the relay (reach the server over SSH or Tailscale)
   glasscoded relay status   whether the relay is configured and connected
   glasscoded update         install a newer release now (it also checks by itself every few hours)
-  glasscoded manager status           whether the manager runs here, and what waits
-  glasscoded manager ask \"<question>\" ask the manager (when it runs here); --voice for a short spoken answer
+  glasscoded manager status           whether this server is ready to be the manager's home
   glasscoded version
 ";
 
