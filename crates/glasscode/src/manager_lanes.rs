@@ -143,7 +143,8 @@ impl Workspace {
         }
     }
 
-    /// A wake asked for by `manager.wake` (a schedule or a command): into the queue.
+    /// A wake asked for by `manager.wake` (a schedule, a command) or a playbook's firing: into the
+    /// queue.
     pub(crate) fn lanes_wake(&mut self, wake: Wake) {
         let now = glasscode_core::clock::now_ms();
         self.lanes.queue.lock().unwrap_or_else(|p| p.into_inner()).push(wake, now);
@@ -209,7 +210,7 @@ impl Worker {
         let mut spec = self.base.clone();
         spec.brain_env = brain_env(Lane::Wake, Some(&id), |text| self.signer.sign(text));
         let Some(spec) = lanes::wake_spec(&spec, &id) else { return };
-        let facts: Vec<Fact> = seen
+        let mut facts: Vec<Fact> = seen
             .iter()
             .filter(|e| wake.events.contains(&e.id))
             .map(|e| Fact {
@@ -221,6 +222,11 @@ impl Worker {
                 order: 9,
             })
             .collect();
+        // What is open comes from the work ledger: the wake carries no history (M51 step 2).
+        match glasscode_core::work::WorkLedger::load() {
+            Ok(ledger) => facts.extend(glasscode_core::runtime::situation::work_facts(&ledger)),
+            Err(err) => log::warn!("manager: the work ledger could not be read for a wake: {err}"),
+        }
         let projects = self.projects.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let situation = glasscode_core::runtime::situation::for_wake(&wake, &facts, &projects);
         // It acts only under the playbook that fired it, while that is approved to act.

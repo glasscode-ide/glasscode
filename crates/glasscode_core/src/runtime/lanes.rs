@@ -364,6 +364,13 @@ pub fn dropped_event(dropped: &super::queue::Dropped) -> crate::journal::Event {
     event
 }
 
+/// A wake of the wake lane's own brain, as its caller says: not a run of Glasscode's own code that
+/// the person approved (a playbook's firing is `playbook:<id>`, a schedule's `schedule:<id>`),
+/// which the gate decides as usual. An id it does not know is the brain's: a card, never an act.
+pub fn brain_wake(wake: &str) -> bool {
+    !(wake.starts_with("playbook:") || wake.starts_with("schedule:"))
+}
+
 /// The playbook a wake acts under: the one that fired it, while the person's approval of it holds,
 /// it may fire, and it was approved to act (autonomy act). None: what the wake proposes is a card.
 pub fn under_playbook(wake: &Wake, book: &crate::playbooks::Book) -> Option<String> {
@@ -611,7 +618,7 @@ mod tests {
     #[test]
     fn a_wake_acts_under_its_own_approved_playbook_only() {
         use crate::playbooks::{Action, Autonomy, Book};
-        let mut book = Book { playbooks: Vec::new(), all_paused: None, alerts: Vec::new() };
+        let mut book = Book::default();
         let mut ci = crate::playbooks::builtins::entry(crate::playbooks::builtins::find("usage-handoff").unwrap());
         ci.builtin = false;
         ci.id = "pb-ci".into();
@@ -622,6 +629,7 @@ mod tests {
         book.playbooks.push(ci.clone());
         let mut wake = Wake::new("playbook:pb-ci:acme/app#7", Priority::Playbook, 0);
         assert_eq!(under_playbook(&wake, &book), None, "no playbook fired it");
+        assert!(brain_wake("3f9a") && !brain_wake("playbook:pb-ci") && !brain_wake("schedule:daily"));
         wake.playbook = Some("pb-ci".into());
         assert_eq!(under_playbook(&wake, &book).as_deref(), Some("pb-ci"));
         book.playbooks[0].autonomy = Autonomy::Ask;

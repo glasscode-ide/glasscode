@@ -68,9 +68,12 @@ fn manager_wake(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         return Err(usage("manager wake \"<reason>\" [--project <p>]"));
     }
     // A wake does not wake the next, nor the chat itself: the manager's lanes have their own way.
-    if matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. }) {
-        return Err(error(ErrorCode::Denied, "The manager does not wake itself: a wake proposes what is next, and the chat answers now."));
-    }
+    // A schedule's or a playbook's run may (Glasscode's own, approved by the person).
+    let playbook = match &caller.channel {
+        glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(wake), .. } if !glasscode_core::runtime::lanes::brain_wake(wake) => wake.strip_prefix("playbook:").map(str::to_string),
+        glasscode_core::caller::Caller::Manager { .. } => return Err(error(ErrorCode::Denied, "The manager does not wake itself: a wake proposes what is next, and the chat answers now.")),
+        _ => None,
+    };
     let projects: Vec<String> = glasscode_core::ops::targets(op, &ws.world(caller)).map(|t| t.projects.iter().map(|k| k.as_str().to_string()).collect()).unwrap_or_default();
     let source = if person(caller) { "you asked".to_string() } else { format!("{} asked", caller.describe()) };
     let outside = !person(caller);
@@ -81,6 +84,7 @@ fn manager_wake(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         let now = glasscode_core::clock::now_ms();
         let mut wake = glasscode_core::runtime::queue::Wake::new(format!("asked:{}", glasscode_core::effects::effect_key(&reason, &projects.join(","), "manager.wake", "").hex()), glasscode_core::runtime::queue::Priority::Playbook, now);
         wake.projects = projects;
+        wake.playbook = playbook;
         wake.notes.push(glasscode_core::runtime::queue::Note { source, text: reason.clone(), outside });
         ws.lanes_wake(wake);
         cx.notify();

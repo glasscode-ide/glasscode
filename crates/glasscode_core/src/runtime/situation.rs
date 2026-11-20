@@ -31,6 +31,32 @@ pub struct Fact {
     pub order: u8,
 }
 
+/// The open work of the work ledger (M32), as facts of their projects: a wake carries no
+/// history, so what is open comes from here (M51 step 2). Settled ones sit before the wake's events.
+pub fn work_facts(ledger: &crate::work::WorkLedger) -> Vec<Fact> {
+    use crate::identity::WorkKind;
+    use crate::work::WorkState;
+    ledger
+        .items
+        .iter()
+        .filter(|item| !matches!(item.state, WorkState::Done | WorkState::Dropped))
+        .map(|item| {
+            let kind = match item.key.kind {
+                WorkKind::Branch => "branch",
+                WorkKind::Ticket => "ticket",
+                WorkKind::Pr => "pull request",
+                WorkKind::Review => "review of",
+            };
+            let sessions = match item.sessions.len() {
+                0 => String::new(),
+                1 => format!(", in session {}", item.sessions[0]),
+                n => format!(", in {n} sessions"),
+            };
+            Fact { project: Some(item.key.project.as_str().to_string()), source: "open work".into(), text: format!("{kind} {}: {}{sessions}", item.key.id, item.state.words()), outside: false, order: 1 }
+        })
+        .collect()
+}
+
 /// The projects a wake may hold: those of its digest the account may see; a Careful one only when
 /// it is the wake's only project.
 pub fn projects_of<'a>(wake: &Wake, projects: &'a [Project]) -> Vec<&'a Project> {
@@ -86,6 +112,22 @@ mod tests {
         // Stable first: the board before the project's lines.
         let board = text.find("Board: 3 tasks").unwrap();
         assert!(board < text.find("blog's draft").unwrap());
+    }
+
+    /// The open work of a wake's projects comes from the work ledger; settled work does not.
+    #[test]
+    fn open_work_comes_from_the_work_ledger() {
+        use crate::identity::{Hlc, WorkKey, WorkKind};
+        use crate::work::{WorkItem, WorkLedger, WorkState};
+        let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
+        let item = |project: &str, id: &str, state: WorkState| WorkItem { state, sessions: vec!["s1".into()], ..WorkItem::new(WorkKey { project: crate::paths::ProjectKey::parse(project).unwrap(), kind: WorkKind::Branch, id: id.into() }, Hlc::zero(machine.clone())) };
+        let ledger = WorkLedger { items: vec![item("app-0a0a0a", "feat/login", WorkState::Waiting("CI".into())), item("app-0a0a0a", "old", WorkState::Done), item("blog-0b0b0b", "draft", WorkState::Open)] };
+        let projects = [project("app-0a0a0a", false, true), project("blog-0b0b0b", false, true)];
+        let mut wake = Wake::new("ci:acme/app#7", Priority::Urgent, 0);
+        wake.projects = vec!["app-0a0a0a".into()];
+        let text = for_wake(&wake, &work_facts(&ledger), &projects);
+        assert!(text.contains("open work: branch feat/login: waiting for CI, in session s1"), "{text}");
+        assert!(!text.contains("old") && !text.contains("draft"), "{text}");
     }
 
     #[test]

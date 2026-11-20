@@ -816,6 +816,19 @@ impl Workspace {
             }
             Autonomy::Ask | Autonomy::Act => {}
         }
+        // A playbook that wakes the manager (M51): its wake is queued with the event that fired it,
+        // keyed by its subject; under "act" the wake may act, under "ask" it proposes.
+        if firing.op == "manager.wake" {
+            let outcome = match glasscode_core::playbooks::engine::wake_of(&firing, glasscode_core::clock::now_ms()) {
+                Some(wake) if self.lanes.running() => {
+                    self.lanes_wake(wake);
+                    "woke the manager"
+                }
+                _ => "held: the manager's wake lane is not running",
+            };
+            glasscode_core::journal::append(glasscode_core::journal::decision("playbook", outcome, &what, serde_json::json!({ "playbook": firing.playbook, "event": firing.event }), None));
+            return;
+        }
         let op = match glasscode_core::ops::typed(&firing.op, firing.args.clone()) {
             Ok(op) => op,
             Err(err) => {

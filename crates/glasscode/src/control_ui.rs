@@ -1299,7 +1299,7 @@ impl Workspace {
         }
         // A wake proposes; only under the playbook that fired it, approved to act, does it act
         // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.
-        let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(_), .. });
+        let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake));
         let card;
         (decision, card) = for_a_wake(decision, act.as_ref(), a_wake, op.spec.effect == ops::EffectClass::Read);
         // The manager's lanes: a wake does not act while the person talks to the manager, and one
