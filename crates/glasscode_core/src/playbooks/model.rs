@@ -116,7 +116,8 @@ impl Trigger {
 pub enum Cond {
     /// The project's level is one of these.
     Level { is: Vec<Level> },
-    /// The author of the outside text passes `trusted_author` (the event's `author_trusted`).
+    /// The author of the outside text (the event's `author`, with GitHub's `association`) passes
+    /// `gate::trusted_author` (D27).
     AuthorTrusted,
     /// The PR is the person's own (the event's `pr_author` is the person's login).
     PrAuthorIsMe,
@@ -319,6 +320,9 @@ pub fn journal_schema() -> Schema {
         .with("pr.merged", &with(&[]))
         .with("pr.closed", &with(&[]))
         .with("pr.opened", &with(&[("title", Text), ("draft", Bool)]))
+        // The status rounds' reviews (the native review-tell; the journal writes it once a status
+        // round reads reviews).
+        .with("review.received", &with(&[("reviewer", Id), ("author", Id), ("association", Word), ("state", Word)]))
         .with("pr.changed", &with(&[("state", Word), ("draft", Bool), ("before", Word)]))
         .with("session.started", &and(&[("agent", Word), ("source", Word)]))
         .with("session.activity", &and(&[("activity", Word), ("previous", Word)]))
@@ -333,7 +337,7 @@ pub fn journal_schema() -> Schema {
 fn cond_fields(cond: &Cond) -> &'static [&'static str] {
     match cond {
         Cond::Level { .. } => &[],
-        Cond::AuthorTrusted => &["author_trusted"],
+        Cond::AuthorTrusted => &["author", "association"],
         Cond::PrAuthorIsMe => &["pr_author"],
         Cond::Label { .. } => &["labels"],
         Cond::NotDefaultBranch => &["branch", "default_branch"],
