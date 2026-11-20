@@ -902,6 +902,11 @@ pub fn simulate::dry_run(...) -> Report;                   // past events, nothi
 pub const builtins::BUILTINS: &[Builtin];                  // native: ci-fix, conflict-fix (no manager, approval or level: exec-16), needs-you,
                                                            // review-tell, follow-ups, daily-brief, stuck-session, usage-handoff
 pub mod builtins::ci_fix { pub fn step(..) -> (Step, bool); pub fn subject(..) -> String; pub fn group(..) -> String; pub fn key(..) -> EffectKey; }  // M31's key, to the letter
+pub struct native::Native; impl Native { pub fn on_event(&mut self, event: &dyn EventView, view: &View) -> Vec<manager::Action>; pub fn tell_ready(&mut self, view: &View) -> Vec<manager::Action>; }
+                                                           // needs-you, review-tell (trusted_author, D27), stuck-session, usage-handoff;
+                                                           // parity with v1's harness at its react seam (parity_with_harness_step)
+pub struct Facts { pub level: &dyn Fn(Option<&ProjectKey>) -> Level, pub me: &[String], pub confirmed: &[String], pub now_ms: u64 }  // AuthorTrusted: gate::trusted_author
+// ops (M40): playbook.check (each playbook as this machine reads it) and playbook.test <id> [--since 7d] (a dry run over the journal); both read, v2 only
 
 // glasscode_core::schedule (M41) — due-ness from the wall clock every tick, never from sleeping timers
 pub enum Misfire { Skip /* on time only */, Once /* the last missed, once, within its window */ }
