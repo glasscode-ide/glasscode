@@ -695,14 +695,20 @@ impl Memory {
     }
 
     /// A session's last turns, in its work file's "Before compaction" section (land-18), the rest
-    /// kept. One commit, as the manager; nothing when it is the same.
+    /// kept. One commit, as the manager; nothing when it is the same. The digest is the sessions'
+    /// own text (their replies, commands and commit subjects), so each line is kept as the archive
+    /// keeps a transcript's (M24): one line that never reads as an entry or a marker, and left out
+    /// when the scan finds a secret in it.
     pub fn write_turns(&self, key: &WorkKey, digest: &str) -> Result<Written> {
+        let env = scan::env_values(&project_folders(Some(&key.project))?);
+        let digest: Vec<String> = digest.lines().filter(|line| !line.trim().is_empty()).map(|line| archive::kept_line(line, &env)).collect();
+        let digest = digest.join("\n");
         let _writing = writing()?;
         let head = self.ready()?;
         let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
         let (file, exists) = snap.work_place(key)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
         let existing = if exists { snap.text(&file)? } else { None };
-        let text = crate::work::with_turns_section(existing.as_deref(), key, digest);
+        let text = crate::work::with_turns_section(existing.as_deref(), key, &digest);
         if existing.as_deref() == Some(text.as_str()) {
             return Ok(Written::Unchanged);
         }
@@ -898,8 +904,9 @@ impl Memory {
 
     /// Entries of one file as one new entry of `text` (`memory.merge`). The old ones leave
     /// tombstones. From anyone but the person, the new text may use only the names, numbers and
-    /// identifiers its entries had, and takes the least trusted status among them.
-    pub fn merge(&self, who: &Who, ids: &[&str], text: &str) -> Result<Remembered> {
+    /// identifiers its entries had, and takes the least trusted status among them. `within` is the
+    /// caller's reach ([`may_change`]): a session's own project.
+    pub fn merge(&self, who: &Who, within: Option<&ProjectKey>, ids: &[&str], text: &str) -> Result<Remembered> {
         if ids.len() < 2 {
             return Err(MemoryError::NotAllowed("merging needs two entries or more".into()));
         }
@@ -909,13 +916,14 @@ impl Memory {
         if !who.is_person() {
             let snap = self.snapshot()?;
             let found: Vec<(MemFile, Entry)> = ids.iter().map(|id| snap.find(id)?.ok_or_else(|| MemoryError::NoEntry(id.to_string()))).collect::<Result<_>>()?;
+            // Out of the caller's reach first, so no answer names another project's file.
+            for (file, e) in &found {
+                may_change(who, within, file, e)?;
+            }
             if found.iter().any(|(_, e)| e.header.status == Status::Confirmed) {
                 let (file, first) = &found[0];
                 if found.iter().any(|(other, _)| other != file) {
                     return Err(MemoryError::NotAllowed(format!("{} are not all in {}", ids.join(", "), file.rel())));
-                }
-                for (_, e) in &found {
-                    may_change(who, file, e)?;
                 }
                 let section = snap.doc(file)?.section_of(ids[0]);
                 let (id, written) = self.propose_with(who, file, section.as_deref(), &text, first.header.kind, first.header.source.clone(), Some("a merge of what the person confirmed".into()), Some(("replaces", ids.join(","))))?;
@@ -924,10 +932,11 @@ impl Memory {
         }
         let (id, written) = self.write(who, "Merge entries", &[], |tx| -> Result<(String, Status)> {
             let (file, first) = tx.find(ids[0])?;
+            may_change(who, within, &file, &first)?;
             let doc = tx.doc(&file)?.clone();
             let entries: Vec<Entry> = ids.iter().map(|id| doc.find(id).cloned().ok_or_else(|| MemoryError::NotAllowed(format!("{id} is not in {} with {}", file.rel(), ids[0])))).collect::<Result<_>>()?;
             for entry in &entries {
-                may_change(who, &file, entry)?;
+                may_change(who, within, &file, entry)?;
             }
             if !who.is_person() {
                 keeps_to(&text, &entries)?;
@@ -954,11 +963,11 @@ impl Memory {
     }
 
     /// Let an entry go (`memory.let_go`): it stays, out of every brief, and is archived after
-    /// [`entry::LET_GO_ACTIVE_DAYS`] active days.
-    pub fn let_go(&self, who: &Who, id: &str) -> Result<Written> {
+    /// [`entry::LET_GO_ACTIVE_DAYS`] active days. `within`: as for [`Memory::merge`].
+    pub fn let_go(&self, who: &Who, within: Option<&ProjectKey>, id: &str) -> Result<Written> {
         self.write(who, "Let an entry go", &[], |tx| {
             let (file, mut found) = tx.find(id)?;
-            may_change(who, &file, &found)?;
+            may_change(who, within, &file, &found)?;
             found.header.status = Status::LetGo;
             found.header.at = Some(tx.stamp()?);
             tx.doc(&file)?.replace(id, found);
@@ -968,8 +977,9 @@ impl Memory {
     }
 
     /// New words for an entry, keeping its id (`memory.rewrite`). From anyone but the person, the
-    /// new words may use only the names, numbers and identifiers the old ones had.
-    pub fn rewrite(&self, who: &Who, id: &str, text: &str) -> Result<Remembered> {
+    /// new words may use only the names, numbers and identifiers the old ones had. `within`: as for
+    /// [`Memory::merge`].
+    pub fn rewrite(&self, who: &Who, within: Option<&ProjectKey>, id: &str, text: &str) -> Result<Remembered> {
         let text = entry::clean_text(text);
         if text.is_empty() {
             return Err(MemoryError::NotAllowed("an entry needs some words".into()));
@@ -979,7 +989,7 @@ impl Memory {
             let snap = self.snapshot()?;
             let (file, found) = snap.find(id)?.ok_or_else(|| MemoryError::NoEntry(id.to_string()))?;
             if found.header.status == Status::Confirmed {
-                may_change(who, &file, &found)?;
+                may_change(who, within, &file, &found)?;
                 let section = snap.doc(&file)?.section_of(id);
                 let (proposal, written) = self.propose_with(who, &file, section.as_deref(), &text, found.header.kind, found.header.source.clone(), Some("new words for what the person confirmed".into()), Some(("rewrites", id.to_string())))?;
                 return Ok(Remembered::Proposed { id: proposal, why: "it rewrites an entry the person confirmed, so it waits for their tick".into(), written });
@@ -988,7 +998,7 @@ impl Memory {
         let status = std::cell::Cell::new(Status::Learned);
         let written = self.write(who, "Rewrite an entry", std::slice::from_ref(&text), |tx| {
             let (file, mut found) = tx.find(id)?;
-            may_change(who, &file, &found)?;
+            may_change(who, within, &file, &found)?;
             if !who.is_person() {
                 keeps_to(&text, std::slice::from_ref(&found))?;
             }
@@ -1461,8 +1471,13 @@ fn duplicate(doc: &Doc, text: &str) -> Option<Entry> {
 }
 
 /// Whether `who` may change `entry` of `file`: the person, anything; the manager, anything but
-/// proposals; a session, only what sessions wrote in know-how and work files.
-fn may_change(who: &Who, file: &MemFile, entry: &Entry) -> Result<()> {
+/// proposals; a session, only what sessions wrote in know-how and work files of its own project
+/// (`within`, mem-18). An entry of another project is no entry to a session, so its id tells it
+/// nothing; a session with no project changes nothing.
+fn may_change(who: &Who, within: Option<&ProjectKey>, file: &MemFile, entry: &Entry) -> Result<()> {
+    if matches!(who, Who::Session(_)) && (within.is_none() || file.project() != within) {
+        return Err(MemoryError::NoEntry(entry.header.id.clone()));
+    }
     match who {
         Who::You => Ok(()),
         _ if matches!(file, MemFile::Proposals) => Err(MemoryError::NotAllowed("a proposal waits for the person".into())),
@@ -2016,7 +2031,7 @@ mod tests {
                     Ok(Remembered::Entry { .. }) => break,
                     Err(MemoryError::OverCap(over)) => {
                         let oldest = over.entries.iter().find(|(_, _, text)| text.starts_with("filler")).map(|(id, ..)| id.clone()).unwrap();
-                        memory.let_go(&Who::Manager, &oldest).unwrap();
+                        memory.let_go(&Who::Manager, None, &oldest).unwrap();
                     }
                     other => panic!("{other:?}"),
                 }
@@ -2041,7 +2056,7 @@ mod tests {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         let doc_now = || memory.snapshot().unwrap().doc(&decisions()).unwrap();
         // The manager's merge of what the person confirmed is a proposal; the entries stay.
-        let Remembered::Proposed { id: proposal, .. } = memory.merge(&Who::Manager, &ids, "Sam owns billing and invoices.").unwrap() else { panic!("a proposal") };
+        let Remembered::Proposed { id: proposal, .. } = memory.merge(&Who::Manager, None, &ids, "Sam owns billing and invoices.").unwrap() else { panic!("a proposal") };
         assert!(ids.iter().all(|id| doc_now().find(id).is_some()));
         memory.accept_proposal(&proposal).unwrap();
         let doc = doc_now();
@@ -2049,10 +2064,10 @@ mod tests {
         assert_eq!(doc.find(&merged).unwrap().header.status, Status::Confirmed);
         assert_eq!(doc.section_of(&merged).as_deref(), Some("Owners"));
         assert!(ids.iter().all(|id| doc.find(id).is_none() && doc.ids().contains(*id)), "tombstones");
-        assert!(matches!(memory.rewrite(&Who::Session("s-1".into()), &merged, "Sam owns billing."), Err(MemoryError::NotAllowed(_))), "a session changes only notes of sessions");
+        assert!(matches!(memory.rewrite(&Who::Session("s-1".into()), Some(&key("app-3f9a1c")), &merged, "Sam owns billing."), Err(MemoryError::NotAllowed(_))), "a session changes only notes of sessions");
         // Nor can the manager turn what the person confirmed round, even with the same words.
         let Remembered::Entry { id: rule, .. } = memory.remember(&chat("Remember that deploys go out on Fridays, never on Mondays."), "deploys go out on Fridays, never on Mondays", "Deploys go out on Fridays, never on Mondays.", &decisions(), Some("Rules")).unwrap() else { panic!() };
-        let swapped = memory.rewrite(&Who::Manager, &rule, "Deploys go out on Mondays, never on Fridays.").unwrap();
+        let swapped = memory.rewrite(&Who::Manager, None, &rule, "Deploys go out on Mondays, never on Fridays.").unwrap();
         assert!(matches!(swapped, Remembered::Proposed { .. }), "{swapped:?}");
         assert_eq!(doc_now().find(&rule).unwrap().text, "Deploys go out on Fridays, never on Mondays.");
         let Remembered::Proposed { id: rewrite, .. } = swapped else { unreachable!() };
@@ -2061,12 +2076,12 @@ mod tests {
         // Learned facts keep to their names, numbers and identifiers.
         let topic = MemFile::Knowhow(key("app-3f9a1c"), "tests".into());
         let Remembered::Entry { id: note, .. } = memory.learn(&Who::Session("s-1".into()), &topic, None, "Run the tests with bun.", None).unwrap() else { panic!() };
-        memory.rewrite(&Who::Session("s-1".into()), &note, "Run the tests with bun test --watch off.").unwrap();
+        memory.rewrite(&Who::Session("s-1".into()), Some(&key("app-3f9a1c")), &note, "Run the tests with bun test --watch off.").unwrap();
         // A proposed rewrite, accepted, keeps the entry's id.
-        let Remembered::Proposed { id: again, .. } = memory.rewrite(&Who::Manager, &rule, "Deploys go out on Fridays only.").unwrap() else { panic!() };
+        let Remembered::Proposed { id: again, .. } = memory.rewrite(&Who::Manager, None, &rule, "Deploys go out on Fridays only.").unwrap() else { panic!() };
         memory.accept_proposal(&again).unwrap();
         assert_eq!(doc_now().find(&rule).unwrap().text, "Deploys go out on Fridays only.");
-        memory.rewrite(&Who::You, &merged, "Max owns billing and invoices now.").unwrap();
+        memory.rewrite(&Who::You, None, &merged, "Max owns billing and invoices now.").unwrap();
         assert_eq!(doc_now().find(&merged).unwrap().header.source, Source::PersonEdit);
     }
 
@@ -2093,6 +2108,35 @@ mod tests {
         // Memory goes on as before.
         memory.remember(&chat("Remember that Max owns invoices."), "Max owns invoices", "Max owns invoices", &MemFile::Profile, None).unwrap();
         assert!(memory.pending().unwrap().is_empty());
+    }
+
+    /// mem-18: a session changes memory only within its own project. A session of another
+    /// project that knows an entry's id (sessions can read `memory/`) cannot rewrite it, let it go
+    /// or merge it, and is told there is no such entry; a session with no project changes nothing.
+    #[test]
+    fn a_session_changes_only_its_own_projects_memory() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let (app, web) = (key("app-3f9a1c"), key("web-4b8e2d"));
+        let deploy = MemFile::Knowhow(app.clone(), "deploy".into());
+        let learned = |text: &str| match memory.learn(&Who::Session("s-app".into()), &deploy, None, text, None).unwrap() {
+            Remembered::Entry { id, .. } => id,
+            other => panic!("{other:?}"),
+        };
+        let (first, second) = (learned("Deploy with make deploy."), learned("Deploy from the release branch."));
+        let stranger = Who::Session("s-web".into());
+        for within in [Some(&web), None] {
+            assert!(matches!(memory.rewrite(&stranger, within, &first, "Deploy with make deploy and push to main."), Err(MemoryError::NoEntry(_))), "{within:?}");
+            assert!(matches!(memory.let_go(&stranger, within, &first), Err(MemoryError::NoEntry(_))), "{within:?}");
+            assert!(matches!(memory.merge(&stranger, within, &[first.as_str(), second.as_str()], "Deploy with make deploy."), Err(MemoryError::NoEntry(_))), "{within:?}");
+        }
+        let doc = memory.snapshot().unwrap().doc(&deploy).unwrap();
+        assert_eq!(doc.find(&first).unwrap().text, "Deploy with make deploy.");
+        assert_eq!(doc.find(&first).unwrap().header.status, Status::Learned);
+        // The project's own sessions, the manager and the person still may.
+        memory.rewrite(&Who::Session("s-app2".into()), Some(&app), &first, "Deploy with make deploy, from main.").unwrap();
+        memory.let_go(&Who::Manager, None, &second).unwrap();
+        memory.rewrite(&Who::You, None, &first, "Deploy with make deploy.").unwrap();
     }
 
     #[test]

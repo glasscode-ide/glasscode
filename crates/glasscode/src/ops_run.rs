@@ -1283,12 +1283,10 @@ fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         // Started without waiting: it says how far it got, and stops when asked (ops-10).
         let job = r.job();
         let task = cx.background_spawn(async move {
-            if own_only {
-                let pushed = git::unpushed_commits(&dir, &branch)?;
-                glasscode_core::profile::own_commits_only(&pushed, &glasscode_core::profile::session_commits(&session)).map_err(|why| anyhow::anyhow!(why))?;
-            }
+            // The commit checked is the commit pushed: the branch may move after the check.
+            let tip = if own_only { Some(glasscode_core::profile::own_push_tip(&dir, &branch, &glasscode_core::profile::session_commits(&session))?) } else { None };
             let base = base.unwrap_or_else(|| git::default_branch(&root));
-            github::push_and_open_draft_unless(&dir, &branch, &base, &env, job.as_deref())
+            github::push_and_open_draft_unless(&dir, &branch, &base, &env, job.as_deref(), tip.as_deref())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1812,6 +1810,16 @@ impl MemoryAsk {
         }
     }
 
+    /// How far a change by id may reach (`memory.merge`, `let_go`, `rewrite`): anywhere for the
+    /// person and the manager; a session only its own project's memory (mem-18), so it cannot
+    /// change another project's entries by their ids. Runs git: background only.
+    fn within(&self) -> Result<Option<glasscode_core::paths::ProjectKey>, Reply> {
+        match self.who {
+            Who::Session(_) => self.key()?.map(Some).ok_or_else(|| denied("This command runs in no project's session, so it has no project's memory.")),
+            Who::You | Who::Manager => Ok(None),
+        }
+    }
+
     /// The piece of work of the session, in project `key`.
     fn work(&self, key: &glasscode_core::paths::ProjectKey) -> Option<glasscode_core::identity::WorkKey> {
         self.session.as_ref().map(|s| self.links.work_key(key, s))
@@ -2119,21 +2127,31 @@ fn memory_merge(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let text = arg(op, "text").to_string();
     memory_plan(Kind::Board, format!("merge {} entries of memory", ids.len()), move || {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        Memory::open().merge(&ask.who, &ids, &text).map(|done| remembered_reply(done, "Merged")).unwrap_or_else(memory_reply)
+        let within = match ask.within() {
+            Ok(within) => within,
+            Err(reply) => return reply,
+        };
+        Memory::open().merge(&ask.who, within.as_ref(), &ids, &text).map(|done| remembered_reply(done, "Merged")).unwrap_or_else(memory_reply)
     })
 }
 
 fn memory_let_go(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ask = memory_ask(ws, caller, op)?;
     let id = arg(op, "id").trim().to_string();
-    memory_plan(Kind::Board, format!("let {id} go"), move || Memory::open().let_go(&ask.who, &id).map(|w| written(w, &format!("Let {id} go."))).unwrap_or_else(memory_reply))
+    memory_plan(Kind::Board, format!("let {id} go"), move || match ask.within() {
+        Ok(within) => Memory::open().let_go(&ask.who, within.as_ref(), &id).map(|w| written(w, &format!("Let {id} go."))).unwrap_or_else(memory_reply),
+        Err(reply) => reply,
+    })
 }
 
 fn memory_rewrite(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ask = memory_ask(ws, caller, op)?;
     let id = arg(op, "id").trim().to_string();
     let text = arg(op, "text").to_string();
-    memory_plan(Kind::Board, format!("rewrite {id}"), move || Memory::open().rewrite(&ask.who, &id, &text).map(|done| remembered_reply(done, &format!("Rewrote {id}"))).unwrap_or_else(memory_reply))
+    memory_plan(Kind::Board, format!("rewrite {id}"), move || match ask.within() {
+        Ok(within) => Memory::open().rewrite(&ask.who, within.as_ref(), &id, &text).map(|done| remembered_reply(done, &format!("Rewrote {id}"))).unwrap_or_else(memory_reply),
+        Err(reply) => reply,
+    })
 }
 
 fn memory_forget(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {

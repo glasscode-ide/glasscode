@@ -525,3 +525,83 @@ fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
         assert!(has(&["--output-schema", "/s.json"]) && has(&["-o", "/a.txt"]) && args.last().map(String::as_str) == Some("-"), "{args:?}");
     }
 }
+
+/// A scratch repository for the push tests: `git` with a fixed identity and none of the person's
+/// configuration, and `at` (when given) as the commit's date.
+fn scratch_git(dir: &Path, args: &[&str], at: Option<u64>) -> String {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]).args(args);
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1");
+    if let Some(at) = at {
+        cmd.env("GIT_COMMITTER_DATE", format!("@{at} +0000")).env("GIT_AUTHOR_DATE", format!("@{at} +0000"));
+    }
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn scratch_commit(dir: &Path, file: &str, at: Option<u64>) -> String {
+    std::fs::write(dir.join(file), file).unwrap();
+    scratch_git(dir, &["add", file], at);
+    scratch_git(dir, &["commit", "-q", "-m", file], at);
+    scratch_git(dir, &["rev-parse", "HEAD"], None)
+}
+
+/// A turn of a scratch session from `head`, started at `started_ms`, closed now: the commits its
+/// report records, as the journal keeps them (short ids).
+fn turn_made(repo: &Path, head: &str, started_ms: u64) -> Vec<String> {
+    let closed = crate::turns::Closed {
+        turn: crate::turns::OpenTurn { id: "t1".into(), started_ms, head: Some(head.to_string()), ..Default::default() },
+        end: crate::turns::TurnEnd::Completed,
+        ended_ms: started_ms + 1_000,
+        reply: None,
+        background: Vec::new(),
+    };
+    let gathered = crate::turns::gather(AgentKind::Codex, None, &closed, repo, false);
+    gathered.commits.iter().filter_map(|line| line.split_whitespace().next()).map(str::to_string).collect()
+}
+
+/// D13 and P07: inside one turn, a session the manager drives moves its own branch onto work it
+/// did not make (the person's unpushed branch), by a merge, and plants a remote-tracking ref so
+/// that work looks pushed. Its brokered push must still refuse: the person's commit is not the
+/// session's. Its own work alone goes, even when the remote moved on since the last fetch.
+#[test]
+fn a_branch_moved_onto_other_work_is_not_the_sessions_own() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (origin, repo, other) = (scratch.path().join("origin.git"), scratch.path().join("repo"), scratch.path().join("other"));
+    scratch_git(scratch.path(), &["init", "-q", "--bare", origin.to_str().unwrap()], None);
+    scratch_git(scratch.path(), &["init", "-q", repo.to_str().unwrap()], None);
+    scratch_git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()], None);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let hour_ago = now.as_secs() - 3600;
+    scratch_commit(&repo, "base", Some(hour_ago));
+    scratch_git(&repo, &["push", "-q", "-u", "origin", "main"], None);
+    // A teammate moves main on, and this checkout has not fetched since.
+    scratch_git(scratch.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()], None);
+    scratch_commit(&other, "teammates-work", Some(hour_ago + 30));
+    scratch_git(&other, &["push", "-q", "origin", "main"], None);
+    // The person's work on another branch, never pushed.
+    scratch_git(&repo, &["checkout", "-q", "-b", "person-wip"], None);
+    let theirs = scratch_commit(&repo, "the-persons-work", Some(hour_ago + 60));
+
+    // A turn that only does the session's own work: it goes.
+    scratch_git(&repo, &["checkout", "-q", "-b", "session", "main"], None);
+    let head = scratch_git(&repo, &["rev-parse", "HEAD"], None);
+    let started_ms = now.as_millis() as u64;
+    let own = scratch_commit(&repo, "the-sessions-work", None);
+    let made = turn_made(&repo, &head, started_ms);
+    assert_eq!(made, [own[..7].to_string()], "the turn made one commit");
+    assert_eq!(own_push_tip(&repo, "session", &made).unwrap(), own);
+
+    // The next turn merges the person's branch in, and plants a remote-tracking ref for it: a
+    // Claude session can write any ref (P07).
+    let head = own.clone();
+    let started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    scratch_git(&repo, &["merge", "-q", "--no-edit", "person-wip"], None);
+    scratch_git(&repo, &["update-ref", "refs/remotes/origin/planted", "person-wip"], None);
+    let mut made = made;
+    made.extend(turn_made(&repo, &head, started_ms));
+    assert!(!made.iter().any(|m| theirs.starts_with(m.as_str())), "the person's commit {theirs} is not the turn's: {made:?}");
+    let refused = own_push_tip(&repo, "session", &made).unwrap_err().to_string();
+    assert!(refused.contains("1 commit this session did not make") && refused.contains(&theirs[..9]), "{refused}");
+}
