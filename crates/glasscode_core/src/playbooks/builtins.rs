@@ -158,6 +158,7 @@ pub fn entry(builtin: &Builtin) -> Playbook {
         manager_events: false,
         proposed_by: None,
         paused: None,
+        released_ms: None,
         approved_hash: None,
     }
 }

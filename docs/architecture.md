@@ -247,7 +247,13 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - a global breaker.
 
   The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
-- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there. The others carry on v1's harness rules and move here with the journal's events.
+- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there.
+- **The manager's own built-ins** (`native`) are needs-you, review-tell (only `trusted_author` reviews reach a session), stuck-session and usage-handoff, as state machines over journal events. `parity_with_harness_step` holds them to v1's harness. They run with the v2 manager (M51); until then v1's harness does it.
+- **The runner.** In a v2 home, `ci_fix.rs` reads the journal's new events every 2 s off the main thread and runs the person's live playbooks through the engine.
+  - **watch** records, and **tell** shows a toast.
+  - **ask** and **act** claim the effect and run the op through the gate as the manager's wake.
+  - The playbooks that gave way are recorded for their limits.
+- **`glasscode playbook check`** says which playbooks run and why the others do not. **`glasscode playbook test <id> [--since 7d]`** is the dry run over the journal.
 
 ### Schedules and lifetime (M41)
 

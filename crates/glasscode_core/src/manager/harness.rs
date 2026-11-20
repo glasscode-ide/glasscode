@@ -148,7 +148,7 @@ fn is_contact(person: &Person, what: &str) -> bool {
 }
 
 /// What a session is told about the reviews on its pull request.
-fn tell_text(settings: &Settings, tells: &[PendingTell]) -> String {
+pub(crate) fn tell_text(settings: &Settings, tells: &[PendingTell]) -> String {
     let mut numbers: Vec<u64> = Vec::new();
     for t in tells {
         if !numbers.contains(&t.number) {

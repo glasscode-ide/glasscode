@@ -24,6 +24,7 @@ pub mod builtins;
 pub mod engine;
 pub mod limits;
 pub mod model;
+pub mod native;
 pub mod simulate;
 
 use std::collections::BTreeMap;
@@ -46,6 +47,9 @@ pub struct PlaybookFile {
     /// The global breaker: every playbook but the built-ins is paused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_paused: Option<Paused>,
+    /// When the person last released the global pause: the global breaker counts from here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_released_ms: Option<u64>,
 }
 
 impl Store for PlaybookFile {
@@ -92,6 +96,7 @@ impl Store for ApprovedPlaybooks {
 pub struct Book {
     pub playbooks: Vec<Playbook>,
     pub all_paused: Option<Paused>,
+    pub all_released_ms: Option<u64>,
     /// "“Fix red CI” is off: …", one line for each playbook that did not load.
     pub alerts: Vec<String>,
 }
@@ -131,7 +136,7 @@ pub fn book(file: PlaybookFile, approved: &ApprovedPlaybooks, schema: &Schema) -
             playbook
         })
         .collect();
-    Book { playbooks, all_paused: file.all_paused, alerts }
+    Book { playbooks, all_paused: file.all_paused, all_released_ms: file.all_released_ms, alerts }
 }
 
 /// Read both stores, and check the playbooks against `schema`. A damaged store is an error:
@@ -225,11 +230,16 @@ pub fn pause(id: Option<&str>, by: &str, why: &str) -> Result<(), BookError> {
 /// Release a pause: the person only (D15). It writes the disk.
 pub fn release(id: Option<&str>, person: bool) -> Result<(), BookError> {
     person_only(person, "release")?;
+    let now = crate::clock::now_ms();
     crate::store::update::<PlaybookFile, _>(|file| match id {
-        None => file.all_paused = None,
+        None => {
+            file.all_paused = None;
+            file.all_released_ms = Some(now);
+        }
         Some(id) => {
             if let Some(playbook) = file.playbooks.iter_mut().find(|p| p.id == id) {
                 playbook.paused = None;
+                playbook.released_ms = Some(now);
             }
         }
     })?;
