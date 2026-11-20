@@ -357,15 +357,32 @@ pub struct Switched {
     pub data: Result<Report, String>,
 }
 
-/// "Switch now" in Settings › Manager (M56 step 1), for a home whose v1 manager runs: the switch,
-/// then v1's notes into memory (M20.3) and the rest of `data.json` into the v2 stores (M44), now
-/// that the home is v2. v2 runs from the next start. It writes the disk and memory's git: never on
-/// the main thread.
+/// "Switch now" in Settings › Manager (M56 step 1), for a home whose v1 manager runs: v1's notes
+/// into memory (M20.3) and the rest of `data.json` into the v2 stores (M44), and the switch, all or
+/// nothing. The switch is written first, because those stores take writes only in a v2 home; when
+/// a move fails, the switch goes back to what it was and nothing switches. On a Mac that is not the
+/// manager's home (a server is), only the switch is written: v1's data moves when this Mac is home
+/// again (the start's ticks). v2 runs from the next start. It writes the disk and memory's git:
+/// never on the main thread.
 pub fn switch_now(home: bool) -> Result<Switched, String> {
+    let before = match crate::store::open::<crate::store::EngineSwitch>() {
+        Ok(crate::store::Opened { value, found: crate::store::Found::File | crate::store::Found::Missing }) => value,
+        _ => return Err("the engine switch does not read; it stays as it is".into()),
+    };
     write_switch()?;
-    let notes = crate::memstore::migrate::run(&crate::memstore::Memory::open()).map_err(|err| err.to_string());
-    let data = run(home);
-    Ok(Switched { notes, data })
+    if !home {
+        return Ok(Switched { notes: Err("this Mac is not the manager's home: v1's notes move when it is".into()), data: Err("this Mac is not the manager's home: v1's data moves when it is".into()) });
+    }
+    let back = |why: String| {
+        use crate::store::Store as _;
+        match before.save() {
+            Ok(()) => format!("{why}; nothing switched"),
+            Err(err) => format!("{why}; and the switch could not be put back ({err})"),
+        }
+    };
+    let notes = crate::memstore::migrate::run(&crate::memstore::Memory::open()).map_err(|err| back(format!("v1's notes did not move into memory ({err})")))?;
+    let data = run(true).map_err(back)?;
+    Ok(Switched { notes: Ok(notes), data: Ok(data) })
 }
 
 #[cfg(test)]
@@ -462,6 +479,13 @@ mod tests {
         EngineSwitch { engine: Engine::V1, switches: BTreeMap::from([("profiles".to_string(), false)]) }.save().unwrap();
         assert_eq!(switch_at_start(false, true), AtStart::Offer, "v1's manager runs: it is offered");
         assert_eq!(EngineSwitch::current().engine, Engine::V1);
+        // All or nothing: a data.json that does not read switches nothing.
+        let good = std::fs::read(super::super::store::file()).unwrap();
+        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        assert!(switch_now(true).unwrap_err().ends_with("nothing switched"));
+        assert_eq!(EngineSwitch::current().engine, Engine::V1);
+        assert!(!EngineSwitch::current().switches.get("profiles").copied().unwrap_or(true), "the switch is what it was");
+        std::fs::write(super::super::store::file(), good).unwrap();
         let switched = switch_now(true).unwrap();
         let switch = EngineSwitch::current();
         assert_eq!(switch.engine, Engine::V2);

@@ -98,12 +98,12 @@ impl Workspace {
                 match switched {
                     Ok(switched) => {
                         this.lifetime.engine_switch = Some(EngineSwitching::Done);
-                        let later = switched.data.is_err() || switched.notes.is_err();
+                        let later = switched.data.is_err();
                         if let Err(why) = &switched.data {
-                            log::info!("manager: v1's data moves at the next start: {why}");
+                            log::info!("manager: {why}");
                         }
                         this.show_toast(
-                            if later { "Switched to the new manager. Some of v1's data moves at the next start. Restart Glasscode to finish." } else { "Switched to the new manager, with v1's notes, follow-ups, messages and checks. Restart Glasscode to finish." },
+                            if later { "Switched to the new manager. v1's data moves once this Mac is the manager's home again. Restart Glasscode to finish." } else { "Switched to the new manager, with v1's notes, follow-ups, messages and checks. Restart Glasscode to finish." },
                             cx,
                         );
                     }
