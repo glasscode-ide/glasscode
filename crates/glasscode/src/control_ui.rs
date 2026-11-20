@@ -1663,7 +1663,7 @@ impl Workspace {
                     let inner = done.take();
                     done = Some(Box::new(move |ws: &mut Workspace, reply: &Reply| {
                         if matches!(reply, Reply::Done { code: 0, .. }) {
-                            keep.write();
+                            keep.write(ws);
                         }
                         if let Some(inner) = inner {
                             inner(ws, reply);
@@ -2284,8 +2284,10 @@ pub(crate) struct Decided {
 }
 
 impl Decided {
-    /// Into the journal and the project's `decisions.md`, with the question's words as its source.
-    fn write(self) {
+    /// Into the journal, the conversation and the project's `decisions.md`, with the question's
+    /// words as its source.
+    fn write(self, ws: &mut Workspace) {
+        ws.chat_post_line(true, format!("{} (Kept in the project's decisions.)", self.line));
         let words = glasscode_core::words::record(glasscode_core::words::Origin::Peer(self.session.clone()), &self.asked, Some(&self.session), Some(&self.key));
         glasscode_core::journal::append(glasscode_core::journal::decision("manager", "delegated", &self.line, serde_json::json!({ "session": self.session, "delegation": self.delegation, "words": words.to_string() }), None));
         std::thread::spawn(move || {
