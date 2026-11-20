@@ -16,6 +16,12 @@
 //!   is rebuilt each time, so the text is in no object.
 //! - **Uninstall** lists everything Glasscode made ([`uninstall_plan`]) and removes it after the
 //!   person confirms in the app ([`uninstall`]); a worktree with work that is nowhere else stops it.
+//!   Outside its folder it takes only its own: the trust tables of its worktrees in Codex's
+//!   `config.toml`, and its keys in the system's keychain.
+//! - **Scheduled export** ([`ExportSchedule`]): an export every day or week to a folder, keeping the
+//!   newest few. The app asks [`scheduled_export`] each hour.
+//! - **Move out** ([`move_out`]): the agent notes go back to each Claude account's own memory
+//!   folder of the project, so Claude keeps what it learned here.
 //!
 //! Everything here reads and writes the disk and runs programs: never on the main thread.
 
@@ -457,6 +463,176 @@ fn replace_folded(text: &str, name: &str, with: &str) -> String {
     out
 }
 
+// ----- scheduled export --------------------------------------------------------------------------
+
+/// The scheduled export (`manager/export-schedule.json`): how often, where, how many to keep, and
+/// how the last one went.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportSchedule {
+    /// Days between exports; 0: none.
+    pub every_days: u32,
+    /// Where they go; none: "Glasscode exports" in Downloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    /// How many to keep; 0: [`KEEP_EXPORTS`].
+    pub keep: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl crate::store::Store for ExportSchedule {
+    const NAME: &'static str = "manager/export-schedule";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> PathBuf {
+        paths::root().join("manager").join("export-schedule.json")
+    }
+}
+
+/// How many scheduled exports are kept when the schedule names none.
+pub const KEEP_EXPORTS: u32 = 4;
+
+/// The name every scheduled export starts with, so pruning touches only those.
+const SCHEDULED_PREFIX: &str = "glasscode-export-";
+
+impl ExportSchedule {
+    /// Whether an export is due at `now_ms`.
+    pub fn due(&self, now_ms: u64) -> bool {
+        self.every_days > 0 && self.last_ms.is_none_or(|last| now_ms >= last + u64::from(self.every_days) * 86_400_000)
+    }
+
+    pub fn folder(&self) -> PathBuf {
+        self.folder.clone().unwrap_or_else(default_export_folder)
+    }
+
+    pub fn keep(&self) -> usize {
+        (if self.keep == 0 { KEEP_EXPORTS } else { self.keep }) as usize
+    }
+
+    /// One line for Settings and the command.
+    pub fn line(&self) -> String {
+        let every = match self.every_days {
+            0 => return "No scheduled export.".into(),
+            1 => "every day".to_string(),
+            7 => "every week".to_string(),
+            n => format!("every {n} days"),
+        };
+        let last = match (&self.last_error, &self.last_file) {
+            (Some(error), _) => format!(" The last one failed: {error}."),
+            (None, Some(file)) => format!(" The last one: {}.", file.display()),
+            _ => String::new(),
+        };
+        format!("An export {every} to {}, keeping the newest {}.{last}", self.folder().display(), self.keep())
+    }
+}
+
+/// "Glasscode exports" in Downloads (in a test run, in the test's own folder).
+pub fn default_export_folder() -> PathBuf {
+    person_home().join("Downloads").join("Glasscode exports")
+}
+
+/// The export the schedule asks for, when one is due at `now_ms`: written to its folder as
+/// `glasscode-export-<date>-<time>.tar` (projects that stay on this Mac left out), then only the
+/// newest few of those kept. How it went is kept in the schedule. None: none was due.
+pub fn scheduled_export(now_ms: u64, local_only: &[ProjectKey]) -> anyhow::Result<Option<PathBuf>> {
+    use crate::store::Store as _;
+    let schedule = ExportSchedule::load().map_err(|e| anyhow::anyhow!(e))?;
+    if !schedule.due(now_ms) {
+        return Ok(None);
+    }
+    let folder = schedule.folder();
+    let secs = (now_ms / 1000) as i64;
+    let stamp = format!("{}-{}", crate::day::iso(crate::day::local(secs)), crate::day::clock(secs).replace(':', ""));
+    let file = folder.join(format!("{SCHEDULED_PREFIX}{stamp}.tar"));
+    let done = std::fs::create_dir_all(&folder).with_context(|| format!("could not make {}", folder.display())).and_then(|()| export(&file, local_only, &[]));
+    let (last_file, last_error) = match &done {
+        Ok(exported) => (Some(exported.path.clone()), None),
+        Err(err) => (None, Some(format!("{err:#}"))),
+    };
+    crate::store::update::<ExportSchedule, _>(|stored| {
+        stored.last_ms = Some(now_ms);
+        stored.last_error = last_error;
+        if last_file.is_some() {
+            stored.last_file = last_file;
+        }
+    })
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let exported = done?;
+    prune_exports(&folder, schedule.keep())?;
+    Ok(Some(exported.path))
+}
+
+/// Keep the newest `keep` scheduled exports in `folder` (by their dated names); only files named
+/// as the schedule names them are touched. How many went.
+fn prune_exports(folder: &Path, keep: usize) -> anyhow::Result<usize> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(folder)?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(SCHEDULED_PREFIX) && n.ends_with(".tar"))).collect();
+    files.sort();
+    let gone = files.len().saturating_sub(keep);
+    for old in &files[..gone] {
+        std::fs::remove_file(old).with_context(|| format!("could not remove {}", old.display()))?;
+    }
+    Ok(gone)
+}
+
+// ----- move out --------------------------------------------------------------------------------
+
+/// What [`move_out`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MovedOut {
+    /// Files written, each a note that was not there.
+    pub written: Vec<PathBuf>,
+    /// Notes already there as they are.
+    pub same: usize,
+}
+
+/// Move out: each project's agent notes (`agent-notes/<key>/`, the Claude memory Glasscode keeps
+/// for it) go back to the memory folder of that project in each Claude account (`claude_dirs`), so
+/// Claude keeps what it learned while Glasscode was here. A note is never written over: one that is
+/// there with other text is written beside it as `<name>-from-glasscode.md`. `projects`: each
+/// project's key and main folder. `dry_run`: only say what it would write. It reads and writes the
+/// disk: never on the main thread.
+pub fn move_out(projects: &[(ProjectKey, PathBuf)], claude_dirs: &[PathBuf], dry_run: bool) -> anyhow::Result<MovedOut> {
+    let mut out = MovedOut::default();
+    for (key, root) in projects {
+        let notes = paths::root().join("agent-notes").join(key.as_str());
+        let Ok(entries) = std::fs::read_dir(&notes) else { continue };
+        let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md")).collect();
+        files.sort();
+        for account in claude_dirs {
+            let to = crate::agents::claude_memory_dir(account, root);
+            for file in &files {
+                let text = std::fs::read_to_string(file).with_context(|| format!("could not read {}", file.display()))?;
+                let Some(name) = file.file_name() else { continue };
+                let mut target = to.join(name);
+                if let Ok(there) = std::fs::read_to_string(&target) {
+                    if there == text {
+                        out.same += 1;
+                        continue;
+                    }
+                    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+                    target = to.join(format!("{stem}-from-glasscode.md"));
+                    if std::fs::read_to_string(&target).is_ok_and(|there| there == text) {
+                        out.same += 1;
+                        continue;
+                    }
+                }
+                if !dry_run {
+                    std::fs::create_dir_all(&to).with_context(|| format!("could not make {}", to.display()))?;
+                    std::fs::write(&target, &text).with_context(|| format!("could not write {}", target.display()))?;
+                }
+                out.written.push(target);
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ----- uninstall -------------------------------------------------------------------------------
 
 /// One thing Glasscode made.
@@ -732,6 +908,59 @@ mod tests {
         // The folder, and the two keys (a test never reaches the keychain itself).
         assert_eq!(uninstall(&plan, false).unwrap(), 3);
         assert!(!paths::root().exists());
+    }
+
+    #[test]
+    fn a_scheduled_export_comes_when_due_and_keeps_the_newest() {
+        let _scratch = Scratch::new();
+        use crate::store::Store as _;
+        remember(&Memory::open(), &MemFile::Profile, "releases go out on Tuesdays");
+        let day = 86_400_000u64;
+        let start = 1_795_000_000_000u64;
+        assert_eq!(scheduled_export(start, &[]).unwrap(), None, "no schedule, no export");
+        let folder = paths::root().join("backups");
+        ExportSchedule { every_days: 1, folder: Some(folder.clone()), keep: 2, ..ExportSchedule::default() }.save().unwrap();
+        let first = scheduled_export(start, &[]).unwrap().unwrap();
+        assert!(first.is_file() && first.starts_with(&folder));
+        assert_eq!(scheduled_export(start + day / 2, &[]).unwrap(), None, "not due yet");
+        // A file of the person's own in the folder is never touched.
+        std::fs::write(folder.join("notes.tar"), "mine").unwrap();
+        for n in 1..=3 {
+            scheduled_export(start + n * day, &[]).unwrap().unwrap();
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"notes.tar".to_string()) && !folder.join(first.file_name().unwrap()).exists());
+        let schedule = ExportSchedule::load().unwrap();
+        assert!(schedule.last_error.is_none() && schedule.line().contains("every day") && schedule.line().contains("newest 2"));
+    }
+
+    #[test]
+    fn move_out_gives_claude_its_notes_back_and_writes_over_nothing() {
+        let _scratch = Scratch::new();
+        let app = key("app-3f9a1c");
+        let root = paths::root().join("code").join("app");
+        let notes = paths::root().join("agent-notes").join(app.as_str());
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("MEMORY.md"), "- [Build](build.md)\n").unwrap();
+        std::fs::write(notes.join("build.md"), "Run make setup first.\n").unwrap();
+        let account = paths::root().join("claude-account");
+        let theirs = crate::agents::claude_memory_dir(&account, &root);
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("MEMORY.md"), "- [Own](own.md)\n").unwrap();
+        let projects = [(app.clone(), root.clone())];
+        let dry = move_out(&projects, std::slice::from_ref(&account), true).unwrap();
+        assert_eq!(dry.written.len(), 2);
+        assert!(!theirs.join("build.md").exists(), "a dry run writes nothing");
+        let done = move_out(&projects, std::slice::from_ref(&account), false).unwrap();
+        assert_eq!(std::fs::read_to_string(theirs.join("build.md")).unwrap(), "Run make setup first.\n");
+        assert_eq!(std::fs::read_to_string(theirs.join("MEMORY.md")).unwrap(), "- [Own](own.md)\n", "Claude's own index stays");
+        assert_eq!(std::fs::read_to_string(theirs.join("MEMORY-from-glasscode.md")).unwrap(), "- [Build](build.md)\n");
+        assert_eq!(done.written.len(), 2);
+        // Twice: nothing new.
+        let again = move_out(&projects, std::slice::from_ref(&account), false).unwrap();
+        assert!(again.written.is_empty() && again.same == 2);
     }
 
     #[test]

@@ -811,6 +811,20 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/export-schedule.json",
+        store: Some("manager/export-schedule"),
+        module: "portability",
+        writer: "the app (Settings › Manager › Your data, `glasscode data schedule`, and the export it runs)",
+        format: "JSON, schema v1 (days between exports, the folder, how many to keep, how the last one went)",
+        retention: "while it is set",
+        on_damage: "empty: no scheduled export until it is set again",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "manager/server-forget.json",
         store: Some("manager/server-forget"),
         module: "memstore::sync",
@@ -1061,6 +1075,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
     StoreInfo::of::<crate::movein::Progress>(),
     StoreInfo::of::<crate::memstore::sync::ServerForget>(),
+    StoreInfo::of::<crate::portability::ExportSchedule>(),
     StoreInfo::of::<crate::review::ApprovedPrompt>(),
     StoreInfo::of::<crate::gate::ForgeStore>(),
 ];
