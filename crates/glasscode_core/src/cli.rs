@@ -191,7 +191,7 @@ pub fn main(args: Vec<String>) -> i32 {
             return code::OK;
         }
         // What Claude Code runs in a session on Windows (`agents::launch`), not words for people.
-        Some("hook") => return hook(),
+        Some("hook") => return hook(rest.iter().any(|a| a == "--stamp")),
         Some("statusline") => return statusline(),
         _ => {}
     }
@@ -199,14 +199,12 @@ pub fn main(args: Vec<String>) -> i32 {
         println!("{}", help(first));
         return code::OK;
     }
-    let request = Request {
-        v: control::VERSION,
-        args: rest,
-        session: std::env::var("GLASSCODE_SESSION_ID").ok().filter(|s| !s.is_empty()),
-        sig: std::env::var("GLASSCODE_SESSION_SIG").ok().filter(|s| !s.is_empty()),
-        interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
-    };
+    // `glasscode events --follow` (M14): asked again every second, from where the last answer
+    // ended, until stopped.
+    if first == Some("events") && rest.iter().take_while(|a| *a != "--").any(|a| a == "--follow") {
+        return follow_events(rest, json);
+    }
+    let request = request_for(rest);
     let result = control::call(
         &request,
         |approval, summary| {
@@ -248,19 +246,75 @@ pub fn main(args: Vec<String>) -> i32 {
     }
 }
 
+/// A request with these words, from this session (when the command runs in one).
+fn request_for(args: Vec<String>) -> Request {
+    Request {
+        v: control::VERSION,
+        args,
+        session: std::env::var("GLASSCODE_SESSION_ID").ok().filter(|s| !s.is_empty()),
+        sig: std::env::var("GLASSCODE_SESSION_SIG").ok().filter(|s| !s.is_empty()),
+        interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+    }
+}
+
+/// `glasscode events --follow`: the newest events, then each new one as it comes. The app answers
+/// with the events after `--after` and the cursor to ask from next (`data.cursor`); this asks
+/// again every second. With `--json`, one event a line.
+fn follow_events(words: Vec<String>, json: bool) -> i32 {
+    let mut after: Option<String> = None;
+    loop {
+        let mut args = words.clone();
+        if let Some(cursor) = &after {
+            args.push("--after".into());
+            args.push(cursor.clone());
+        }
+        match control::call(&request_for(args), |_, _| false, Duration::from_secs(30)) {
+            Ok(Reply::Done { code, text, data }) if code == code::OK => {
+                if json {
+                    for event in data["events"].as_array().into_iter().flatten() {
+                        println!("{event}");
+                    }
+                } else if !text.is_empty() {
+                    println!("{text}");
+                }
+                let Some(cursor) = data["cursor"].as_str() else {
+                    eprintln!("This Glasscode cannot follow the journal.");
+                    return code::FAILED;
+                };
+                after = Some(cursor.to_string());
+            }
+            Ok(Reply::Done { code, text, .. }) => {
+                eprintln!("{text}");
+                return code;
+            }
+            Ok(Reply::Waiting { .. }) | Err(CallError::StillWaiting { .. }) => return code::WAITING,
+            Err(CallError::NotRunning(why)) => {
+                eprintln!("Glasscode is not running, so there is nothing to follow ({why}).");
+                return code::NOT_RUNNING;
+            }
+            Err(CallError::Broken(why)) => {
+                eprintln!("Could not talk to Glasscode: {why}");
+                return code::FAILED;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 // ----- for Claude Code in a session (Windows) --------------------------------------------------
 
 /// `glasscode hook`, the command of each Claude Code hook in a session on Windows: what the hook
 /// gets on stdin, and a line end, go to the session's events file (`GLASSCODE_EVENTS`), where the
 /// app reads them. It does not reach the app, and prints nothing: Claude Code would add that to
 /// the conversation.
-fn hook() -> i32 {
+fn hook(stamp: bool) -> i32 {
     let Some(events) = std::env::var_os("GLASSCODE_EVENTS").filter(|v| !v.is_empty()).map(PathBuf::from) else {
         eprintln!("glasscode hook: GLASSCODE_EVENTS is not set (Glasscode sets it in its sessions)");
         // Never 2: that would tell Claude Code to block the prompt.
         return code::FAILED;
     };
-    match append_event(&mut std::io::stdin().lock(), &events) {
+    match append_event(&mut std::io::stdin().lock(), &events, stamp) {
         Ok(()) => code::OK,
         Err(error) => {
             eprintln!("glasscode hook: could not write to {}: {error}", events.display());
@@ -269,17 +323,44 @@ fn hook() -> i32 {
     }
 }
 
-/// Add all of `input` and a line end to the events file in one write, so that the lines of two
-/// hooks never mix. Claude Code ends its input with a line end already: then it gets no second.
-fn append_event(input: &mut impl std::io::Read, events: &Path) -> std::io::Result<()> {
+/// The lock two hooks of one session take turns at (`<id>.jsonl.lock`).
+pub fn spool_lock(events: &Path) -> PathBuf {
+    let mut name = events.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// The counter of a session's hook lines (`<id>.jsonl.seq`), so a reader sees a line that went
+/// missing (events-20).
+pub fn spool_counter(events: &Path) -> PathBuf {
+    let mut name = events.as_os_str().to_owned();
+    name.push(".seq");
+    PathBuf::from(name)
+}
+
+/// Add all of `input` and a line end to the events file in one write, under the file's lock, so
+/// that the lines of two hooks never mix (events-20). Claude Code ends its input with a line end
+/// already: then it gets no second. With `stamp` (the hooks of a v2 home) a payload that is a JSON
+/// object also gets the time it came (`glasscode_at`, ms) and the session's next counter
+/// (`glasscode_seq`), so the journal can tell how late it read it and what went missing.
+fn append_event(input: &mut impl std::io::Read, events: &Path, stamp: bool) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut event = Vec::new();
     input.read_to_end(&mut event)?;
-    if !event.ends_with(b"\n") {
-        event.push(b'\n');
-    }
     if let Some(dir) = events.parent() {
         std::fs::create_dir_all(dir)?;
+    }
+    let _lock = crate::sys::FileLock::take(&spool_lock(events)).map_err(|err| std::io::Error::other(err.to_string()))?;
+    if stamp && let Ok(serde_json::Value::Object(mut payload)) = serde_json::from_slice::<serde_json::Value>(&event) {
+        let counter = spool_counter(events);
+        let seq = std::fs::read_to_string(&counter).ok().and_then(|text| text.trim().parse::<u64>().ok()).unwrap_or(0) + 1;
+        std::fs::write(&counter, seq.to_string())?;
+        payload.insert("glasscode_at".into(), crate::clock::now_ms().into());
+        payload.insert("glasscode_seq".into(), seq.into());
+        event = serde_json::to_vec(&payload).map_err(std::io::Error::other)?;
+    }
+    if !event.ends_with(b"\n") {
+        event.push(b'\n');
     }
     std::fs::OpenOptions::new().create(true).append(true).open(events)?.write_all(&event)
 }
@@ -541,13 +622,57 @@ mod tests {
     fn a_hook_adds_its_input_and_one_line_end() {
         let dir = tempfile::tempdir().unwrap();
         let events = dir.path().join("events").join("s1.jsonl");
-        append_event(&mut &br#"{"a":1}"#[..], &events).unwrap();
+        append_event(&mut &br#"{"a":1}"#[..], &events, false).unwrap();
         assert_eq!(std::fs::read_to_string(&events).unwrap(), "{\"a\":1}\n");
-        append_event(&mut &br#"{"a":1}"#[..], &events).unwrap();
+        append_event(&mut &br#"{"a":1}"#[..], &events, false).unwrap();
         assert_eq!(std::fs::read_to_string(&events).unwrap(), "{\"a\":1}\n{\"a\":1}\n");
         // As Claude Code gives it, with its own line end.
-        append_event(&mut &b"{\"b\":2}\n"[..], &events).unwrap();
+        append_event(&mut &b"{\"b\":2}\n"[..], &events, false).unwrap();
         assert_eq!(std::fs::read_to_string(&events).unwrap(), "{\"a\":1}\n{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    #[test]
+    fn a_v2_hook_stamps_its_line_with_the_time_and_a_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events").join("s1.jsonl");
+        append_event(&mut &br#"{"hook_event_name":"Stop"}"#[..], &events, true).unwrap();
+        append_event(&mut &b"not json\n"[..], &events, true).unwrap();
+        append_event(&mut &br#"{"hook_event_name":"Stop"}"#[..], &events, true).unwrap();
+        let text = std::fs::read_to_string(&events).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[1], "not json");
+        let seqs: Vec<u64> = [lines[0], lines[2]].iter().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["glasscode_seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, [1, 2]);
+        assert!(serde_json::from_str::<serde_json::Value>(lines[0]).unwrap()["glasscode_at"].as_u64().unwrap() > 0);
+    }
+
+    /// events-20: eight hook processes at once, a thousand lines each, never mix their lines.
+    #[test]
+    fn concurrent_hook_appends_do_not_interleave() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events").join("s1.jsonl");
+        // Eight processes would each start this test binary; threads write through the same
+        // lock and the same one write, which is what keeps processes apart too (flock is per
+        // open file description).
+        let big = "x".repeat(20_000);
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let (events, big) = (events.clone(), big.clone());
+                std::thread::spawn(move || {
+                    for n in 0..1000 {
+                        let line = format!(r#"{{"hook_event_name":"Stop","t":{t},"n":{n},"pad":"{}"}}"#, if n % 100 == 0 { big.as_str() } else { "" });
+                        append_event(&mut line.as_bytes(), &events, true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let text = std::fs::read_to_string(&events).unwrap();
+        let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).expect("a whole line")).collect();
+        assert_eq!(lines.len(), 8000);
+        let mut seqs: Vec<u64> = lines.iter().map(|l| l["glasscode_seq"].as_u64().unwrap()).collect();
+        seqs.sort();
+        assert_eq!(seqs, (1..=8000).collect::<Vec<u64>>());
     }
 
     #[test]

@@ -786,13 +786,41 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "both ways (M57); the Mac never accepts tier 1 from the server",
         ..TODAY
     },
+    // The journal is JSON lines, not a Store: one writer thread per process appends, under a lock
+    // beside each day's file (`journal`); only in a v2 home.
+    DataRow {
+        path: "journal/<yyyy-mm-dd>.jsonl",
+        module: "journal",
+        writer: "the app, and glasscoded on the server; each in its own home; only in a v2 home",
+        format: "JSON lines, schema v1 per line (`v`)",
+        retention: "30 days (UTC days)",
+        on_damage: "skip bad lines, log once",
+        export: "no",
+        local_only: "—",
+        forget: "person (redact), project",
+        sync: "the Mac pulls the server's by cursor (`journal.since`); both ways in M57",
+        ..TODAY
+    },
+    DataRow {
+        path: "journal/cursors.json",
+        store: Some("journal/cursors"),
+        module: "journal",
+        writer: "the app or glasscoded, each in its own home",
+        format: "JSON, schema v1 (each hook spool's offset, each server's journal cursor)",
+        retention: "lasting",
+        on_damage: "empty; each spool is read from its end again, and the reconciler fills the gap",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", format: "JSON (commit id per project key)", retention: "lasting", on_damage: "refuse; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", local_only: "—", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
     DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory/", planned: Some("M20.1"), module: "memory", writer: "`glasscode memory …` only", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
     DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", retention: "lasting", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
@@ -897,7 +925,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>(), StoreInfo::of::<crate::journal::Cursors>()];
 
 #[cfg(test)]
 mod tests {

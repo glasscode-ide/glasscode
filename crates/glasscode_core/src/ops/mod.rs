@@ -13,6 +13,7 @@ mod spec;
 mod table_app;
 mod table_board;
 mod table_forge;
+mod table_journal;
 mod table_manager;
 mod table_project;
 mod table_read;
@@ -34,8 +35,8 @@ pub use schema::{description, json_schema};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_journal::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_journal::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -93,9 +94,15 @@ pub const RENAMED: &[Renamed] = &[
     Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
     Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
     Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
-    // `glasscode log` read agent-log.jsonl, which the journal replaces: the actions in it.
-    Renamed { v1: "app.log", v2: "journal.query", by: "M14" },
+    // `glasscode log` (agent-log.jsonl) parses to `journal.query` of the actions with the v2
+    // engine since M14: `table_journal::V2_WORDS`.
 ];
+
+/// The v2 op a v1 op's words parse to with the v2 engine, and the arguments it then gets.
+pub(crate) fn v2_words(v1: &str) -> Option<(&'static OpSpec, &'static [(&'static str, &'static str)])> {
+    let (_, v2, args) = table_journal::V2_WORDS.iter().find(|(name, _, _)| *name == v1)?;
+    Some((find(v2)?, *args))
+}
 
 /// The entry of an op, by its name.
 pub fn find(name: &str) -> Option<&'static OpSpec> {
@@ -385,7 +392,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -463,7 +470,7 @@ mod tests {
             // Only reads and the switch's moves wait for the v2 engine; the person's own approvals
             // are never offered to anyone else.
             if op.v2_only {
-                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree."), "{}", op.name);
+                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree.") || (op.name.starts_with("journal.") && op.effect == EffectClass::Read), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -574,6 +581,8 @@ mod tests {
         switch.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.owner Read Read Idempotent Core read - - v2
+        journal.events Read Read Idempotent Core read - - v2
+        journal.query Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

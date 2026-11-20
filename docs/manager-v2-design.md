@@ -255,7 +255,8 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
-| `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
+| `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines, `v` per line (UTC days) | 30 days | skip bad lines, log once | no | — | person (redact), project | the Mac pulls the server's by cursor (`journal.since`, M14); both ways in M57 |
+| `journal/cursors.json` | `journal` | JSON, schema v1 (each hook spool's offset, each server's cursor) | lasting | empty: each spool is read from its end again, and the reconciler fills the gap | no | yes | — | never |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
@@ -601,12 +602,26 @@ pub fn decide(caller: &Caller, op: &Op, targets: &Targets, policy: &PolicySet, g
 pub enum PendingState { Waiting, Approved, Denied, Expired, Ran, Uncertain }
 pub struct PendingAction { pub id: String, pub op: Op, pub arg_hash: [u8; 32], pub caller: Caller, pub reason: String, pub created: Hlc, pub expires_ms: u64, pub state: PendingState }
 
-// glasscode_core::journal
+// glasscode_core::journal (M14; the catalogue of kinds is journal_kinds::CATALOGUE)
 pub enum Severity { Info, Notice, Warn, Urgent }
-pub struct Event { pub v: u16, pub id: String, pub at: Hlc, pub source: Source, pub project: Option<ProjectKey>, pub session: Option<String>, pub kind: EventKind, pub severity: Severity, pub summary: String, pub data: serde_json::Value }
-pub fn append(event: Event) -> std::io::Result<()>;                               // one writer thread per process
+pub struct EventKind;                 // a dotted name, "session.started"; a kind a newer build wrote reads too
+pub struct Event { pub v: u16, pub id: String, pub at: Hlc, pub source: Source, pub project: Option<ProjectKey>, pub session: Option<String>, pub kind: EventKind, pub severity: Severity, pub summary: String, pub data: serde_json::Value,
+                   pub trace: Option<String>, pub age_ms: Option<u64> }       // trace: exec-31; age_ms: a poll's age
+pub fn append(event: Event);                                                      // no IO: one writer thread per process stamps, redacts, writes
+pub fn append_stamped(event: Event);                                              // another machine's event (the server's, pulled by the Mac)
+pub fn init() -> bool; pub fn enabled() -> bool; pub fn known_enabled() -> Option<bool>;  // a v2 home only (rule 2)
+pub fn flush(); pub fn health() -> Health;                                        // Health { last_write_ms, error, failing_since_ms, waiting }
 pub struct Cursor { pub file: String, pub offset: u64 }
-pub fn read_from(cursor: &Cursor, max: usize) -> (Vec<Event>, Cursor);
+pub fn read_from(cursor: &Cursor, max: usize) -> (Vec<Event>, Cursor);           // a damaged line is skipped and logged once
+pub enum Scope { All, Projects(Vec<ProjectKey>) }  impl Scope { pub fn of(caller: &Caller, managed: &[ProjectKey]) -> Scope; }
+pub struct Filter { pub project: Option<ProjectKey>, pub session: Option<String>, pub kind: Option<String>, pub since_ms: Option<u64> }
+pub fn query(filter: &Filter, scope: &Scope, limit: usize) -> Vec<Event>;          // the newest, oldest first
+pub fn since(cursor: &Cursor, scope: &Scope, filter: &Filter, max: usize) -> (Vec<Event>, Cursor);  // glasscoded's journal.since
+pub struct HookIntake; pub struct GitWatch; pub struct ClockWatch; pub fn forge_events(…) -> Vec<Event>; pub fn decision(step, outcome, reason, inputs, trace) -> Event;
+
+// glasscode_core::reconcile (M14, D24's safety net)
+pub struct Snapshot { pub sessions: Vec<SessionNow>, pub worktrees: Vec<(Option<ProjectKey>, PathBuf)> }
+impl Reconciler { pub fn from_events<'a>(events: impl IntoIterator<Item = &'a Event>) -> Reconciler; pub fn observe(&mut self, event: &Event); pub fn run(&mut self, now: &Snapshot) -> Vec<Event>; }
 
 // glasscode_core::effects
 pub struct EffectKey(pub [u8; 32]);
@@ -691,7 +706,7 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path,
 |---|---|---|---|---|
 | A store file is damaged | `Store::load` | One line naming the store and the feature that stopped | `.broken` copy kept; the previous generation (`.prev`) is used when it is whole; otherwise "refuse" stores stop their feature and "empty" stores start fresh | fault injection per store (M10 `fault_injection_for_every_store`; M55) |
 | A memory git error, or a stale `index.lock` | the memory writer thread, the only owner of git calls | "Memory could not save; your text is kept in inbox/rejected" | The lock is removed only when no Glasscode git process runs; the text is kept | M20.1 |
-| The journal cannot be written (disk full) | the writer thread | A status bar warning; playbooks pause | Retries every 30 s; nothing acts without a journal | M14 (events-m4) |
+| The journal cannot be written (disk full) | the writer thread (`journal::health`) | One toast (M14); a status bar warning and paused playbooks when they exist (M40) | Retries every 30 s, keeping up to 10,000 events; nothing acts without a journal | M14 (events-m4) |
 | A brain is signed out, out of usage, or on an unsupported version | `runtime::health` | One notification in the CLI's own words; the chat explains | Wakes stop; answers from code keep working | M50 |
 | A claim has no result after a crash | the effect ledger at start | Nothing when the probe settles it; else an "uncertain" card | The probe runs with no model | M31 |
 | The clock jumps or the time zone changes | the HLC and the scheduler | One Activity line | Schedules re-plan from UTC; the order of events is kept | M41 |

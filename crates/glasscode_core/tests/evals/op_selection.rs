@@ -47,7 +47,7 @@ pub fn context() -> Value {
 /// The last slice whose ops are registered. The checks against the registry take the cases of that
 /// slice and of the slices before it (in the plan's order, `SLICES`); each slice that registers
 /// ops (M12.2, M20.2, M33.2) moves this to itself.
-const LANDED: &str = "M12.2";
+const LANDED: &str = "M14";
 
 /// The cases whose ops the registry has by now ([`LANDED`]).
 fn landed() -> Vec<Case> {
