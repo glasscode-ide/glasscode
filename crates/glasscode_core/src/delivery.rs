@@ -159,7 +159,7 @@ impl crate::store::Store for DeliveryFile {
     const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
 
     fn path() -> std::path::PathBuf {
-        crate::manager::store::dir().join("delivery.json")
+        crate::manager::store_dir().join("delivery.json")
     }
 }
 

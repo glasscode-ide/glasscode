@@ -1,5 +1,6 @@
 //! The manager's rounds in the app: build what it sees, let the rules decide, carry out what
-//! they say; ask the brain; take the person through the app and point at things there.
+//! they say; take the person through the app and point at things there. Its thinking is the
+//! chat and wake lanes' (`manager_chat.rs`, `manager_lanes.rs`).
 //!
 //! The thinking is `glasscode_core::manager`; this file is what needs the app: its sessions,
 //! its terminals, its window. While the manager is off nothing here starts anything; the tick
@@ -8,19 +9,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{AnyElement, AppContext as _, Context, Div, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Rule, code};
 use glasscode_core::github::{self, CheckState, CiStatus, PrDetails, PrSummary, PreviewConfig, PullRequest};
-use glasscode_core::manager::brain::{self, Brain, BrainConfig};
-use glasscode_core::manager::harness::Answer;
-use glasscode_core::manager::sync::{self, Ask};
+use glasscode_core::manager::sync;
 use glasscode_core::manager::messenger::{self, MessengerError};
 use glasscode_core::manager::{
-    Action, ChatLine, FollowKind, MsgState, OutMessage, PanelTab, PrInfo, ReviewAsk, ReviewerInfo, Scene, SessionInfo, SessionState, Show, Snapshot, Tier, TourStop, Who, gh, memory, messages, scene, store,
+    Action, ChatLine, FollowKind, MsgState, OutMessage, PanelTab, PrInfo, ReviewAsk, ReviewerInfo, Scene, SessionInfo, SessionState, Show, Snapshot, Tier, TourStop, Who, gh, memory, messages, scene,
 };
 use glasscode_core::model::{AgentKind, Session, now};
 use glasscode_core::prompt::{self, PendingPrompt};
@@ -50,8 +48,6 @@ const CHAT_MAX: usize = 400;
 const POINT_FOR: Duration = Duration::from_secs(8);
 /// The caption stays this long after it stopped speaking.
 const CAPTION_STAYS: Duration = Duration::from_secs(6);
-/// A question nobody answered in this time is given up.
-const ASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A message for a session that could not be typed for this long is dropped.
 const TELL_KEEP: Duration = Duration::from_secs(24 * 3600);
 /// At least this long between two messages typed into the same session.
@@ -94,10 +90,6 @@ pub struct ReplyEnd {
 /// What the rounds keep between ticks (`ManagerUi::tick`).
 #[derive(Default)]
 pub struct TickUi {
-    /// Whoever waits for the answer to a question, by the question's id.
-    pub waiting: HashMap<String, OnAnswer>,
-    /// Questions out with the brain or the server's copy, and since when.
-    pub open_asks: HashMap<String, Instant>,
     /// Messages for sessions that could not be typed yet (working, a draft in the box).
     pub tells: Vec<Tell>,
     /// When each session was last told something.
@@ -113,8 +105,6 @@ pub struct TickUi {
     /// Where the next read of pull requests starts (they take turns, a few at a time).
     pub prs_from: usize,
     pub later: Vec<Later>,
-    /// What the brain was started with (agent, account, model).
-    pub brain_key: Option<(AgentKind, Option<String>, Option<String>)>,
     /// Whether it was speaking and had a caption at the last tick (to redraw when that ends).
     pub shown: (bool, bool),
     /// A walk was started while it was still speaking: its first stop comes when that is over.
@@ -155,19 +145,7 @@ impl Workspace {
             }
         }
 
-        // The server's copy stopped answering: the Mac takes its questions over (v1 only: at v2
-        // the chat lane answers, and v1's brain never runs).
         let on_server = self.manager_on_server();
-        if !on_server && !self.control.engine_v2 && !self.manager.asks.is_empty() {
-            let snap = self.manager_snapshot();
-            for ask in std::mem::take(&mut self.manager.asks) {
-                if let (true, Ok(id)) = (self.manager.tick.open_asks.contains_key(&ask.id), ask.id.parse::<u64>()) {
-                    // The brain gets its full time, however long the server sat on the question.
-                    self.manager.tick.open_asks.insert(ask.id.clone(), Instant::now());
-                    self.mtick_ask_brain(id, ask.text, ask.voice, &snap, cx);
-                }
-            }
-        }
 
         if self.manager.last_round.is_none_or(|t| t.elapsed() >= ROUND) {
             self.manager.last_round = Some(at);
@@ -186,18 +164,9 @@ impl Workspace {
                 let mut actions = round.actions;
                 actions.extend(self.native_tell_ready(&snap));
                 changed |= !actions.is_empty();
+                // v1's checks are schedules now (`v1-check-<id>`, M44), which run once the person
+                // approves them: v1's tick brain, which asked them, is gone (M56).
                 self.manager_apply(actions, cx);
-                // What it checks by itself goes to the brain when that is free and no walk is on;
-                // in v2, a check whose schedule runs (approved, M44) is the schedule's.
-                if self.manager.tick.open_asks.is_empty() && self.manager.tour.is_none() {
-                    let scheduled = if self.control.engine_v2 { self.lifetime.scheduled.clone() } else { Default::default() };
-                    let by_schedule = |id: &str| scheduled.contains(&glasscode_core::manager::migrate_v2::check_id(id));
-                    // v1's tick brain asks them; at v2 it does not run (`handover`): none.
-                    for check in self.manager.harness.due_checks_owned(&self.state.manager, now(), &owned, &by_schedule) {
-                        self.mtick_run_check(&check.what, &snap, cx);
-                        changed = true;
-                    }
-                }
             }
             self.mtick_flush_tells(cx);
             changed |= self.manager.harness.dirty;
@@ -213,13 +182,6 @@ impl Workspace {
             if !self.manager.tick.prs_running && self.manager.tick.next_prs.is_none_or(|t| at >= t) {
                 self.mtick_fetch_prs(cx);
             }
-        }
-
-        // Questions nobody answered.
-        let late: Vec<String> = self.manager.tick.open_asks.iter().filter(|(_, since)| since.elapsed() > ASK_TIMEOUT).map(|(id, _)| id.clone()).collect();
-        for id in late {
-            self.manager.asks.retain(|a| a.id != id);
-            self.manager_answered(&id, Err("No answer came back in ten minutes".into()), false, cx);
         }
 
         // A walk moves on when its sentence is over (and the voice has finished saying it).
@@ -274,13 +236,6 @@ impl Workspace {
         let mut changed = false;
         while let Ok(done) = self.manager.jobs.1.try_recv() {
             match done {
-                Done::Answer { id, say, voice } => {
-                    let id = id.to_string();
-                    // An answer to a question that was given up meanwhile is not said.
-                    if on && self.manager.tick.open_asks.contains_key(&id) {
-                        self.manager_answered(&id, say, voice, cx);
-                    }
-                }
                 Done::Reviews(result) => {
                     let wanted = std::mem::take(&mut self.manager.reviews_running);
                     match result {
@@ -589,9 +544,7 @@ impl Workspace {
 // ----- talking to it ----------------------------------------------------------------------------
 
 impl Workspace {
-    /// The person said or typed something to it. Adds the line to the conversation, answers
-    /// at once when the rules can (`Harness::quick_answer`), else asks the brain in the
-    /// background (or the server's copy when that runs it).
+    /// The person said or typed something to it: the chat lane answers (M52.1).
     pub fn manager_ask(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
         self.mtick_ask(text, voice, None, cx);
     }
@@ -599,7 +552,7 @@ impl Workspace {
     /// A question with whose words it is (M52.1, the v2 chat): `words`, the person's record from
     /// the box they typed in; `asker`, who asked when it was not the person (a command), and
     /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
-    /// waits for it. With the v1 engine, as v1 asked.
+    /// waits for it.
     pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
             return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
@@ -607,150 +560,26 @@ impl Workspace {
         self.mtick_ask(text, voice, on_answer, cx);
     }
 
+    /// A question to the chat. Said, or put in the box by the app (a Try phrase): its words are
+    /// recorded as such (D1). One that cannot be asked is answered with why.
     fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
-        // With the v2 engine the question goes to the chat (M52.1). Said, or put in the box by the
-        // app (a Try phrase): its words are recorded as such (D1).
         if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
             let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
             let words = glasscode_core::words::record(origin, &text, None, None);
             return self.chat_ask(text, Some(words), None, voice, on_answer, cx);
         }
-        let refused = if !self.state.manager.enabled {
-            Some("The manager is switched off. Settings › Manager switches it on.")
+        let why = if !self.state.manager.enabled {
+            "The manager is switched off. Settings › Manager switches it on."
         } else if text.is_empty() {
-            Some("There was nothing to answer.")
+            "There was nothing to answer."
         } else {
-            None
+            // Only a home whose engine switch could not be written is still at v1 (M56).
+            "The manager runs with Manager v2 only. Settings › Manager switches to it."
         };
-        if let Some(why) = refused {
-            if let Some(on_answer) = on_answer {
-                on_answer(self, Err(why.to_string()), cx);
-            }
-            return;
-        }
-        self.mtick_line(Who::You, text.clone(), None);
-        if self.manager.tour.is_some() {
-            self.manager_stop_tour(cx);
-        }
-        let snap = self.manager_snapshot();
-        if let Some(Answer { say, actions }) = self.manager.harness.quick_answer(&self.state.manager, &snap, &text, now()) {
-            self.manager_say(&say, None, cx);
-            // The answer is said once, also when the rules list it among what to do.
-            let actions = actions.into_iter().filter(|a| !matches!(a, Action::Say { text, .. } if text.trim() == say.trim())).collect();
-            self.manager_apply(actions, cx);
-            self.manager.harness.save();
-            if let Some(on_answer) = on_answer {
-                on_answer(self, Ok(say), cx);
-            }
-            cx.notify();
-            return;
-        }
-        let id = self.manager.next_ask;
-        self.manager.next_ask += 1;
-        let key = id.to_string();
         if let Some(on_answer) = on_answer {
-            self.manager.tick.waiting.insert(key.clone(), on_answer);
+            on_answer(self, Err(why.to_string()), cx);
         }
-        self.manager.tick.open_asks.insert(key.clone(), Instant::now());
-        self.manager.thinking = true;
-        if self.manager_on_server() {
-            self.manager.asks.push(Ask { id: key, text, voice });
-        } else {
-            self.mtick_ask_brain(id, text, voice, &snap, cx);
-        }
-        cx.notify();
-    }
-
-    /// Hand a question to the brain, off the main thread; the answer comes back as
-    /// `Done::Answer`.
-    fn mtick_ask_brain(&mut self, id: u64, text: String, voice: bool, snap: &Snapshot, cx: &mut Context<Self>) {
-        // One engine reasons in a v2 home (M51's lanes): v1's brain never starts there.
-        if self.control.engine_v2 {
-            let say = Err("v1's brain does not run with the engine at v2; the chat answers".to_string());
-            let _ = self.manager.jobs.0.try_send(Done::Answer { id, say, voice });
-            return;
-        }
-        // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex,
-        // also not for the manager: the question gets an answer that says so.
-        if crate::workspace::no_agents() {
-            let say = Err("its agent does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)".to_string());
-            let _ = self.manager.jobs.0.try_send(Done::Answer { id, say, voice });
-            return;
-        }
-        let brain = self.mtick_brain(cx);
-        let context = brain::context(&self.state.manager, &self.manager.harness.data, snap, &text);
-        let tx = self.manager.jobs.0.clone();
-        cx.background_spawn(async move {
-            // One question at a time: the next waits here until this one is answered.
-            let say = brain.lock().unwrap_or_else(|e| e.into_inner()).ask(&text, &context, voice).map_err(|e| format!("{e:#}"));
-            let _ = tx.try_send(Done::Answer { id, say, voice });
-        })
-        .detach();
-    }
-
-    /// A scheduled check: the brain is asked in the person's words, and what it finds is said
-    /// like any answer. The conversation shows it as the app's line, not as the person's.
-    fn mtick_run_check(&mut self, what: &str, snap: &Snapshot, cx: &mut Context<Self>) {
-        let what = what.trim();
-        self.mtick_line(Who::System, format!("Checking: {what}"), None);
-        let id = self.manager.next_ask;
-        self.manager.next_ask += 1;
-        self.manager.tick.open_asks.insert(id.to_string(), Instant::now());
-        self.manager.thinking = true;
-        self.mtick_ask_brain(id, check_question(what), false, snap, cx);
-    }
-
-    /// The agent that thinks for it, started with the first question (and again after its
-    /// agent, account or model changed).
-    fn mtick_brain(&mut self, cx: &mut Context<Self>) -> Arc<Mutex<Brain>> {
-        let settings = &self.state.manager;
-        let key = (settings.brain, settings.account.clone(), settings.model.clone());
-        if let Some(brain) = self.manager.brain.as_ref().filter(|_| self.manager.tick.brain_key.as_ref() == Some(&key)) {
-            return brain.clone();
-        }
-        self.mtick_stop_brain(cx);
-        let settings = &self.state.manager;
-        let account = settings
-            .account
-            .as_deref()
-            .and_then(|wanted| self.state.accounts_for(settings.brain).find(|a| a.id == wanted || a.label.eq_ignore_ascii_case(wanted)))
-            .or_else(|| self.state.default_account(settings.brain));
-        let mut env = (*self.env).clone();
-        // Like a session: its `glasscode` commands reach this app.
-        env.insert("GLASSCODE_CONTROL_SOCKET".into(), control::socket_path().to_string_lossy().into_owned());
-        let config = BrainConfig { config_dir: account.and_then(|a| a.config_dir()), env, cwd: store::dir().join("work") };
-        let brain = Arc::new(Mutex::new(Brain::new(settings, config)));
-        self.manager.brain = Some(brain.clone());
-        self.manager.tick.brain_key = Some(key);
-        brain
-    }
-
-    /// Stop the brain (the next question starts a fresh one). It may be in the middle of an
-    /// answer, so the stopping waits for that off the main thread.
-    fn mtick_stop_brain(&mut self, cx: &mut Context<Self>) {
-        self.manager.tick.brain_key = None;
-        let Some(brain) = self.manager.brain.take() else { return };
-        cx.background_spawn(async move { brain.lock().unwrap_or_else(|e| e.into_inner()).stop() }).detach();
-    }
-
-    /// An answer came in for question `id` (from the brain's background job, or from the
-    /// server's copy): show it, speak it, and call whoever waits for it.
-    pub fn manager_answered(&mut self, id: &str, say: Result<String, String>, _voice: bool, cx: &mut Context<Self>) {
-        self.manager.tick.open_asks.remove(id);
-        self.manager.thinking = !self.manager.tick.open_asks.is_empty();
-        match &say {
-            Ok(text) => self.manager_say(text, None, cx),
-            Err(why) => {
-                let line = cannot_answer(&self.state.manager.name, why);
-                self.mtick_line(Who::System, line, None);
-            }
-        }
-        if let Some(on_answer) = self.manager.tick.waiting.remove(id) {
-            on_answer(self, say, cx);
-        }
-        self.manager.harness.save();
-        cx.notify();
     }
 
     /// It says something: the conversation, the caption, and its voice when that is on.
@@ -1145,16 +974,9 @@ impl Workspace {
     pub fn manager_settings_changed(&mut self, cx: &mut Context<Self>) {
         self.save();
         if self.state.manager.enabled {
-            // Another agent, account or model: the next question starts a fresh brain.
-            let settings = &self.state.manager;
-            let key = (settings.brain, settings.account.clone(), settings.model.clone());
-            if self.manager.brain.is_some() && self.manager.tick.brain_key.as_ref() != Some(&key) {
-                self.mtick_stop_brain(cx);
-            }
             // Its first round comes with the next tick.
             self.manager.last_round = None;
         } else {
-            self.mtick_stop_brain(cx);
             if self.manager.live {
                 self.manager_voice_toggle(cx);
             }
@@ -1170,16 +992,9 @@ impl Workspace {
             manager.caption.clear();
             manager.speaking_until = None;
             manager.caption_until = None;
-            manager.asks.clear();
-            manager.tick.open_asks.clear();
             manager.tick.tells.clear();
             manager.tick.later.clear();
             manager.harness.save();
-            // Whoever waits for an answer hears that none comes.
-            let waiting: Vec<OnAnswer> = self.manager.tick.waiting.drain().map(|(_, on_answer)| on_answer).collect();
-            for on_answer in waiting {
-                on_answer(self, Err("The manager was switched off.".into()), cx);
-            }
         }
         cx.notify();
     }
@@ -1532,16 +1347,6 @@ fn tell_line(name: &str, text: &str) -> String {
     format!("[{name}] {text} (Sent by Glasscode because {name} asked it to.)")
 }
 
-/// A scheduled check as a question for the brain: it must know nobody asked just now.
-fn check_question(what: &str) -> String {
-    format!("(A check the person asked you to run on a schedule, not a question from them just now. Say what you found in one or two sentences.) {what}")
-}
-
-/// Why there is no answer, as a line for the conversation.
-fn cannot_answer(name: &str, why: &str) -> String {
-    format!("{name} could not answer. {}", sentence(why))
-}
-
 /// The first line of a reason, ending like a sentence.
 fn sentence(why: &str) -> String {
     let line = why.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Something went wrong");
@@ -1666,12 +1471,6 @@ mod tests {
     }
 
     #[test]
-    fn a_check_tells_the_brain_nobody_asked_just_now() {
-        let question = check_question("see whether #41 was merged");
-        assert!(question.starts_with("(A check the person asked you to run on a schedule") && question.ends_with(") see whether #41 was merged"));
-    }
-
-    #[test]
     fn pull_requests_take_turns() {
         // 30 open ones, 12 at a time: every one is read within three turns.
         let mut seen = std::collections::HashSet::new();
@@ -1689,7 +1488,6 @@ mod tests {
 
     #[test]
     fn reasons_read_as_sentences() {
-        assert_eq!(cannot_answer("AI Alex", "claude is not signed in\nmore detail"), "AI Alex could not answer. claude is not signed in.");
         assert_eq!(sentence("No messenger is set up"), "No messenger is set up.");
         assert_eq!(messenger_reason(&anyhow::Error::new(MessengerError::NotSet)), "No messenger is set up. Choose one in Settings › Manager.");
         assert_eq!(messenger_reason(&anyhow::anyhow!("the program stopped\nwith more")), "the program stopped.");
