@@ -408,10 +408,10 @@ fn secrets(text: &str) -> Vec<Range<usize>> {
     while let Some(found_at) = text[from..].find("://") {
         let start = from + found_at + 3;
         let authority = &text[start..start + text[start..].find(|c: char| c.is_whitespace() || c == '/').unwrap_or(text.len() - start)];
-        if let (Some(at), Some(colon)) = (authority.rfind('@'), authority.find(':')) {
-            if colon < at && colon + 1 < at {
-                found.push(start + colon + 1..start + at);
-            }
+        if let (Some(at), Some(colon)) = (authority.rfind('@'), authority.find(':'))
+            && colon + 1 < at
+        {
+            found.push(start + colon + 1..start + at);
         }
         from = start;
     }
@@ -463,7 +463,7 @@ impl Typed {
 
     /// The whole text was set to `len` bytes.
     pub fn set(&mut self, len: usize, typed: bool) {
-        self.untyped = if typed || len == 0 { Vec::new() } else { vec![0..len] };
+        self.untyped = if typed || len == 0 { Vec::new() } else { std::iter::once(0..len).collect() };
     }
 
     pub fn untyped(&self) -> &[Range<usize>] {
@@ -528,10 +528,10 @@ impl InputLine {
             // Ctrl-U and Ctrl-C clear the line.
             b"\x15" | b"\x03" => self.clear(),
             bytes => {
-                if let Ok(text) = std::str::from_utf8(bytes) {
-                    if !text.chars().any(char::is_control) {
-                        self.text.push_str(text);
-                    }
+                if let Ok(text) = std::str::from_utf8(bytes)
+                    && !text.chars().any(char::is_control)
+                {
+                    self.text.push_str(text);
                 }
             }
         }
@@ -547,7 +547,7 @@ impl InputLine {
     pub fn paste(&mut self, text: &str) {
         let start = self.text.len();
         self.text.push_str(&text.replace("\r\n", "\n"));
-        self.untyped = merged(self.untyped.drain(..).chain([start..self.text.len()]).collect());
+        self.untyped = merged(self.untyped.drain(..).chain(std::iter::once(start..self.text.len())).collect());
     }
 
     pub fn clear(&mut self) {
@@ -1021,6 +1021,8 @@ pub fn reset() {
 }
 
 #[cfg(test)]
+// Lists of byte ranges, one long or more.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use std::ffi::OsString;
 

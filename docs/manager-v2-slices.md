@@ -183,7 +183,8 @@ Sizes are in lines of Rust plus tests. They are based on comparable merged code:
 | 1 | M11 Identity: project and work keys, machine id, clock | M10, M02 | M (≈900) |
 | 1 | M12.1 Registry R1: types, parse, goldens (read ops, board) | M10, M02 | L (≈1,500) |
 | 1 | M12.2 Registry R1: all other commands, app wiring | M12.1 | L (≈1,500) |
-| 1 | M13 Callers by channel and the words ledger | M10, M11 | M (≈1,100) |
+| 1 | M13.1 Callers by channel and the words ledger | M10, M11 | M (≈1,100) |
+| 1 | M13.2 Caller identity per glasscoded connection (the server-sync plan's phase 0a) | M13.1 | M |
 | 1 | M14 Journal core and reconciler | M11, M12.2, M13 | L (≈1,600) |
 | 2 | M20.1 Memory store, format, git, scan | M11, M12.2, M13 | L (≈1,500) |
 | 2 | M20.2 Brief, search and memory ops | M20.1, M01 (P03) | L (≈1,400) |
@@ -222,7 +223,7 @@ Sizes are in lines of Rust plus tests. They are based on comparable merged code:
 
 **Parallel tracks**, at most three at a time:
 - Wave 0: M01 and M03 run together. M10 runs beside them, and M02 follows M01 and M10.
-- Wave 1: M11 and M12.1 run together. M12.2 and M13 follow, then M14.
+- Wave 1: M11 and M12.1 run together. M12.2 and M13.1 follow, then M13.2 and M14.
 - Wave 2: memory (M20.x, M24) runs beside the gate (M21.x, M22, M23).
 - Wave 3: M30 → M32 runs beside M33.1 → M33.2 → M34, and M35 runs as the third track.
 
@@ -372,7 +373,11 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Windows:** `glasscode_cli` is unchanged; the app parses.
 - **Addresses:** exec-8, ops-7 (GPUI actions stay for key bindings and call ops in M33.1; one registry for behaviour), ops-9 (list), ops-10, ops-21 (journal record from the op, used by M14)
 
-### M13 Callers by channel and the words ledger (wave 1, M)
+### M13.1 Callers by channel and the words ledger (wave 1, M)
+
+M13 was split in two: this slice is everything below, and its glasscoded part is limited to
+recording phone input. The daemon's caller per connection is M13.2.
+
 
 - **Files:** new `crates/glasscode_core/src/caller.rs`, `words.rs`; `control.rs` (remove `interactive` from trust decisions; keep the field on the wire); `crates/glasscode/src/control_ui.rs`; `today_ui.rs`, `manager_ui.rs`, `chat_ui.rs` (record composer submits); `terminal/` (record keys typed in a session's terminal and bracketed-paste spans); `manager_tick.rs`, `ci_fix.rs`, `session_start.rs`, `switch_ui.rs`, `commands.rs` (record every text Glasscode types into a session, as `Injected`); `crates/glasscoded/src/daemon.rs` (phone input as `Device`); `lib.rs`.
 - **Steps:**
@@ -402,6 +407,53 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Windows:** the named-pipe path gives `Terminal` the same way.
 - **Carried over:** Carried from M11: keep one persisted `Hlc` `last` per machine id (authority/machine.json or its own small store), so stamps stay monotonic across restarts. `Projects` writes are a locked read-modify-write.
 - **Addresses:** trust-2, trust-6, ops-4, mem-2, crit-2, land-1, events-m1, ux-m1
+- **Result:**
+  - **New in core.** `caller.rs` and `words.rs`, as design section 8 now says. `Caller` gains `ShellTab`: the person in a Glasscode shell tab, recognised by the terminal view's own Enter key, and only its time is kept. From M11: `store::update` (`Projects::update`), plus `authority/clock.json` with `identity::next_stamps`.
+  - **Slice text proven wrong:**
+    - `session_start.rs` and `switch_ui.rs` type nothing into a session.
+    - Glasscode's sends are in `commands.rs` (`session send`), `ci_fix.rs`, `manager_tick.rs`, `github_ui.rs` (review comments) and `chat_ui.rs`.
+    - Every first prompt and handoff reaches the agent at launch, so it is recorded there (`workspace.rs`).
+    - Typed and pasted spans need the boxes themselves (`composer.rs`, `text_input.rs`).
+    - `env.rs` scrubs variable names, not text; the text scrubber is `words::scrub`.
+    - Phone input is recorded by glasscoded's gate (`main.rs`), which only phone keys run, as `Device("unknown")` until M13.2 names the device. The daemon's other doors to `sessions.send` (the server's manager, a program on the server) record nothing, so their text is nobody's words.
+  - **Rule 2.** The ledger keeps text only in a v2 home. Measure mode works in any home and keeps no text or hash.
+  - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns.
+  - **Registry.** `words recent` is the registry's `words.recent` (`human_only`), with new golden cases in `ops_golden/ledger.json`; no existing case changed.
+  - **Evals.** M02's two callers evals run. Two of their checks are later slices' work: another project's target (M12.2's targets, M21.1) and the refusal of person-only ops (M21.1).
+
+### M13.2 Caller identity per glasscoded connection (wave 1, M)
+
+The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "Phases"), built by this plan.
+
+- **Files:** `crates/glasscoded/src/main.rs`, `daemon.rs`, `phones.rs`, `today.rs`, `mirror.rs`, `manager.rs`; `crates/glasscode_core/src/remote.rs`, `caller.rs`; `crates/glasscode/src/server_ui.rs`, `mirror_ui.rs`, `manager_home.rs`; and this slice text.
+- **Steps:**
+  1. **Both Mac connections declare `Machine`,** not only the mirror one.
+     - `manager.sync` travels over the `server_ui` client (`manager_home.rs`), and so will the switch.
+     - The client is `RemoteClient::connect` (`server_ui.rs`, `mirror_ui.rs`).
+     - Every `RemoteClient` the Mac opens declares `Caller::Machine { id }`. The `id` is M10's `MachineId` from `authority/machine.json`, not the mirror's `~/.glasscode/machine-id`.
+  2. **Declare inline, once per connection.**
+     - `handle_connection`'s read loop handles the declaration itself, never on a spawned thread, so it comes before every later line.
+     - The gate sends its own declaration (`Phone { device }`) and reads the reply before it starts pumping, so the phone never gets a line it did not ask for.
+     - Connections that declare nothing stay as today (treated as `Ui`): older Macs, `glasscoded status` and `update`, and the internal dispatch of `glasscoded/src/manager.rs`, which may pass `Manager { lane: Wake }`.
+  3. **`authorized_keys`:** existing lines are never rewritten, because one mistake locks a phone out. New pairings write `gate --device <id>` (`phones.rs`). Old lines get the device `"unknown"`.
+  4. **Refuse only what is proven unused by the phone:** `restart`, `shutdown`, `phones.add` (the Mac runs it at pairing), the declaration method itself (a phone must not declare), and `owners.*`. Everything else stays allowed for phones until phase 0b.
+  5. **Wire format:** `Hello.features` gets `"caller"`. The declaration line is `{"kind":"machine","id":"<MachineId>"}`, with `"phone"` and `"ui"` as the other kinds.
+  6. **`owners.begin`, `owners.commit` and `owners.abort`** (the server-sync plan's phase 2) are restricted to `Caller::Machine`. Until this lands they take the `MachineId` in their params.
+  7. **Words.**
+     - Text typed in the Mac UI and relayed to the server over a `Machine` connection keeps its Mac-side origin; the server never upgrades a tier.
+     - The gate's phone records (M13.1) take the declared device id in place of `"unknown"`.
+- **Tests:**
+  - a phone that declares is refused;
+  - a connection that declares nothing is `Ui`;
+  - a `Machine` declaration from a phone key is refused;
+  - `owners.*` from any caller but `Machine` is refused;
+  - old `authorized_keys` lines still work;
+  - `restart` and `shutdown` from a phone are refused;
+  - the Docker test server scenario (`script/test-server`) for a paired phone stand-in.
+- **Verify:** core and glasscoded tests; `cargo check -p glasscode`.
+- **Server:** this slice.
+- **Windows:** client only (the Mac's declaration).
+- **Addresses:** the server-sync plan's phase 0a.
 
 ### M14 Journal core and reconciler (wave 1, L)
 

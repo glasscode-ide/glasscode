@@ -96,15 +96,15 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
             None => Caller::Terminal { pid: None },
         };
     }
-    if let (Some(id), Some(sig)) = (&request.session, &request.sig) {
-        if let Some(session) = signed(id, sig) {
-            // The keys of a shell tab are typed in the app's own window, so only a request on the
-            // socket (a command the shell ran) can be them; a request file is anyone's.
-            if session.shell && matches!(channel, Channel::Socket { .. }) && typed_in_tab(id) {
-                return Caller::ShellTab { session: id.clone(), project: None };
-            }
-            return Caller::Session { id: id.clone(), project: None };
+    if let (Some(id), Some(sig)) = (&request.session, &request.sig)
+        && let Some(session) = signed(id, sig)
+    {
+        // The keys of a shell tab are typed in the app's own window, so only a request on the
+        // socket (a command the shell ran) can be them; a request file is anyone's.
+        if session.shell && matches!(channel, Channel::Socket { .. }) && typed_in_tab(id) {
+            return Caller::ShellTab { session: id.clone(), project: None };
         }
+        return Caller::Session { id: id.clone(), project: None };
     }
     match channel {
         Channel::Socket { pid: Some(pid) } if under_brain(*pid) => Caller::Manager { lane: Lane::Wake, wake: None, project: None },
