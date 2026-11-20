@@ -127,13 +127,13 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
     }
 }
 
-// ----- what each caller may do (v1's rules) ---------------------------------------------------
+// ----- what each caller may do by Settings › Permissions -----------------------------------------
 
-/// What Settings › Permissions says for `kind` from `caller`, until the v2 gate (M21.1) decides:
-/// the person may do everything; a session or the manager follows the rules of Settings; anyone
-/// else (a terminal, a phone, another machine) gets [`outside_rule`]. The app adds "Allow for this
-/// session" on top, and with the engine at v1 still treats a terminal that says it is typed at as
-/// the person (O13).
+/// What Settings › Permissions says for `kind` from `caller`: the person may do everything; a
+/// session or the manager follows the rules of Settings; anyone else (a terminal, a phone, another
+/// machine) gets [`outside_rule`]. It is where the gate (M21.1) starts from, and what `glasscode
+/// whoami` lists; a project's trust level and the approved policy can make a rule stricter there.
+/// (v1's runner, which decided by it alone, went with M56 row 7.)
 pub fn rule(caller: &Caller, kind: Kind, settings: &AgentSettings) -> Rule {
     match caller {
         Caller::Ui | Caller::ShellTab { .. } => Rule::Allow,

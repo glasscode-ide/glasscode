@@ -272,7 +272,6 @@ impl Workspace {
                     glasscode_core::journal::append(glasscode_core::journal::decision("intake", "started", &format!("Took {id}"), serde_json::json!({ "item": id }), None));
                     let caller = crate::control_ui::Caller {
                         who: "Glasscode's intake".into(),
-                        trust: crate::control_ui::Trust::Session,
                         channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("intake".into()), project: None },
                         session: None,
                         session_title: None,

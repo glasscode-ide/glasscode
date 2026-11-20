@@ -419,7 +419,7 @@ recording phone input. The daemon's caller per connection is M13.2.
     - Phone input is recorded by glasscoded's gate (`main.rs`), which only phone keys run, as `Device("unknown")` until M13.2 names the device. The daemon's other doors to `sessions.send` (the server's manager, a program on the server) record nothing, so their text is nobody's words.
     - A phone's input for a Mac session waits in the server's mirror inbox and the Mac types it (`mirror_ui.rs`). The Mac records it as `Outside`, because the server cannot say yet who queued it.
   - **Rule 2.** The ledger keeps text only in a v2 home. Measure mode works in any home and keeps no text or hash.
-  - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns.
+  - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns. (M56 row 7: v1's rule and the warning are gone; the control files decide by the channel only.)
   - **Registry.** `words recent` is the registry's `words.recent` (`human_only`), with new golden cases in `ops_golden/ledger.json`; no existing case changed.
   - **Evals.** M02's two callers evals run. What the callers cases expect beyond the caller moved to tests ignored for their slices: another project's target and a person-only op (`needs M21.1`), and an unsigned phone (`needs M13.2`).
   - **Not built here.** `match_prompt` has no caller yet: the hook events and Codex rollout messages reach it with the journal (M14). Until M21's in-app sheet, a `ShellTab` caller has the person's full rights, `manager message approve` and bypass-mode starts included.
