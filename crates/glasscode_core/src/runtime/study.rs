@@ -108,14 +108,7 @@ pub const MOST_QUESTIONS: usize = 3;
 /// else its `result` text) or Codex's answer file. A line whose source is none of `sources` (the
 /// reads it was given), or that is empty, is dropped; each kind keeps at most [`MOST_LINES`].
 pub fn parse(reply: &str, sources: &[String]) -> Result<Draft, String> {
-    let value: Value = serde_json::from_str(reply.trim()).map_err(|e| format!("the study did not answer in its shape ({e})"))?;
-    let body = if let Some(structured) = value.get("structured_output").filter(|v| v.is_object()) {
-        structured.clone()
-    } else if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
-        serde_json::from_str(text.trim()).map_err(|e| format!("the study did not answer in its shape ({e})"))?
-    } else {
-        value
-    };
+    let body = answer_body(reply).map_err(|e| format!("the study did not answer in its shape ({e})"))?;
     let mut draft: Draft = serde_json::from_value(body).map_err(|e| format!("the study did not answer in its shape ({e})"))?;
     let known = |line: &Line| !line.text.trim().is_empty() && sources.iter().any(|s| s == line.source.trim());
     for lines in [&mut draft.project, &mut draft.knowhow, &mut draft.people] {
@@ -129,6 +122,19 @@ pub fn parse(reply: &str, sources: &[String]) -> Result<Draft, String> {
     draft.questions.retain(|q| !q.question.trim().is_empty());
     draft.questions.truncate(MOST_QUESTIONS);
     Ok(draft)
+}
+
+/// The answer of a headless run bound to a schema: Claude's `structured_output` (or its `result`
+/// text), or Codex's answer file as it is.
+pub fn answer_body(reply: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(reply.trim()).map_err(|e| e.to_string())?;
+    if let Some(structured) = value.get("structured_output").filter(|v| v.is_object()) {
+        return Ok(structured.clone());
+    }
+    if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
+        return serde_json::from_str(text.trim()).map_err(|e| e.to_string());
+    }
+    Ok(value)
 }
 
 /// The tokens a run used: Claude's result `usage`; for Codex (no usage in its answer file), the

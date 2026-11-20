@@ -639,6 +639,8 @@ impl Workspace {
                 this.resume_move_in(cx);
                 // The scheduled export (M25).
                 this.data_export_schedule_start(cx);
+                // Memory's learning (M62).
+                this.learning_start(cx);
             });
             if started.is_err() {
                 return;
@@ -1553,6 +1555,17 @@ impl Workspace {
             caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake) => Some((caller::Lane::Wake, Some(wake.clone()))),
             _ => None,
         };
+        // The manager moves the window only in answer to the person's message of the last 30 s
+        // (M52.2, ux-5); a wake, a playbook or a schedule never does. What it would have shown is a
+        // "Show me" chip in the conversation, the person's to take.
+        if glasscode_core::runtime::chat::moves_window(&op)
+            && !matches!(decision, Decision::Never { .. })
+            && let Err(why) = glasscode_core::runtime::chat::may_move_screen(&caller.channel, self.mchat.last_person_ms, glasscode_core::clock::now_ms())
+        {
+            self.chat_show_me(&op);
+            let text = format!("Not moved: {why}. The person has a “Show me” chip in the chat for it.");
+            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name()), true));
+        }
         if let Some((lane, wake)) = brain_lane {
             if let Some(wake) = wake {
                 let set = self.control_policy_set();

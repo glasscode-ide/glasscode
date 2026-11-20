@@ -504,7 +504,7 @@ fn committers(root: &Path) -> Vec<String> {
 }
 
 /// What two statements share when they say the same: folded words, no punctuation.
-fn dedupe_key(text: &str) -> String {
+pub(crate) fn dedupe_key(text: &str) -> String {
     memstore::entry::fold(text).chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

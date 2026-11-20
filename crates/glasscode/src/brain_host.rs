@@ -132,17 +132,22 @@ impl Workspace {
         match call {
             // The manager, in no session, by the channel the runtime is (never the person); through
             // the gate, as the brain host is only made with the v2 engine.
+            // What it did is an action line in the conversation, with Undo when the op has an
+            // inverse (M52.2, ux-14).
             HostCall::RunOp { op, caller, reply } => {
-                let who = self.brain_caller(caller);
-                self.control_gated(op, who, vec![Sink::Socket(reply)], String::new(), None, window, cx);
+                let who = self.brain_caller(caller.clone());
+                let line = op.clone();
+                self.control_gated(op, who, vec![Sink::Socket(reply)], String::new(), Some(Box::new(move |ws: &mut Workspace, answer: &Reply| ws.chat_action_line(&line, &caller, None, answer))), window, cx);
             }
             HostCall::Propose { op, caller, reason, reply } => {
                 let who = self.brain_caller(caller);
                 self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, crate::control_ui::Gated { act: Some(WakeAct::Propose(reason)), ..Default::default() }, window, cx);
             }
             HostCall::RunUnder { op, caller, playbook, reply } => {
-                let who = self.brain_caller(caller);
-                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, crate::control_ui::Gated { act: Some(WakeAct::Under(playbook)), ..Default::default() }, window, cx);
+                let who = self.brain_caller(caller.clone());
+                let (line, by) = (op.clone(), playbook.clone());
+                let done: Box<dyn FnOnce(&mut Workspace, &Reply)> = Box::new(move |ws, answer| ws.chat_action_line(&line, &caller, Some(&by), answer));
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), Some(done), crate::control_ui::Gated { act: Some(WakeAct::Under(playbook)), ..Default::default() }, window, cx);
             }
             // One notification a change of state (`runtime::health::change`); `matter` names it in
             // the log.
