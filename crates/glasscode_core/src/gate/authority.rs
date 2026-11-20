@@ -452,7 +452,7 @@ fn project_diff(at: &str, a: &ProjectPolicy, b: &ProjectPolicy, out: &mut Vec<St
     if a.level != b.level {
         out.push(format!("{at}: Trust level: {} to {}", a.level.label(), b.level.label()));
     }
-    let lists = [("never", &a.never, &b.never), ("always asks", &a.ask, &b.ask), ("allowed commands", &a.allow_commands, &b.allow_commands)];
+    let lists = [("never", &a.never, &b.never), ("always asks", &a.ask, &b.ask), ("always allowed", &a.allow, &b.allow), ("allowed commands", &a.allow_commands, &b.allow_commands)];
     for (name, old, new) in lists {
         for gone in old.iter().filter(|x| !new.contains(x)) {
             out.push(format!("{at}: {name}: no longer {gone}"));
@@ -490,6 +490,9 @@ pub fn policy_header(key: &ProjectKey, policy: &ProjectPolicy) -> String {
     }
     if !policy.ask.is_empty() {
         lines.push(format!("- Always asks: {}.", policy.ask.join(", ")));
+    }
+    if !policy.allow.is_empty() {
+        lines.push(format!("- Always allowed: {}.", policy.allow.join(", ")));
     }
     for condition in &policy.conditions {
         lines.push(format!("- {}", condition.describe()));

@@ -38,6 +38,9 @@ pub enum Modal {
     /// The policy file was changed outside Glasscode (M21.1): what changed, in plain words, and
     /// the live policy the person may import as it is.
     PolicyChanged { lines: Vec<String>, live: glasscode_core::gate::Policy },
+    /// "Always allow this in <project>" (M21.2): the policy change in plain words, which the person
+    /// confirms a second time; then the card that asked is approved too.
+    AlwaysAllow { approval: u64, project: glasscode_core::gate::ProjectKey, op: String, lines: Vec<String>, policy: glasscode_core::gate::Policy },
 }
 
 pub struct RenameForm {
@@ -433,6 +436,31 @@ impl Modal {
                         .child(ui::danger_button("policy-import", "Import this change").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.close_modal(window, cx);
                             this.control_answer_policy(Some(live.clone()), cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::AlwaysAllow { approval, project, op, lines, policy } => {
+                let (id, policy) = (*approval, policy.clone());
+                (
+                    "Always allow this?",
+                    "This changes the project's policy. Cards for what leaves this Mac or removes work still show.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(theme::sz(13.)).text_color(theme::text_soft()).child(format!("{op} in {project}, from now on, without asking:")))
+                        .children(lines.clone().into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("always-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .child(ui::primary_button("always-confirm", "Allow always").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_always_confirmed(id, policy.clone(), window, cx);
                         })))
                         .into_any_element(),
                     false,

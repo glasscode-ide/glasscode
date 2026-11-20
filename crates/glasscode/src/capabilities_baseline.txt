@@ -1,12 +1,12 @@
 # The raw click handlers (`.on_click(` and `cx.listener(`) of each file of crates/glasscode/src, and the
 # rows of the inventory then (capabilities.rs, baseline_only_goes_down). A count may only go down,
 # unless the same change adds inventory rows.
-rows 192
+rows 199
 backdrop.rs 8
 browser_ui.rs 14
 chat_ui.rs 39
 composer.rs 29
-dialogs.rs 102
+dialogs.rs 106
 editor.rs 44
 file_view.rs 18
 files_ui.rs 23
@@ -17,7 +17,7 @@ glasscode_ui.rs 2
 kit.rs 14
 manager_settings.rs 24
 manager_ui.rs 57
-notify_ui.rs 8
+notify_ui.rs 12
 pair_ui.rs 10
 palette_ui.rs 7
 project_setup.rs 12
@@ -39,7 +39,7 @@ themes_ui.rs 8
 tickets_ui.rs 27
 tickets_view.rs 47
 today_cards.rs 6
-today_ui.rs 43
+today_ui.rs 47
 update_ui.rs 2
 usage_ui.rs 7
 voice_view.rs 6
