@@ -236,7 +236,8 @@ movein_answered() { python3 -c "
 import json, sys
 p = json.load(open(sys.argv[1]))
 p = p.get('data', p)
-sys.exit(0 if any(q.get('answer') for q in p.get('questions', [])) else 1)" "$T/home/glasscode/manager/movein.json"; }
+# A level answered is said; it is kept once the person confirms it in Settings' own preview.
+sys.exit(0 if any(q.get('said') == 'Standard' for q in p.get('questions', [])) else 1)" "$T/home/glasscode/manager/movein.json"; }
 
 turn_reported() { journal | python3 -c "
 import json, sys
