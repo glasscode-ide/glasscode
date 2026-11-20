@@ -1671,7 +1671,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - the owner's 48-hour run;
     - the live evals, and checklist items 10 to 16 on the real CLIs;
     - the phone case on the Docker server;
-    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change).
+    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change). Done later in a follow-up: a v2 home's sessions get `cli::SKILL_V2` and `CODEX_INSTRUCTIONS_V2` (memory and `glasscode report`, not the first manager's notes; v1 homes keep the first ones, rule 2 and exec-8), and the README, `windows.md` and both voice READMEs say what Manager v2 is and changes.
     - For the security review of session profiles and hooks: a headless run's Claude gets no `--settings` with the profile's `disableAllHooks` (`headless_args` passes only `claude_args`).
 
 ### M56 Switch to v2 and remove v1 (wave 5, M)
