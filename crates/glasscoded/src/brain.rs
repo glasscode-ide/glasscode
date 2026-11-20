@@ -13,6 +13,12 @@
 //! - **A brain's calls** come to this daemon (`today::relay_call`): one this server signed is
 //!   served here as the manager's (`DaemonHost::run_op`); any other is refused. None goes to the
 //!   Mac.
+//! - **The chat lane** runs beside it (M57 with M52): the person's newest message that nothing
+//!   answered yet (asked on the Mac, the phone or here; it came with the sync) is answered by a
+//!   chat brain here, with what happened since they last spoke, in the message's topic. The wake
+//!   lane holds while it answers. A message older than ten minutes when the server became home is
+//!   not answered late. The brain's own conversation starts fresh here (the Mac's is in its
+//!   account); the conversation itself is the same.
 //! - **What the Mac said** (`ManagerFromMac`: on or off, the model, the projects as a wake sees
 //!   them) is kept in `manager/from-mac.json`, so the wakes run while the Mac is away.
 //! - **Cards the person approved** on the Mac (asked here; the answer comes with the sync) run
@@ -34,6 +40,61 @@ use glasscode_core::runtime::{BrainSpec, Host as _};
 
 use crate::brain_host::DaemonHost;
 use crate::daemon::log;
+
+/// A person's message the chat lane answers, at most this old.
+const CHAT_ANSWERS_WITHIN_MS: u64 = 10 * 60 * 1000;
+
+/// The person's newest message when nothing answered it yet (no line of the chat lane after it),
+/// and it is not too old to answer now.
+pub(crate) fn waiting_question(conversation: &glasscode_core::conversation::Conversation, now_ms: u64) -> Option<glasscode_core::conversation::Item> {
+    use glasscode_core::conversation::{Author, Kind};
+    let items = conversation.items();
+    let question = items.iter().filter(|item| matches!(item.kind, Kind::You { .. })).max_by(|a, b| a.posted.cmp(&b.posted))?;
+    let answered = items.iter().any(|item| item.author == Author::Chat && item.posted > question.posted);
+    (!answered && now_ms.saturating_sub(question.posted.wall_ms) < CHAT_ANSWERS_WITHIN_MS).then(|| (*question).clone())
+}
+
+/// The chat lane here: every two seconds, the person's waiting message is answered (once).
+fn chat_thread(host: Arc<DaemonHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks, stop: Arc<AtomicBool>) {
+    use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Stream};
+    use glasscode_core::runtime::{Ledger, Refusal, TurnEnd};
+    use glasscode_core::store::Store as _;
+    let mut lane: Option<glasscode_core::runtime::lanes::ChatLane> = None;
+    let mut asked = std::collections::HashSet::new();
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_secs(2));
+        let now = glasscode_core::clock::now_ms();
+        let conversation = Conversation::load();
+        let Some(question) = waiting_question(&conversation, now) else { continue };
+        if !asked.insert(question.id.clone()) {
+            continue;
+        }
+        let lane = lane.get_or_insert_with(|| glasscode_core::runtime::lanes::ChatLane::new(spec.clone(), hold.clone(), locks.clone()));
+        let since = glasscode_core::runtime::chat::since_text(&conversation);
+        let before = Ledger::load().unwrap_or_default();
+        let mut ledger = before.clone();
+        let result = lane.ask(host.as_ref(), &mut ledger, &question.text, &since, now, &mut |_| {});
+        if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
+            log(format!("manager: the token ledger could not be kept: {err}"));
+        }
+        let (kind, text) = match result {
+            Ok((outcome, _)) => match outcome.end {
+                TurnEnd::Answered(text) => (Kind::Manager { state: Stream::Done }, text),
+                TurnEnd::Stopped => (Kind::Manager { state: Stream::Stopped }, String::new()),
+                TurnEnd::Failed(why) => (Kind::Error, why),
+            },
+            Err(Refusal::Health(health)) => (Kind::Error, health.sentence(AgentKind::Claude)),
+            Err(Refusal::Budget(blocked)) => (Kind::Error, blocked.sentence()),
+        };
+        let author = if kind == Kind::Error { Author::App } else { Author::Chat };
+        if let Err(err) = Conversation::load().post(Draft { author, kind, text, refs: question.refs.clone(), topic: Some(question.topic.clone()) }) {
+            log(format!("manager: the chat's answer could not be posted: {err}"));
+        }
+    }
+    if let Some(mut lane) = lane {
+        lane.brain.stop();
+    }
+}
 
 /// The running worker: its stop flag, its host, and what it was started with.
 struct Running {
@@ -152,12 +213,14 @@ pub fn serve(request: &Request) -> Reply {
     };
     // Only a wake that runs here now, whose tool list passed its check (brain-m5): a signature
     // alone (the key is a file on this server) reaches nothing.
-    let glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some(wake), .. } = &caller else {
-        return Reply::fail(code::DENIED, "Only a wake of the manager runs here; nothing was done.");
-    };
     let running = RUNNING.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.host.clone());
-    if !running.as_ref().is_some_and(|host| host.is_running_wake(wake) && host.is_checked(Lane::Wake, Some(wake))) {
-        return Reply::fail(code::DENIED, "That wake does not run here (or its tools were not checked yet); nothing was done.");
+    let allowed = match &caller {
+        glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some(wake), .. } => running.as_ref().is_some_and(|host| host.is_running_wake(wake) && host.is_checked(Lane::Wake, Some(wake))),
+        glasscode_core::caller::Caller::Manager { lane: Lane::Chat, wake: None, .. } => running.as_ref().is_some_and(|host| host.is_checked(Lane::Chat, None)),
+        _ => false,
+    };
+    if !allowed {
+        return Reply::fail(code::DENIED, "That brain does not run here (or its tools were not checked yet); nothing was done.");
     }
     let Some(op) = request.op.clone().and_then(|op| serde_json::from_value::<glasscode_core::ops::Op>(op).ok()) else {
         return Reply::fail(code::USAGE, "A brain's call names a typed op.");
@@ -341,16 +404,23 @@ pub fn tick(shared: &crate::daemon::Shared) {
     let wakes: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::default();
     let host = Arc::new(DaemonHost::at_home(machine, generation, wakes.clone(), projects.clone(), Some(shared.clone())));
     let stop = Arc::new(AtomicBool::new(false));
+    // One hold and one set of locks for both lanes: a wake waits while the chat answers.
+    let (hold, locks) = (glasscode_core::runtime::lanes::Hold::default(), glasscode_core::runtime::lanes::Locks::default());
+    let mut chat_spec = base.clone();
+    chat_spec.lane = Lane::Chat;
+    chat_spec.brain_env = glasscode_core::runtime::worker::brain_env(Lane::Chat, None, |text| crate::today::sign_text(text));
     let worker = glasscode_core::runtime::worker::Worker::new(
         Default::default(),
-        Default::default(),
-        Default::default(),
+        hold.clone(),
+        locks.clone(),
         stop.clone(),
         Arc::new(Mutex::new(projects)),
         wakes,
         base,
         Arc::new(|text: &str| crate::today::sign_text(text)),
     );
+    let (for_chat, chat_stop) = (host.clone(), stop.clone());
+    let _ = std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(for_chat, chat_spec, hold, locks, chat_stop));
     let for_worker = host.clone();
     if std::thread::Builder::new().name("manager-wakes".into()).spawn(move || worker.run(for_worker.as_ref())).is_ok() {
         log(format!("manager: the wake lane runs here (home at generation {generation})"));
@@ -448,6 +518,34 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(window_ops_for_mac(&[]).len(), 1, "sent again until acknowledged");
         assert!(window_ops_for_mac(&[first[0].id]).is_empty());
+    }
+
+    /// The chat lane answers the person's newest message once nothing answered it, and not one
+    /// asked long before (M57).
+    #[test]
+    fn the_chat_lane_answers_the_persons_newest_waiting_message() {
+        use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Stream};
+        use glasscode_core::store::{Engine, EngineSwitch};
+        use glasscode_core::words::{ComposerKind, Origin};
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
+        glasscode_core::words::decide_again();
+        let mut chat = Conversation::load();
+        let you = |text: &str| {
+            let words = glasscode_core::words::record(Origin::Composer(ComposerKind::ManagerChat), text, None, None);
+            Draft { author: Author::Person, kind: Kind::You { words, reply_to: None }, text: text.into(), refs: Vec::new(), topic: None }
+        };
+        let now = glasscode_core::clock::now_ms();
+        assert!(waiting_question(&chat, now).is_none(), "nothing asked");
+        let first = chat.post(you("What is running?")).unwrap();
+        assert_eq!(waiting_question(&chat, now).map(|q| q.id), Some(first.id.clone()));
+        chat.post(Draft { author: Author::Chat, kind: Kind::Manager { state: Stream::Done }, text: "Two sessions.".into(), refs: Vec::new(), topic: None }).unwrap();
+        assert!(waiting_question(&chat, now).is_none(), "answered");
+        let second = chat.post(you("And the CI?")).unwrap();
+        assert_eq!(waiting_question(&chat, now).map(|q| q.id), Some(second.id.clone()));
+        assert!(waiting_question(&chat, second.posted.wall_ms + CHAT_ANSWERS_WITHIN_MS + 1).is_none(), "too old to answer now");
+        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
+        glasscode_core::words::decide_again();
     }
 
     /// The worker runs only when everything says so; each missing piece is the reason.

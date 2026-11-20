@@ -789,4 +789,22 @@ fn the_manager_wakes_on_the_server_while_it_is_home() {
         assert!(started.elapsed() < std::time::Duration::from_secs(90), "no line of the server's manager came: {}", on_server(&config, &format!("{since} | grep -E 'manager|wake' | tail -8")));
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
+
+    // The person asks on the Mac (the server is home): the chat lane there answers, and the
+    // answer comes back with the sync.
+    use glasscode_core::conversation::{Author, Draft, Kind};
+    glasscode_core::words::decide_again();
+    let words = glasscode_core::words::record(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), "What failed?", None, None);
+    Conversation::load().post(Draft { author: Author::Person, kind: Kind::You { words, reply_to: None }, text: "What failed?".into(), refs: Vec::new(), topic: None }).unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if let Err(err) = syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()) {
+            panic!("the sync failed ({err:#})");
+        }
+        if Conversation::load().items().iter().any(|item| item.author == Author::Chat) {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(90), "the server's chat lane did not answer: {}", on_server(&config, &format!("{since} | grep -E 'manager|chat' | tail -8")));
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
 }
