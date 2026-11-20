@@ -10,16 +10,15 @@
 //! - once a run, v1's follow-ups in `data.json` taken in (`migrate_v2::v1_follow_ups`), so a
 //!   home that just switched goes on where v1 was.
 //!
-//! The snapshot is v2's own (`v2_snapshot`), and the actions go through v2's apply (`v2_apply`);
-//! a draft to a teammate goes to the outbox through `manager_apply` until v2's apply takes drafts
-//! (M56.2 t5, part 2). The `manager follow-up …` ops and
-//! the Manager page read and write the same list ([`Workspace::follow_ups`],
-//! [`Workspace::follow_ups_edit`]).
+//! The snapshot is v2's own (`v2_snapshot`), the notices and lines go through v2's apply
+//! (`v2_apply`), and a draft to a teammate into v2's outbox (`v2_draft_message`). The
+//! `manager follow-up …` ops and the Manager page read and write the same list
+//! ([`Workspace::follow_ups`], [`Workspace::follow_ups_edit`]).
 
 use std::time::{Duration, Instant};
 
 use glasscode_core::manager::handover::Owner;
-use glasscode_core::manager::{FollowKind, FollowUp, Snapshot, followups, gh};
+use glasscode_core::manager::{Action, FollowKind, FollowUp, MsgState, Show, Snapshot, Tier, followups, gh};
 use gpui::{AppContext as _, Context};
 
 use crate::workspace::Workspace;
@@ -98,13 +97,31 @@ impl Workspace {
     }
 
     /// What the follow-ups say: notifications and lines said through v2's apply; a draft to a
-    /// teammate to the outbox (through `manager_apply`, the outbox's one writer today).
-    fn followups_apply(&mut self, actions: Vec<glasscode_core::manager::Action>, cx: &mut Context<Self>) {
-        let (drafts, rest): (Vec<_>, Vec<_>) = actions.into_iter().partition(|a| matches!(a, glasscode_core::manager::Action::Draft { .. }));
-        self.v2_apply(rest, cx);
-        if !drafts.is_empty() {
-            self.manager_apply(drafts, cx);
+    /// teammate into v2's outbox, and the person told it waits for their OK (once: the same text
+    /// to the same person again is the message the outbox already has).
+    fn followups_apply(&mut self, actions: Vec<Action>, cx: &mut Context<Self>) {
+        let mut rest = Vec::new();
+        for action in actions {
+            let Action::Draft { to, body, why, about } = action else {
+                rest.push(action);
+                continue;
+            };
+            // The outbox signs the text, so the same one again is told by its id.
+            let known: Vec<String> = self.round.outbox.as_ref().map(|outbox| outbox.messages.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
+            let Some(message) = self.v2_draft_message(&to, &body, &why, about.as_deref()) else {
+                log::warn!("follow-ups: v2's outbox is not read yet; the note to {to} waits for the next quiet spell");
+                continue;
+            };
+            if known.contains(&message.id) || message.id.is_empty() || message.state != MsgState::Draft || message.tier == Tier::Never {
+                continue;
+            }
+            let text = format!("A message to {} waits for your OK.", message.to);
+            rest.push(Action::Say { text: text.clone(), show: Some(Show { view: Some("manager".into()), ..Show::default() }) });
+            if !self.window_active {
+                rest.push(Action::Notify { title: format!("{} asks you", self.state.manager.name), body: text, session: None });
+            }
         }
+        self.v2_apply(rest, cx);
     }
 
     /// The reviews the person gave, read off the main thread, then the follow-ups kept in step.
