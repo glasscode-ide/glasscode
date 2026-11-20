@@ -52,6 +52,7 @@ pub mod model;
 pub mod movein;
 pub mod ops;
 pub mod paths;
+pub mod portability;
 pub mod playbooks;
 pub mod prefs;
 pub mod project_settings;
@@ -75,6 +76,7 @@ pub mod sys;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 pub mod transcript;
+pub mod trust;
 pub mod turns;
 pub mod versions;
 pub mod words;

@@ -14,6 +14,7 @@ mod spec;
 mod table_app;
 mod table_approvals;
 mod table_board;
+mod table_data;
 mod table_browser;
 mod table_work;
 mod table_forge;
@@ -47,8 +48,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS, table_memory::OPS, table_browser::OPS, table_playbooks::OPS, table_work::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS, table_memory::NOUNS, table_browser::NOUNS, table_playbooks::NOUNS, table_work::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS, table_memory::OPS, table_browser::OPS, table_playbooks::OPS, table_work::OPS, table_data::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS, table_memory::NOUNS, table_browser::NOUNS, table_playbooks::NOUNS, table_work::NOUNS, table_data::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -491,7 +492,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "manager.wake"].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "manager.wake", "policy.", "schedule.", "data."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -650,11 +651,18 @@ mod tests {
         browser.eval Browser Outward AtMostOnce Window board - - v2
         playbook.check Read Read Idempotent Core read - - v2
         playbook.test Read Read Idempotent Core read - - v2
+        playbook.set Settings LocalWrite Idempotent Core settings - person v2
+        policy.set Settings LocalWrite Idempotent Core settings - person v2
+        schedule.set Settings LocalWrite Idempotent Core settings - person v2
         work.list Read Read Idempotent Core read - - v2
         work.show Read Read Idempotent Core read - - v2
         work.done Board LocalWrite Idempotent Core board work.reopen person v2
         work.drop Board LocalWrite Idempotent Core board work.reopen person v2
         work.reopen Board LocalWrite Idempotent Core board work.done person v2
+        data.export Settings LocalWrite Verifiable Core settings - person v2
+        data.import Settings LocalWrite Verifiable Core settings - person v2
+        data.forget Settings Destructive Verifiable Core settings - person v2
+        data.uninstall Settings Destructive Verifiable Core settings - person v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

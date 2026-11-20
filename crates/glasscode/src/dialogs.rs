@@ -40,9 +40,13 @@ pub enum Modal {
     PolicyChanged { lines: Vec<String>, live: glasscode_core::gate::Policy },
     /// Moving in (M35); its state is `Workspace::movein`.
     MoveIn,
+    /// What uninstall would remove (M25), to confirm.
+    ConfirmUninstall { lines: Vec<String>, blocked: bool },
     /// "Always allow this in <project>" (M21.2): the policy change in plain words, which the person
     /// confirms a second time; then the card that asked is approved too.
     AlwaysAllow { approval: u64, project: glasscode_core::gate::ProjectKey, op: String, lines: Vec<String>, policy: glasscode_core::gate::Policy },
+    /// A change of trust in Settings, previewed: written only with "Confirm" (M53).
+    TrustChange(Box<glasscode_core::trust::Pending>),
 }
 
 pub struct RenameForm {
@@ -468,6 +472,32 @@ impl Modal {
                     false,
                 )
             }
+            Modal::TrustChange(pending) => {
+                let pending = (**pending).clone();
+                let lines = pending.lines.clone();
+                (
+                    "Change trust?",
+                    "Nothing changes until you confirm.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(theme::sz(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(pending.title.clone()))
+                        .children(lines.into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("trust-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .child(ui::primary_button("trust-confirm", "Confirm").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.trust_confirm(pending.clone(), cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
             Modal::MoveIn => match ws.movein.as_ref() {
                 Some(form) => {
                     let (title, subtitle) = crate::movein_ui::heading(form);
@@ -475,6 +505,27 @@ impl Modal {
                 }
                 None => ("Move in", "", div().into_any_element(), div().into_any_element(), false),
             },
+            Modal::ConfirmUninstall { lines, blocked } => {
+                let blocked = *blocked;
+                (
+                    "Uninstall Glasscode?",
+                    if blocked { "A worktree has work that is nowhere else: push or remove it first." } else { "This removes the Glasscode folder: memory, settings, accounts' logins. Export first to keep your memory." },
+                    div().flex().flex_col().gap_1().children(lines.clone().into_iter().map(|line| div().text_size(theme::sz(12.5)).text_color(theme::text_strong()).child(line))).into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("uninstall-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .when(!blocked, |d| {
+                            d.child(ui::danger_button("uninstall-go", "Uninstall").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close_modal(window, cx);
+                                this.data_uninstall_now(cx);
+                            })))
+                        })
+                        .into_any_element(),
+                    true,
+                )
+            }
             Modal::AddCli(form) => (
                 "Add a CLI",
                 "Claude Code and Codex are always here. Add any other CLI on top — from npm, or your own install.",

@@ -416,10 +416,16 @@ pub const INVENTORY: &[Capability] = &[
     op("Notifications", "the result of a request that waited", "control_decide", "app.wait"),
     // ----- first run
     person("First run", "sign in and pick projects", "open_first_run", "Only you can go through the first run.", Place::View(View::FirstRun)),
+    op("Manager", "a project's trust level and conditions, previewed then confirmed", "trust_change", "policy.set"),
+    op("Manager", "a playbook on, off or approved, previewed then confirmed", "trust_change", "playbook.set"),
+    op("Manager", "a schedule on, off or approved, previewed then confirmed", "trust_change", "schedule.set"),
+    op("Manager", "try a playbook on the last 7 days", "trust_try", "playbook.test"),
     person("Manager", "move in what agents already know", "open_move_in", "Only you can move in: it reads only what you tick, and you accept what it proposes.", Place::Settings(Section::Manager)),
     person("Manager", "read the ticked sources", "move_in_read", "Only you can move in.", Place::Settings(Section::Manager)),
     person("Manager", "accept or drop what moving in proposes", "move_in_accept", "Only you accept what moving in proposes.", Place::Settings(Section::Manager)),
     person("Manager", "undo a move-in", "move_in_undo", "Only you can undo a move-in.", Place::Settings(Section::Manager)),
+    person("Manager", "export your data to Downloads", "data_export_now", "Only you can export your data.", Place::Settings(Section::Manager)),
+    person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
     // ----- voice
     person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
     person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),
@@ -491,6 +497,10 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode work done (for you only)", "control_plan", "work.done"),
     op("Command", "glasscode work drop (for you only)", "control_plan", "work.drop"),
     op("Command", "glasscode work reopen (for you only)", "control_plan", "work.reopen"),
+    op("Command", "glasscode data export", "control_plan", "data.export"),
+    op("Command", "glasscode data import", "control_plan", "data.import"),
+    op("Command", "glasscode data forget", "control_plan", "data.forget"),
+    op("Command", "glasscode data uninstall", "control_plan", "data.uninstall"),
 ];
 
 /// What the manager cannot do, in its own words, by screen (design section 11): the person-only

@@ -263,7 +263,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 - **A refusing store's file gone beside its `.prev`** is a refusal, not a first run: only "no file and no `.prev`" starts from the default.
 - **The version rule.** The version is read first, as any number, before the data. A build never reads or writes a store whose schema is newer than it knows: it opens the file as an error and leaves it alone, whatever else the file holds.
 - **One save at a time.** A save holds `<file>.lock` from its read to its rename, and removes the temporary files of saves that died more than ten minutes ago.
-- **The table in code.** This table is also `store::DATA_MAP`. It has a row for every entry of the layout (section 5) that is not a cache: the stores, the stores that slices to come make (marked planned, with their slice), and today's files that are not stores yet. A cell of today's files that nobody checked in its module says "not decided (M25)", for M25 (export, backup, forget) to settle. A test fails when a `Store` has no row or no line in `store::ALL_STORES`, when an entry of the layout has no row, and when a planned store exists.
+- **The table in code.** This table is also `store::DATA_MAP`. It has a row for every entry of the layout (section 5) that is not a cache: the stores, the stores that slices to come make (marked planned, with their slice), and today's files that are not stores yet. M25 settled today's files: an export does not hold them (each is this machine's own setup), they are this machine's, and they go with everything at uninstall; a cell nobody checked in its module says "as its module does (not checked yet)". A test fails when a `Store` has no row or no line in `store::ALL_STORES`, when an entry of the layout has no row, and when a planned store exists.
 
 | Store | Module | Format | Retention | On damage | Export | Local only | Forget | Sync |
 |---|---|---|---|---|---|---|---|---|
@@ -545,7 +545,9 @@ pub enum Caller {                     // serde: {"kind": "session", "id": …}
     Ui,
     Session { id: String, project: Option<ProjectKey> },
     ShellTab { session: String, project: Option<ProjectKey> },  // the person typing in a Glasscode shell tab: the terminal view saw the
-                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall)
+                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall).
+                                                                // A background process in the shell tab could fire inside the window, so M21
+                                                                // keeps the in-app sheet for person-present ops.
     Manager { lane: Lane, wake: Option<String>, project: Option<ProjectKey> },
     Phone { device: String },
     Machine { id: MachineId },        // another Glasscode machine's sync connection (the Mac, seen from glasscoded)
@@ -851,6 +853,14 @@ impl Queues { pub fn push(&mut self, d: Delivery) -> Pushed; pub fn expire(&mut 
               pub fn not_sent(&mut self, session: &str, id: &str) -> Option<Delivery>; pub fn finish(&mut self, session: &str, id: &str) -> Option<Delivery>; }
 pub fn probe(marker: &str, events: &str) -> ProbeResult;                   // the UserPromptSubmit with the marker; a SessionStart after: did not happen
 pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeResult>;  // reads the session's events file (M14's journal later)
+
+// glasscode_core::trust (M53): what Settings shows and changes of trust, with no TOML or YAML
+pub fn level_table() -> Vec<TableLine>; pub fn consequences(level: Level) -> Vec<String>;  // from gate::TABLE
+pub fn moved(before: &Policy, after: &Policy, key: &ProjectKey, forge: &BTreeMap<ProjectKey, ForgeFacts>) -> Vec<Moved>;  // decide() before and after
+pub fn parse_condition(text: &str) -> Result<Condition, String>;          // "not on main", "never secrets/**", "hours 09:00-18:00 weekdays", "only Sam"
+pub fn playbook_sentence(p: &Playbook) -> String; pub fn schedule_sentence(s: &Schedule) -> String;
+pub enum Change { Level{..}, AddCondition{..}, RemoveCondition{..}, Playbook{..}, ApprovePlaybook{..}, Schedule{..}, ApproveSchedule{..} }
+pub fn prepare(change: Change, world: &World) -> Result<Pending, String>; pub fn apply(pending: &Pending, confirmed: bool) -> Result<String, String>;  // never unconfirmed
 
 // glasscode_core::turns (M30)
 pub enum TurnEnd { Completed, Paused, Failed(String), Interrupted, Aborted(Option<i32>), Crashed, Slept, AppQuit }

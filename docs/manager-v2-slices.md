@@ -923,6 +923,19 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** forget also asks the server copy to forget, with the next sync.
 - **Windows:** `tar.exe`.
 - **Addresses:** crit-8
+- **Result:**
+  - **Built:**
+    - `portability.rs`: export, import, forget and uninstall;
+    - in `memstore`: `import_docs`, `forget_matching` and `forget_files`, each rebuilding memory's history;
+    - `ops/table_data.rs`: four `human_only`, `v2_only` ops, with handlers, golden cases (`ops_golden/data.json`) and inventory rows;
+    - Settings › Manager › Your data, drawn in `manager_settings.rs` with v2 only: Export to Downloads, and Uninstall… with a confirm dialog.
+  - **Data map:** today's files are settled. An export does not hold them, they are this machine's, and they go with everything at uninstall. The cells nobody checked in their module now say "as its module does (not checked yet)".
+  - **Left out:**
+    - asking the server's copy to forget at the next sync (M57);
+    - the scheduled local export;
+    - "move out", which would copy agent notes back to Claude's folders;
+    - removing the Codex trust entries and Keychain items for the person (uninstall lists them);
+    - the demonstration (fast-track rules).
 
 ### M30 Turns and turn reports (wave 3, L)
 
@@ -1456,6 +1469,22 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same.
 - **Addresses:** ux-13
+- **Result:**
+  - **Core (`trust.rs`).**
+    - `level_table` and `consequences` are generated from `gate::defaults::TABLE`: the table of what each level allows, and a level's sentences ("It … without asking. It asks before it …. It never changes settings.").
+    - `moved` asks `gate::decide` about one op of each row before and after a change, so a preview says exactly what the gate will say (`preview_matches_decide`).
+    - `parse_condition` reads the conditions editor's words: `not on main, release/*`, `never secrets/**`, `hours 09:00-18:00 weekdays`, `only Sam`.
+    - `playbook_sentence` and `schedule_sentence` give each playbook and schedule as a sentence (a built-in from its own words); `sentence_for_each_builtin` covers them.
+    - `Change`, `prepare` and `apply` handle every change. `prepare` gives the preview: the policy's diff, each row whose answer moves, which playbooks start acting, and at Autopilot what GitHub does not guard yet. `apply` refuses without the confirmation (`change_needs_confirm`) and approves what it writes: the policy whole, a playbook or schedule as the person's.
+  - **Ops.** `policy set <project> --level|--condition|--remove-condition`, `playbook set <id> on|off|approve` and `schedule set <id> on|off|approve` are `human_only` and `v2_only`, with handlers in `ops_v2.rs`. Each answers with its preview, and changes things only when given again with `--confirm`. They have goldens (`ops_golden/trust.json`), op-selection cases, and M53 in `LANDED`.
+  - **App (`trust_ui.rs`, in Settings › Manager, v2 only).**
+    - Each project has its level picker and the level's sentences, its conditions with Remove, and "Add the condition" from one field.
+    - The table of what each level allows is shown.
+    - The playbooks show as sentences with their state, a switch, Approve, and "Try on the last 7 days" (`playbook.test`). The schedules show the same way.
+    - Every change opens the preview sheet (`Modal::TrustChange`), and only "Confirm" writes it.
+    - The CI and conflict fixes stay switched in Settings › Automation, where older builds read them.
+    - A card's "Always allow" keeps M21.2's policy preview and second confirmation.
+  - **Not built here.** Opening a page with `GLASSCODE_DEBUG_OPEN=settings:manager` was not run (no GUI run in this slice's checks). "Why?" on each action line (ux-13) is left to the chat surface (M52.2).
 
 ### M54 Moving in, part 2 (wave 5, M)
 
