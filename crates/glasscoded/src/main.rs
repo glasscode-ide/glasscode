@@ -7,6 +7,10 @@
 // The daemon needs tmux, systemd and Unix sockets, so on Windows only a short main is built
 // (the Windows app reaches the daemon on a Linux server over SSH).
 #[cfg(unix)]
+mod brain;
+#[cfg(unix)]
+mod brain_host;
+#[cfg(unix)]
 mod daemon;
 #[cfg(unix)]
 mod doctor;
@@ -15,7 +19,21 @@ mod relay_link;
 #[cfg(unix)]
 mod install;
 #[cfg(unix)]
+mod manager;
+#[cfg(unix)]
 mod mirror;
+#[cfg(unix)]
+mod owners;
+#[cfg(unix)]
+mod home;
+#[cfg(unix)]
+mod followups;
+#[cfg(unix)]
+mod intake;
+#[cfg(unix)]
+mod learning;
+#[cfg(unix)]
+mod memory_copy;
 #[cfg(unix)]
 mod phones;
 #[cfg(unix)]
@@ -41,6 +59,8 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use anyhow::{Context as _, bail};
 #[cfg(unix)]
+use glasscode_core::caller::Caller;
+#[cfg(unix)]
 use glasscode_core::paths;
 #[cfg(unix)]
 use glasscode_core::remote::{CheckLevel, Request, Response, ServerState};
@@ -64,6 +84,7 @@ Usage:
   glasscoded relay off      stop using the relay (reach the server over SSH or Tailscale)
   glasscoded relay status   whether the relay is configured and connected
   glasscoded update         install a newer release now (it also checks by itself every few hours)
+  glasscoded manager status           whether this server is ready to be the manager's home
   glasscoded version
 ";
 
@@ -74,17 +95,25 @@ fn main() {
     if args.first().map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[1..].to_vec()));
     }
+    // A brain started here runs Glasscode's MCP server as `glasscoded cli mcp` (M57).
+    glasscode_core::mcp::set_program_prefix(&["cli"]);
     let result = match args.first().map(String::as_str) {
-        Some("serve") => daemon::serve(),
+        Some("serve") => {
+            // M22: with the engine at v2, the daemon's own git calls ignore what a session can
+            // configure in its worktree (hooks, fsmonitor, ssh command).
+            glasscode_core::sys::use_safe_git(true);
+            daemon::serve()
+        }
         Some("rpc") => rpc(),
-        Some("gate") => gate(),
+        Some("gate") => gate(&args[1..]),
         Some("relay") => relay_cmd(&args[1..]),
         Some("update") => update::command(),
         Some("install") => install::install(),
         Some("uninstall") => install::uninstall(),
         Some("status") => status(),
-        Some("attach") => attach(args.get(1).map(String::as_str)),
+        Some("attach") => attach(args.get(1).map(String::as_str), None),
         Some("doctor") => doctor(),
+        Some("manager") => manager::command(&args[1..]),
         Some("version" | "--version" | "-V") => {
             println!("glasscoded {} (protocol {})", glasscode_core::update::describe(env!("CARGO_PKG_VERSION"), glasscode_core::update::BUILD), glasscode_core::remote::PROTOCOL_VERSION);
             Ok(())
@@ -159,10 +188,88 @@ fn rpc() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run by sshd for a phone's key (`command="… gate"` in authorized_keys): the phone may talk
-/// to the daemon and open a session's terminal, nothing else.
+/// Name `caller` on a new connection to the daemon (M13.2) and read its one reply line, before
+/// anything else is sent or read: the phone never sees a line it did not ask for. A daemon older
+/// than this binary (before its restart after an update) does not know the method: an error.
 #[cfg(unix)]
-fn gate() -> anyhow::Result<()> {
+fn declare_on(stream: &UnixStream, caller: &Caller) -> anyhow::Result<()> {
+    use std::io::Read as _;
+    let mut line = serde_json::to_string(&Request { id: 0, method: glasscode_core::caller::DECLARE_METHOD.into(), params: serde_json::to_value(caller)? })?;
+    line.push('\n');
+    let mut to = stream;
+    to.write_all(line.as_bytes())?;
+    to.flush()?;
+    // One byte at a time, so nothing after the reply line is taken from the connection.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut reply = Vec::new();
+    let mut from = stream;
+    let mut byte = [0u8; 1];
+    while reply.len() < 64 * 1024 {
+        match from.read(&mut byte) {
+            Ok(0) => bail!("the daemon closed the connection"),
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => reply.push(byte[0]),
+            Err(err) => return Err(err).context("the daemon did not answer the caller declaration"),
+        }
+    }
+    stream.set_read_timeout(None)?;
+    let response: Response = serde_json::from_slice(&reply).context("a bad answer to the caller declaration")?;
+    match response.error {
+        Some(err) => bail!("{err}"),
+        None => Ok(()),
+    }
+}
+
+/// The device a phone's key names in its `authorized_keys` command (`gate --device <id>`), from
+/// the gate's own arguments, never from what the phone asks to run. A line written before M13.2
+/// names none: the device `unknown`. Such lines keep working and are never rewritten.
+#[cfg(unix)]
+fn gate_device(args: &[String]) -> anyhow::Result<String> {
+    match args {
+        [] => Ok(glasscode_core::caller::UNKNOWN_DEVICE.to_string()),
+        [flag, id] if flag == "--device" && glasscode_core::caller::device_id_ok(id) => Ok(id.clone()),
+        _ => bail!("this key's gate line is not one Glasscode wrote"),
+    }
+}
+
+/// A phone's `rpc`: as [`rpc`], after the gate named the phone's connection (`Caller::Phone`),
+/// a request line at a time, each recorded first for the words ledger when it types into a
+/// session (`daemon::record_phone_input`). The daemon reads whole lines anyway, so nothing waits
+/// longer than before.
+#[cfg(unix)]
+fn phone_rpc(device: &str) -> anyhow::Result<()> {
+    let stream = connect()?;
+    if let Err(err) = declare_on(&stream, &Caller::Phone { device: device.to_string() }) {
+        // An older daemon, until it restarts with this binary: the phone keeps what it had.
+        eprintln!("glasscoded gate: the daemon did not take the phone's caller: {err:#}");
+    }
+    let from_daemon = stream.try_clone()?;
+    let replies = std::thread::spawn(move || pump(from_daemon, std::io::stdout()));
+    let mut to = &stream;
+    let mut reader = BufReader::new(std::io::stdin());
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                daemon::record_phone_input(device, &String::from_utf8_lossy(&line));
+                if to.write_all(&line).and_then(|_| to.flush()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = replies.join();
+    Ok(())
+}
+
+/// Run by sshd for a phone's key (`command="… gate --device <id>"` in authorized_keys): the
+/// phone may talk to the daemon, as that device, and open a session's terminal, nothing else.
+#[cfg(unix)]
+fn gate(args: &[String]) -> anyhow::Result<()> {
+    let device = gate_device(args)?;
     let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     let words: Vec<&str> = original.split_whitespace().collect();
     let words = match words.first() {
@@ -170,15 +277,26 @@ fn gate() -> anyhow::Result<()> {
         _ => &words[..],
     };
     match words {
-        ["rpc"] => rpc(),
-        ["attach", id] if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => attach(Some(id)),
+        ["rpc"] => phone_rpc(&device),
+        ["attach", id] if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => attach(Some(id), Some(&Caller::Phone { device })),
         _ => bail!("this key can only use Glasscode (rpc, attach <session>)"),
     }
 }
 
 #[cfg(unix)]
 fn request(method: &str, params: Value) -> anyhow::Result<Value> {
+    request_as(None, method, params)
+}
+
+/// One request on a connection of its own, as `caller` when one is given (a phone's `attach`).
+#[cfg(unix)]
+fn request_as(caller: Option<&Caller>, method: &str, params: Value) -> anyhow::Result<Value> {
     let mut stream = connect()?;
+    if let Some(caller) = caller
+        && let Err(err) = declare_on(&stream, caller)
+    {
+        eprintln!("glasscoded: the daemon did not take the caller: {err:#}");
+    }
     let mut line = serde_json::to_string(&Request { id: 1, method: method.into(), params })?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
@@ -263,15 +381,15 @@ fn status() -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn attach(name: Option<&str>) -> anyhow::Result<()> {
+fn attach(name: Option<&str>, caller: Option<&Caller>) -> anyhow::Result<()> {
     let name = name.context("usage: glasscoded attach <session>")?;
-    let state: ServerState = serde_json::from_value(request("state", Value::Null)?)?;
+    let state: ServerState = serde_json::from_value(request_as(caller, "state", Value::Null)?)?;
     let session = state
         .sessions
         .iter()
         .find(|s| s.tmux_name == name || s.session.id.starts_with(name) || s.session.title == name)
         .with_context(|| format!("no session {name}; see `glasscoded status`"))?;
-    let attach: glasscode_core::remote::Attach = serde_json::from_value(request("sessions.attach", serde_json::json!({ "session_id": session.session.id }))?)?;
+    let attach: glasscode_core::remote::Attach = serde_json::from_value(request_as(caller, "sessions.attach", serde_json::json!({ "session_id": session.session.id }))?)?;
     let err = Command::new(&attach.argv[0]).args(&attach.argv[1..]).exec();
     bail!("could not run tmux: {err}")
 }

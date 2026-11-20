@@ -7,8 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0467623F5FAD1D8ED2253A72 /* GlasscodeLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */; };
 		0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7030BE5C5E270404A9245D /* GlassesSession.swift */; };
-		16BDFD7BAA3106E69E175873 /* GlasscodeLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30AC819D2E825E96546D5409 /* GlasscodeLink.swift */; };
+		1D7E7F4361B9D42754E81630 /* ManagerVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */; };
 		1E5CE3E0B16D8C0BD47E2F37 /* GlasscodeControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */; };
 		2F2A78C25D3B67BD31533A0B /* GlasscodeGlassesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F46EEC8D0242265D9430D582 /* GlasscodeGlassesApp.swift */; };
 		3F3972850CE5CEBC5C3C349C /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = 100276C9CE1C55EEA0B6475E /* ElevenLabs */; };
@@ -16,24 +17,44 @@
 		4806BE4B89EBDD964E34C16B /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 686F4461A06684C7053DEB12 /* MWDATCore */; };
 		5E183B8C6EC45112F19943A6 /* GlasscodeConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4861DEF42E1D16AD926FDBA /* GlasscodeConfig.swift */; };
 		5F0B459097A0D5AC0D8A6427 /* GlassesHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = E869921307514FB8F0B02BF5 /* GlassesHUD.swift */; };
+		670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */; };
 		7FDC93E1C5F2892642339BC1 /* GlasscodeRelayProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */; };
+		871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8E297534B0D5F4CD6197260 /* StayOnTests.swift */; };
+		987E11777E792E9B7ACFBB7C /* AudioRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED117763B964885A22E2551 /* AudioRoute.swift */; };
 		9D8F06FFE7A3853F4A260BAE /* WakeWord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */; };
+		A6F3C44B884741DD0B4DB3BE /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = 250A4FCD72AE8130CCE7CF68 /* LiveKit */; };
 		ABDB11272AC8319D9E5D0E72 /* MWDATSpeech in Frameworks */ = {isa = PBXBuildFile; productRef = D170C5E07BB130819D84121E /* MWDATSpeech */; };
 		B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */ = {isa = PBXBuildFile; productRef = F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */; };
 		B4D3A1B044A1CC6AF21BF1D4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A2123168E7D9AC567C0D97A /* ContentView.swift */; };
 		BCE0BC027ABD6C313E70DAAA /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = 2DB5A82AC5377366F47AF18C /* MWDATDisplay */; };
 		DE5A2E6E51356E048257C230 /* GlasscodeFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */; };
 		E522F2A25B562EF48F0A99D1 /* GlasscodeVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */; };
+		F193555A08BEA5ACD73AA601 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = 7857C5E1450492FEAF2C67DB /* MWDATMockDevice */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BD4E0F9019116DE5C1F4A928 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0B0BF2ADFC1269DACC4A55C0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 55313A62FA0012EDCBB0DB8F;
+			remoteInfo = GlasscodeGlasses;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeVoice.swift; sourceTree = "<group>"; };
 		22D03E4C7937AF4310FE8262 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		30AC819D2E825E96546D5409 /* GlasscodeLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeLink.swift; sourceTree = "<group>"; };
+		36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerVoice.swift; sourceTree = "<group>"; };
 		3A2123168E7D9AC567C0D97A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		6ED117763B964885A22E2551 /* AudioRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRoute.swift; sourceTree = "<group>"; };
 		83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeWord.swift; sourceTree = "<group>"; };
+		8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlasscodeGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeRelayProxy.swift; sourceTree = "<group>"; };
+		A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
 		B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeControl.swift; sourceTree = "<group>"; };
+		C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeLink.swift; sourceTree = "<group>"; };
+		C8E297534B0D5F4CD6197260 /* StayOnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StayOnTests.swift; sourceTree = "<group>"; };
 		CA7030BE5C5E270404A9245D /* GlassesSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesSession.swift; sourceTree = "<group>"; };
 		D0FD4F12040A779AA31D7C0C /* GlasscodeScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeScreens.swift; sourceTree = "<group>"; };
 		D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeFlow.swift; sourceTree = "<group>"; };
@@ -53,6 +74,15 @@
 				B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */,
 				ABDB11272AC8319D9E5D0E72 /* MWDATSpeech in Frameworks */,
 				3F3972850CE5CEBC5C3C349C /* ElevenLabs in Frameworks */,
+				A6F3C44B884741DD0B4DB3BE /* LiveKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E268D87DB83D154ADA86012A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F193555A08BEA5ACD73AA601 /* MWDATMockDevice in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -62,27 +92,39 @@
 		4A789C2CC86602BA073AB1D8 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				6ED117763B964885A22E2551 /* AudioRoute.swift */,
+				A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */,
 				3A2123168E7D9AC567C0D97A /* ContentView.swift */,
 				F4861DEF42E1D16AD926FDBA /* GlasscodeConfig.swift */,
 				B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */,
 				D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */,
 				F46EEC8D0242265D9430D582 /* GlasscodeGlassesApp.swift */,
-				30AC819D2E825E96546D5409 /* GlasscodeLink.swift */,
+				C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */,
 				9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */,
 				D0FD4F12040A779AA31D7C0C /* GlasscodeScreens.swift */,
 				0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */,
 				E869921307514FB8F0B02BF5 /* GlassesHUD.swift */,
 				CA7030BE5C5E270404A9245D /* GlassesSession.swift */,
 				22D03E4C7937AF4310FE8262 /* Info.plist */,
+				36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */,
 				83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		CD943259188683F8ED929F1F /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				C8E297534B0D5F4CD6197260 /* StayOnTests.swift */,
+			);
+			path = Tests;
 			sourceTree = "<group>";
 		};
 		D268CB8CC8B6FACA342F73D7 = {
 			isa = PBXGroup;
 			children = (
 				4A789C2CC86602BA073AB1D8 /* Sources */,
+				CD943259188683F8ED929F1F /* Tests */,
 				D2D3F30719D82ABC8FEC201E /* Products */,
 			);
 			sourceTree = "<group>";
@@ -91,6 +133,7 @@
 			isa = PBXGroup;
 			children = (
 				E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */,
+				8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -116,10 +159,31 @@
 				F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */,
 				D170C5E07BB130819D84121E /* MWDATSpeech */,
 				100276C9CE1C55EEA0B6475E /* ElevenLabs */,
+				250A4FCD72AE8130CCE7CF68 /* LiveKit */,
 			);
 			productName = GlasscodeGlasses;
 			productReference = E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */;
 			productType = "com.apple.product-type.application";
+		};
+		D530CC39F2E71E8C5A00EDCB /* GlasscodeGlassesTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1D78BD9E4CF3B22F020905B4 /* Build configuration list for PBXNativeTarget "GlasscodeGlassesTests" */;
+			buildPhases = (
+				1C9E1B6CDB2B62C2E43E97D3 /* Sources */,
+				E268D87DB83D154ADA86012A /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4591B07A80E83BCC5B38AB77 /* PBXTargetDependency */,
+			);
+			name = GlasscodeGlassesTests;
+			packageProductDependencies = (
+				7857C5E1450492FEAF2C67DB /* MWDATMockDevice */,
+			);
+			productName = GlasscodeGlassesTests;
+			productReference = 8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -148,6 +212,7 @@
 			packageReferences = (
 				9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
 				BA1A4BBAE187CE8ABB731472 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */,
+				748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D2D3F30719D82ABC8FEC201E /* Products */;
@@ -155,33 +220,89 @@
 			projectRoot = "";
 			targets = (
 				55313A62FA0012EDCBB0DB8F /* GlasscodeGlasses */,
+				D530CC39F2E71E8C5A00EDCB /* GlasscodeGlassesTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1C9E1B6CDB2B62C2E43E97D3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		CF960BD192F181F0511F760F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				987E11777E792E9B7ACFBB7C /* AudioRoute.swift in Sources */,
+				670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */,
 				B4D3A1B044A1CC6AF21BF1D4 /* ContentView.swift in Sources */,
 				5E183B8C6EC45112F19943A6 /* GlasscodeConfig.swift in Sources */,
 				1E5CE3E0B16D8C0BD47E2F37 /* GlasscodeControl.swift in Sources */,
 				DE5A2E6E51356E048257C230 /* GlasscodeFlow.swift in Sources */,
 				2F2A78C25D3B67BD31533A0B /* GlasscodeGlassesApp.swift in Sources */,
-				16BDFD7BAA3106E69E175873 /* GlasscodeLink.swift in Sources */,
+				0467623F5FAD1D8ED2253A72 /* GlasscodeLink.swift in Sources */,
 				7FDC93E1C5F2892642339BC1 /* GlasscodeRelayProxy.swift in Sources */,
 				43ED8891FB9E09C5C35E4F87 /* GlasscodeScreens.swift in Sources */,
 				E522F2A25B562EF48F0A99D1 /* GlasscodeVoice.swift in Sources */,
 				5F0B459097A0D5AC0D8A6427 /* GlassesHUD.swift in Sources */,
 				0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */,
+				1D7E7F4361B9D42754E81630 /* ManagerVoice.swift in Sources */,
 				9D8F06FFE7A3853F4A260BAE /* WakeWord.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		4591B07A80E83BCC5B38AB77 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 55313A62FA0012EDCBB0DB8F /* GlasscodeGlasses */;
+			targetProxy = BD4E0F9019116DE5C1F4A928 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		17E2DCEDD72167923EEB4A44 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.glasscode.glasses.tests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GlasscodeGlasses.app/GlasscodeGlasses";
+			};
+			name = Debug;
+		};
+		6A1ABDD6D66FCAE6CC8B744B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.glasscode.glasses.tests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GlasscodeGlasses.app/GlasscodeGlasses";
+			};
+			name = Release;
+		};
 		7B0D58E116ED8E7BAD0278C0 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -348,6 +469,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1D78BD9E4CF3B22F020905B4 /* Build configuration list for PBXNativeTarget "GlasscodeGlassesTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				17E2DCEDD72167923EEB4A44 /* Debug */,
+				6A1ABDD6D66FCAE6CC8B744B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		3B04C9E41661B3ABFD4F0E79 /* Build configuration list for PBXNativeTarget "GlasscodeGlasses" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -369,6 +499,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.19.0;
+			};
+		};
 		9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
@@ -393,6 +531,11 @@
 			package = BA1A4BBAE187CE8ABB731472 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */;
 			productName = ElevenLabs;
 		};
+		250A4FCD72AE8130CCE7CF68 /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
+		};
 		2DB5A82AC5377366F47AF18C /* MWDATDisplay */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
@@ -402,6 +545,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATCore;
+		};
+		7857C5E1450492FEAF2C67DB /* MWDATMockDevice */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATMockDevice;
 		};
 		D170C5E07BB130819D84121E /* MWDATSpeech */ = {
 			isa = XCSwiftPackageProductDependency;

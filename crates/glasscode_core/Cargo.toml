@@ -5,6 +5,22 @@ edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
 
+[features]
+# The test kit of Manager v2 (`glasscode_core::testkit`): scratch homes, stand-in agents, the
+# virtual clock and the eval harnesses. The core's own tests have it always; it adds no dependency.
+testkit = []
+
+# A scratch Glasscode home for trying things by hand (`testkit::Home`).
+[[bin]]
+name = "make-test-home"
+required-features = ["testkit"]
+
+# The eval suites with stand-in agents and no model (the `evals` job of CI).
+[[test]]
+name = "evals"
+path = "tests/evals/main.rs"
+required-features = ["testkit"]
+
 [dependencies]
 ring = "0.17"
 libc.workspace = true

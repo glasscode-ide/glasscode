@@ -1,0 +1,924 @@
+#!/usr/bin/env python3
+# Stand-in for the claude CLI, and (run by ./codex) for the codex CLI: no model, no network.
+#
+# It replays a scenario of the Glasscode test kit (crates/glasscode_core/src/testkit/agents.rs):
+# the lines a CLI writes to its own files (Claude's transcript, Codex's rollout and history.jsonl),
+# the hook events it gives the commands of --settings, what it prints, and how it ends. The text of
+# each step is kept as written; {{name}} placeholders are filled with the run's values (the
+# session id, the folder, the time, the prompt), escaped for a JSON string. The kit's own player
+# does the same in Rust, and a test checks that both write the same bytes.
+#
+# Arguments are read with the options of the recorded help (script/cli-help/<cli>-<version>.txt):
+# an option the help does not list is refused as the CLI would refuse it, and --version and --help
+# answer from that file.
+#
+# The scenario: $GLASSCODE_TEST_SCENARIO (a file), else in the folder $GLASSCODE_TEST_SCENARIOS
+# `<$GLASSCODE_SESSION_ID>.json`, else `claude.json`, `claude-print.json` (-p), `codex.json`,
+# `codex-exec.json` (exec). $GLASSCODE_TEST_NOW_MS starts virtual time (each step's time is its
+# turn's start plus its `at`); without it the steps carry the wall clock.
+#
+# Output as the CLI prints it: a terminal run prints the scenario's lines; `claude -p` prints the
+# result's text (`--output-format text`, the default), the result line (`json`) or every line
+# (`stream-json`); `codex exec` prints the last message, or every event with `--json`. With
+# `--input-format stream-json`, each line on stdin is read when it comes: a user message plays a
+# turn, a control request is answered, and the end of input ends the run.
+#
+# It writes only into $CLAUDE_CONFIG_DIR or $CODEX_HOME, which must be set and must not be the
+# person's own ~/.claude or ~/.codex (rule 11 of the Manager v2 slice plan); it exits 3 otherwise.
+# The person's home is found from the system (the password database, Windows' profile folder),
+# never from HOME or USERPROFILE, which a test moves; $GLASSCODE_TEST_PERSON_HOME, which the kit
+# passes, is refused as well. With $GLASSCODE_TEST_CHECK_ONLY=1 it makes those checks, says
+# "scratch: <folder>" and stops before it writes anything. A `run` step runs only in a folder of a
+# scratch home: one with the marker file `.glasscode-test-home` above it. The recorded help comes
+# from $GLASSCODE_TEST_CLI_HELP or ../cli-help; without it, it exits 3.
+#
+# Two things only this stand-in plays, as they need a live app (script/journeys.sh): a step
+# `{"to": "mcp", "tool": …, "arguments": {…}}` calls that tool of a --mcp-config server (a brain's
+# own Glasscode tools), prints the call and its result as Claude's stream-json does, and makes the
+# result's text `{{tool_result}}`; a scenario's `"replies": [{"when": "<words>", "steps": […]}]`
+# plays, for a prompt holding those words (in any case), the first such reply instead of its turn.
+# $GLASSCODE_TEST_HOOK_LOG gets a JSON line per hook run, with what it printed (what a
+# SessionStart hook told the agent).
+import hashlib, json, os, re, subprocess, sys, time, uuid
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+AGENT = globals().get("AGENT", "claude")
+TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PermissionRequest")
+MARKER = ".glasscode-test-home"
+
+
+def fail(code, message):
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    sys.exit(code)
+
+
+# ----- the recorded help ---------------------------------------------------------------------------
+
+def help_folder():
+    return os.environ.get("GLASSCODE_TEST_CLI_HELP") or os.path.join(HERE, "..", "cli-help")
+
+
+def help_files():
+    folder = help_folder()
+    found = []
+    for name in os.listdir(folder) if os.path.isdir(folder) else []:
+        m = re.fullmatch(re.escape(AGENT) + r"-(\d+(?:\.\d+)*)\.txt", name)
+        if m:
+            found.append((tuple(int(p) for p in m.group(1).split(".")), m.group(1), os.path.join(folder, name)))
+    return sorted(found)
+
+
+def sections(path):
+    """The recorded help texts of a file, by command: {"codex exec --help": text, ...}."""
+    out, name, lines = {}, None, []
+    with open(path, encoding="utf-8") as f:
+        for line in f.read().split("\n"):
+            if line.startswith("### $ "):
+                if name:
+                    out[name] = "\n".join(lines).rstrip("\n") + "\n"
+                name, lines = line[6:].strip(), []
+            elif name:
+                lines.append(line)
+    if name:
+        out[name] = "\n".join(lines).rstrip("\n") + "\n"
+    return out
+
+
+OPTION = re.compile(r"^ {2,6}(-[^\s,]+(?:, +-[^\s,]+)*)(?: +(<[^>]*>(?:\.\.\.)?|\[[^\]]*\]))?(?:\s|$)")
+
+
+def options(text):
+    """Each option of a help text: its names, and whether it takes a value: none, one, many, optional."""
+    found = {}
+    for line in text.split("\n"):
+        m = OPTION.match(line)
+        if not m:
+            continue
+        value = m.group(2) or ""
+        kind = "none" if not value else "optional" if value.startswith("[") else "many" if value.endswith("...") or value.endswith("...>") else "one"
+        names = [n.strip() for n in m.group(1).split(",")]
+        for name in names:
+            found[name] = (kind, names[-1])
+    return found
+
+
+def commands(text):
+    out, inside = set(), False
+    for line in text.split("\n"):
+        if line.strip() == "Commands:":
+            inside = True
+            continue
+        if inside:
+            if line and not line.startswith(" "):
+                break
+            m = re.match(r"^  ([a-z][\w-]*)(?:\s|$)", line)
+            if m:
+                out.add(m.group(1))
+    return out
+
+
+def parse(args, opts, cmds, clap):
+    """Flags and positionals as the CLI's parser reads them; a subcommand stops it."""
+    flags, positionals, i = {}, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            positionals.extend(args[i + 1:])
+            return flags, positionals, None, []
+        if a.startswith("-") and a != "-":
+            name, eq, inline = a.partition("=")
+            if name not in opts:
+                if clap:
+                    fail(2, f"error: unexpected argument '{name}' found\n\nUsage: {AGENT} [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.")
+                fail(1, f"error: unknown option '{name}'")
+            kind, canonical = opts[name]
+            if kind == "none":
+                flags[canonical] = True
+            elif eq:
+                flags.setdefault(canonical, []).append(inline)
+            elif kind == "one":
+                if i + 1 >= len(args):
+                    fail(2 if clap else 1, f"error: option '{name}' argument missing")
+                i += 1
+                flags.setdefault(canonical, []).append(args[i])
+            elif kind == "many":
+                values = []
+                while i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    i += 1
+                    values.append(args[i])
+                flags.setdefault(canonical, []).extend(values)
+            else:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    i += 1
+                    flags.setdefault(canonical, []).append(args[i])
+                else:
+                    flags[canonical] = True
+        else:
+            if not positionals and a in cmds:
+                return flags, positionals, a, args[i + 1:]
+            positionals.append(a)
+        i += 1
+    return flags, positionals, None, []
+
+
+def last(flags, name):
+    value = flags.get(name)
+    return value[-1] if isinstance(value, list) and value else None
+
+
+# ----- safety ----------------------------------------------------------------------------------------
+
+def windows_profile():
+    """The person's profile folder from Windows itself (FOLDERID_Profile), not from USERPROFILE."""
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD), ("Data4", wintypes.BYTE * 8)]
+
+    known = uuid.UUID("5E6C858F-0E22-4760-9AFE-EA3317B67173")
+    folder = GUID(known.time_low, known.time_mid, known.time_hi_version, (wintypes.BYTE * 8).from_buffer_copy(known.bytes[8:]))
+    path = ctypes.c_wchar_p()
+    if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path)) != 0:
+        raise OSError("SHGetKnownFolderPath failed")
+    try:
+        return path.value
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(path)
+
+
+def real_homes():
+    """The person's home as the system knows it, and as the kit says it is."""
+    homes = []
+    try:
+        if os.name == "nt":
+            homes.append(windows_profile())
+        else:
+            import pwd
+            homes.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        fail(3, f"{AGENT} stand-in: cannot find the person's home folder, so it cannot tell a scratch folder from theirs")
+    if os.environ.get("GLASSCODE_TEST_PERSON_HOME"):
+        homes.append(os.environ["GLASSCODE_TEST_PERSON_HOME"])
+    return homes
+
+
+def folded(path):
+    path = os.path.realpath(path)
+    return path.lower() if sys.platform in ("darwin", "win32") else path
+
+
+def scratch(variable):
+    """The folder of `variable`, which must be set and must not be one of the person's own."""
+    value = os.environ.get(variable)
+    if not value:
+        fail(3, f"{AGENT} stand-in: {variable} is not set; it writes only to a scratch folder (rule 11 of the Manager v2 slice plan)")
+    for home in real_homes():
+        for own in (".claude", ".codex", ".glasscode"):
+            mine = folded(os.path.join(home, own))
+            if folded(value) == mine or folded(value).startswith(mine + os.sep):
+                fail(3, f"{AGENT} stand-in: {variable} is the person's own {own}; a stand-in never writes there")
+    return value
+
+
+def check_only(folder):
+    """$GLASSCODE_TEST_CHECK_ONLY: the checks are made; nothing is written."""
+    if os.environ.get("GLASSCODE_TEST_CHECK_ONLY") == "1":
+        out(f"scratch: {folder}\n")
+        sys.exit(0)
+
+
+def inside_scratch(cwd):
+    """A `run` step runs a real command: only in a folder of a scratch home, which has the kit's
+    marker file in a folder above it (testkit::home writes it), never in a checkout of the person's."""
+    folder = os.path.realpath(cwd)
+    while True:
+        if os.path.isfile(os.path.join(folder, MARKER)):
+            return
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            fail(3, f"{AGENT} stand-in: a run step runs only in a scratch home, and {cwd} has no {MARKER} above it")
+        folder = parent
+
+
+# ----- the player ------------------------------------------------------------------------------------
+
+PLACEHOLDER = re.compile(r"\{\{([a-z0-9_]+)\}\}")
+
+
+def escape(value):
+    return json.dumps(value, ensure_ascii=False)[1:-1]
+
+
+def fill(text, values):
+    return PLACEHOLDER.sub(lambda m: escape(values[m.group(1)]) if m.group(1) in values else m.group(0), text)
+
+
+def iso(ms):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms // 1000)) + ".%03dZ" % (ms % 1000)
+
+
+def out(text):
+    """Prints `text`; a reader that went away (`| head`) ends the stand-in quietly, as it ends a CLI."""
+    try:
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(141)
+
+
+def wall_ms():
+    return time.time_ns() // 1_000_000
+
+
+def append(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "ab") as f:
+        f.write((text + "\n").encode("utf-8"))
+
+
+def crash():
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    if hasattr(os, "kill") and os.name != "nt":
+        import signal
+        os.kill(os.getpid(), signal.SIGKILL)
+    os._exit(137)
+
+
+def hook_log(event, command, done):
+    """What a hook printed, for a test to read (what the agent was told by a SessionStart hook,
+    say): one JSON line per run in $GLASSCODE_TEST_HOOK_LOG, when it is set."""
+    path = os.environ.get("GLASSCODE_TEST_HOOK_LOG")
+    if not path:
+        return
+    line = {"event": event, "command": command, "exit": done.returncode, "stdout": done.stdout.decode("utf-8", "replace"), "ms": wall_ms()}
+    append(path, json.dumps(line, ensure_ascii=False))
+
+
+def mcp_tools(flags):
+    """The tools Claude's init line lists when it is started with `--tools` and `--mcp-config` (the
+    brain's flags, P01): the built-in tools `--tools` names, then `mcp__<server>__<tool>` for each
+    tool the servers of `--mcp-config` list (each server started as the config says, asked
+    `tools/list`, and stopped), with each server's status. None without those flags: the
+    scenario's own line is kept. With `--strict-mcp-config` only those servers count, and the
+    stand-in reads no other MCP settings in any case."""
+    named = flags.get("--tools")
+    configs = flags.get("--mcp-config") or []
+    if named is None and not configs:
+        return None
+    builtins = [] if named is True else [t for value in named for t in re.split(r"[,\s]+", value) if t]
+    tools, servers = list(builtins), []
+    for config in configs:
+        try:
+            value = json.loads(config) if config.lstrip().startswith("{") else json.load(open(config, encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            fail(1, f"Error: Invalid MCP configuration: {err}")
+        for name, server in (value.get("mcpServers") or {}).items():
+            listed = list_tools(server)
+            servers.append({"name": name, "status": "failed" if listed is None else "connected"})
+            tools.extend(f"mcp__{name}__{tool}" for tool in listed or [])
+    return tools, servers
+
+
+def mcp_servers(flags):
+    """The stdio servers of `--mcp-config`, by name, in order."""
+    servers = []
+    for config in flags.get("--mcp-config") or []:
+        try:
+            value = json.loads(config) if config.lstrip().startswith("{") else json.load(open(config, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        servers.extend((value.get("mcpServers") or {}).items())
+    return servers
+
+
+def call_tool(server, tool, arguments):
+    """Calls `tool` on a stdio MCP server (initialize, then tools/call) and gives its result's text
+    and whether it is an error; None when the server cannot be started or does not answer within
+    a minute."""
+    if server.get("type", "stdio") != "stdio" or not server.get("command"):
+        return None
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "stand-in"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
+    ]
+    try:
+        proc = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, **server.get("env", {})))
+        answer, _ = proc.communicate("".join(json.dumps(line) + "\n" for line in lines).encode("utf-8"), timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except (NameError, OSError):
+            pass
+        return None
+    for line in answer.decode("utf-8", "replace").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") != 2:
+            continue
+        if "error" in message:
+            return str(message["error"].get("message", "")), True
+        result = message.get("result") or {}
+        text = "".join(part.get("text", "") for part in result.get("content", []) if isinstance(part, dict))
+        return text, bool(result.get("isError"))
+    return None
+
+
+def list_tools(server):
+    """The names of the tools a stdio MCP server lists (initialize, then tools/list), or None when
+    it cannot be started or does not answer within ten seconds."""
+    if server.get("type", "stdio") != "stdio" or not server.get("command"):
+        return None
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "stand-in"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    try:
+        proc = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, **server.get("env", {})))
+        answer, _ = proc.communicate("".join(json.dumps(line) + "\n" for line in lines).encode("utf-8"), timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except (NameError, OSError):
+            pass
+        return None
+    for line in answer.decode("utf-8", "replace").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") == 2 and isinstance(message.get("result"), dict):
+            return [tool.get("name", "") for tool in message["result"].get("tools", []) if tool.get("name")]
+    return None
+
+
+class Player:
+    def __init__(self, scenario, values, files, settings, cwd, start_ms):
+        self.scenario = scenario
+        self.values = dict(scenario.get("vars", {}))
+        self.values["version"] = scenario.get("version", "")
+        self.values.update(values)
+        self.values["turn"] = "0"
+        self.files, self.settings, self.cwd = files, settings or {}, cwd
+        self.virtual = start_ms is not None
+        self.time = start_ms if self.virtual else wall_ms()
+        self.turns = 0
+        # "raw": print the scenario's lines; "text" or "json": keep them, print the answer at the end.
+        self.output = "raw"
+        self.answer = None
+        # The init line's tools and MCP servers as the flags make them (`mcp_tools`), when the
+        # scenario's own line names no MCP tool.
+        self.init_tools = None
+        # The servers of `--mcp-config` (`mcp_servers`), for a step that calls a tool.
+        self.servers = []
+
+    def init_line(self, line):
+        """`line` with the tools of the flags, when it is the init line and they are known."""
+        if self.init_tools is None or '"init"' not in line:
+            return line
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return line
+        if not (isinstance(value, dict) and value.get("type") == "system" and value.get("subtype") == "init"):
+            return line
+        if any(str(t).startswith("mcp__") for t in value.get("tools", [])):
+            return line
+        value["tools"], value["mcp_servers"] = self.init_tools
+        return json.dumps(value, separators=(",", ":"))
+
+    def keep(self, line):
+        """A line of a program's run that is not printed: the answer it holds, if any."""
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "result":
+            self.answer = (value.get("result") or "", line)
+        elif value.get("type") == "item.completed" and value.get("item", {}).get("type") == "agent_message":
+            self.answer = (value["item"].get("text", ""), line)
+
+    def print_answer(self):
+        if self.output == "text" and self.answer:
+            out(self.answer[0] + "\n")
+        elif self.output == "json" and self.answer:
+            out(self.answer[1] + "\n")
+
+    def hooks(self, event, payload):
+        """Runs the commands the settings give `event`; for PreToolUse, the reason if one refuses."""
+        refused = None
+        tool = None
+        if event in TOOL_EVENTS:
+            try:
+                tool = json.loads(payload).get("tool_name", "")
+            except ValueError:
+                tool = ""
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.cwd)
+        for entry in self.settings.get("hooks", {}).get(event, []):
+            matcher = entry.get("matcher", "")
+            if tool is not None and matcher not in ("", "*"):
+                try:
+                    if not re.fullmatch(matcher, tool):
+                        continue
+                except re.error:
+                    if matcher != tool:
+                        continue
+            for hook in entry.get("hooks", []):
+                if hook.get("type", "command") != "command":
+                    continue
+                try:
+                    done = subprocess.run(hook["command"], shell=True, input=payload.encode("utf-8"), capture_output=True, env=env, cwd=self.cwd, timeout=hook.get("timeout", 60))
+                except subprocess.TimeoutExpired:
+                    # As the CLI: a hook past its time is an error that blocks nothing.
+                    sys.stderr.write(f"{AGENT} stand-in: a {event} hook ran past its timeout\n")
+                    continue
+                hook_log(event, hook["command"], done)
+                if event != "PreToolUse" or refused is not None:
+                    continue
+                if done.returncode == 2:
+                    refused = done.stderr.decode("utf-8", "replace").strip() or "a hook refused it"
+                    continue
+                try:
+                    answer = json.loads(done.stdout.decode("utf-8") or "{}")
+                except ValueError:
+                    continue
+                if not isinstance(answer, dict):
+                    continue
+                specific = answer.get("hookSpecificOutput") or {}
+                if specific.get("permissionDecision") == "deny":
+                    refused = specific.get("permissionDecisionReason") or "a hook refused it"
+                elif answer.get("decision") == "block":
+                    refused = answer.get("reason") or "a hook refused it"
+        return refused
+
+    def play(self, steps, base):
+        for step in steps:
+            self.time = max(self.time, base + step.get("at", 0)) if self.virtual else wall_ms()
+            self.values["ts"] = iso(self.time)
+            self.values["unix_s"] = str(self.time // 1000)
+            self.values["ms"] = str(self.time)
+            to = step["to"]
+            if to in ("transcript", "rollout", "history"):
+                if self.files.get(to):
+                    append(self.files[to], fill(step["text"], self.values))
+            elif to == "hook":
+                self.hooks(step["event"], fill(step["text"], self.values))
+            elif to == "stdout":
+                line = self.init_line(fill(step["text"], self.values))
+                if self.output == "raw":
+                    out(line + "\n")
+                else:
+                    self.keep(line)
+            elif to == "tool":
+                reason = self.hooks("PreToolUse", fill(step["pre"], self.values))
+                if reason is not None:
+                    self.values["reason"] = reason
+                    end = self.play(step.get("denied", []), base)
+                else:
+                    end = self.play(step.get("allowed", []), base)
+                if end is not None:
+                    return end
+            elif to == "mcp":
+                self.mcp(step)
+            elif to == "run":
+                inside_scratch(self.cwd)
+                subprocess.run(fill(step["command"], self.values), shell=True, cwd=self.cwd, capture_output=True, stdin=subprocess.DEVNULL)
+            elif to == "sleep":
+                time.sleep(step["ms"] / 1000)
+            elif to == "exit":
+                return step["code"]
+            elif to == "crash":
+                crash()
+            else:
+                fail(3, f"{AGENT} stand-in: a step to {to!r} is not one it knows")
+        return None
+
+    def mcp(self, step):
+        """A tool call of the turn (a brain's, say): the tool of a `--mcp-config` server (the step's
+        `server`, else the first) is called with the step's `arguments` (filled), and the call and
+        its result are printed as Claude's stream-json prints them. The result's text is
+        `{{tool_result}}` from then on."""
+        servers = [(n, c) for n, c in self.servers if step.get("server") in (None, n)]
+        if not servers:
+            fail(3, f"{AGENT} stand-in: a step calls the tool {step.get('tool')!r}, and no --mcp-config server has it")
+        name, server = servers[0]
+        arguments = json.loads(fill(json.dumps(step.get("arguments", {})), self.values))
+        use = "toolu_" + uuid.uuid4().hex[:20]
+        called = call_tool(server, step["tool"], arguments)
+        text, error = called if called is not None else (f"the MCP server {name} did not answer", True)
+        self.values["tool_result"] = text
+        session = self.values.get("session_id", "")
+        lines = [
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": use, "name": f"mcp__{name}__{step['tool']}", "input": arguments}]}, "parent_tool_use_id": None, "session_id": session},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use, "content": [{"type": "text", "text": text}], "is_error": error}]}, "parent_tool_use_id": None, "session_id": session},
+        ]
+        for line in lines:
+            if self.output == "raw":
+                out(json.dumps(line, separators=(",", ":")) + "\n")
+
+    def part(self, steps):
+        return self.play(steps, self.time if self.virtual else 0)
+
+    def start(self):
+        return self.part(self.scenario.get("start", []))
+
+    def turn(self, prompt):
+        self.turns += 1
+        self.values["turn"] = str(self.turns)
+        self.values["prompt"] = prompt
+        # A reply for what the prompt says ("replies": [{"when": "<words>", "steps": […]}], the
+        # first whose words it holds, in any case), else the turn's own steps.
+        said = (prompt or "").lower()
+        reply = next((r for r in self.scenario.get("replies", []) if r.get("when", "").lower() in said), None)
+        if reply is not None:
+            return self.part(reply.get("steps", []))
+        turns = self.scenario.get("turns", [])
+        steps = turns[self.turns - 1] if self.turns <= len(turns) else (turns[-1] if turns else [])
+        return self.part(steps)
+
+    def end(self):
+        return self.part(self.scenario.get("end", []))
+
+
+def scenario_for(mode):
+    path = os.environ.get("GLASSCODE_TEST_SCENARIO")
+    folder = os.environ.get("GLASSCODE_TEST_SCENARIOS")
+    if not path and folder:
+        candidates = [os.environ.get("GLASSCODE_SESSION_ID", "") + ".json", AGENT + mode + ".json"]
+        path = next((os.path.join(folder, c) for c in candidates if c != ".json" and os.path.isfile(os.path.join(folder, c))), None)
+    if not path:
+        fail(3, f"{AGENT} stand-in: no scenario (set GLASSCODE_TEST_SCENARIO, or GLASSCODE_TEST_SCENARIOS to a folder that make-test-home wrote)")
+    with open(path, encoding="utf-8") as f:
+        scenario = json.load(f)
+    if scenario.get("agent") != AGENT:
+        fail(3, f"{AGENT} stand-in: {path} is a scenario of {scenario.get('agent')}")
+    return scenario
+
+
+def start_ms(scenario):
+    value = os.environ.get("GLASSCODE_TEST_NOW_MS") or scenario.get("vars", {}).get("now_ms")
+    return int(value) if value else None
+
+
+def branch(cwd):
+    try:
+        done = subprocess.run(["git", "branch", "--show-current"], cwd=cwd, capture_output=True, text=True, timeout=10)
+        return done.stdout.strip() or "main"
+    except (OSError, subprocess.SubprocessError):
+        return "main"
+
+
+def lines_of_stdin():
+    while True:
+        if sys.stdin.isatty():
+            out("\n> ")
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return
+        text = line.decode("utf-8", "replace").strip()
+        if text:
+            yield text
+
+
+def finish(code):
+    out("")
+    sys.exit(code or 0)
+
+
+def session(player, prompts, interactive):
+    """Plays the start, a turn for each prompt (taken when it comes: `prompts` may wait on
+    stdin), then the end, and prints the answer of a program's run."""
+    end = player.start()
+    for prompt in prompts:
+        if end is not None:
+            break
+        end = player.turn(prompt)
+    if end is None and interactive:
+        for prompt in lines_of_stdin():
+            end = player.turn(prompt)
+            if end is not None:
+                break
+    if end is None:
+        end = player.end()
+    player.print_answer()
+    finish(end)
+
+
+# ----- claude ----------------------------------------------------------------------------------------
+
+def claude_folder_name(path):
+    """As history::claude_folder_name: each UTF-16 unit that is not an ASCII letter or digit is '-'."""
+    name = "".join(c if c.isascii() and c.isalnum() else "-" * (2 if ord(c) > 0xFFFF else 1) for c in path)
+    if len(name) <= 200:
+        return name
+    h = 0
+    data = path.encode("utf-16-le")
+    for k in range(0, len(data), 2):
+        h = (h * 31 + int.from_bytes(data[k:k + 2], "little")) & 0xFFFFFFFF
+    h = abs(h - (1 << 32) if h >= (1 << 31) else h)
+    digits = ""
+    while True:
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"[h % 36] + digits
+        h //= 36
+        if h == 0:
+            break
+    return name[:200] + "-" + digits
+
+
+def settings_of(flags):
+    value = last(flags, "--settings")
+    if not value:
+        return {}
+    try:
+        if value.lstrip().startswith("{"):
+            return json.loads(value)
+        with open(value, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as err:
+        fail(1, f"Error: Invalid settings: {err}")
+
+
+def user_lines():
+    """The prompts of a --input-format stream-json run, each read when it comes: a user message
+    is a prompt; a control request (initialize, interrupt, …) gets its success answer; any other
+    line is passed over."""
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return
+        try:
+            value = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            sys.stderr.write(f"claude stand-in: not a JSON line on stdin: {line[:80]!r}\n")
+            continue
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") == "control_request":
+            answer = {"type": "control_response", "response": {"subtype": "success", "request_id": value.get("request_id", ""), "response": {}}}
+            out(json.dumps(answer) + "\n")
+            continue
+        if value.get("type") != "user":
+            continue
+        content = value.get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if part.get("type") == "text")
+        yield content
+
+
+def claude(args, help_texts, version):
+    main = help_texts.get("claude --help", "")
+    opts = options(main)
+    for flag in ("--version", "-v"):
+        opts.setdefault(flag, ("none", "--version"))
+    flags, positionals, command, rest = parse(args, opts, commands(main), clap=False)
+    if flags.get("--help"):
+        out(main)
+        finish(0)
+    if flags.get("--version"):
+        out(help_texts.get("claude --version", version + " (Claude Code)\n"))
+        finish(0)
+    if command:
+        fail(1, f"claude stand-in: `claude {command}` is not imitated")
+    printing = bool(flags.get("--print"))
+    config = scratch("CLAUDE_CONFIG_DIR")
+    check_only(config)
+    scenario = scenario_for("-print" if printing else "")
+    resumed = last(flags, "--resume")
+    sid = last(flags, "--session-id") or resumed or os.environ.get("GLASSCODE_TEST_SESSION_ID") or str(uuid.uuid4())
+    cwd = os.getcwd()
+    transcript = os.path.join(config, "projects", claude_folder_name(cwd), sid + ".jsonl")
+    values = {
+        "session_id": sid,
+        "cwd": cwd,
+        "transcript_path": transcript,
+        "branch": branch(cwd),
+        "permission_mode": last(flags, "--permission-mode") or "default",
+        "start_source": "resume" if resumed else "startup",
+        "entrypoint": "sdk-cli" if printing else "cli",
+    }
+    player = Player(scenario, values, {"transcript": transcript}, settings_of(flags), cwd, start_ms(scenario))
+    if printing:
+        player.init_tools = mcp_tools(flags)
+        player.servers = mcp_servers(flags)
+    prompt = " ".join(positionals) if positionals else None
+    if printing:
+        output = last(flags, "--output-format") or "text"
+        player.output = {"stream-json": "raw", "json": "json"}.get(output, "text")
+        if last(flags, "--input-format") == "stream-json":
+            prompts = user_lines()
+        else:
+            prompts = [prompt if prompt is not None else sys.stdin.read().strip()]
+        session(player, prompts, interactive=False)
+    session(player, [prompt] if prompt else [], interactive=True)
+
+
+# ----- codex -----------------------------------------------------------------------------------------
+
+def find_rollout(home, sid):
+    for root, _, files in os.walk(os.path.join(home, "sessions")):
+        for name in sorted(files):
+            if sid in name and name.endswith(".jsonl"):
+                return os.path.join(root, name)
+    return None
+
+
+def hook_trust(home):
+    """The `hooks.state` trust entries of CODEX_HOME's config.toml, by key: their trusted_hash."""
+    try:
+        text = open(os.path.join(home, "config.toml"), encoding="utf-8").read()
+    except OSError:
+        return {}
+    found, key = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            key = None
+            if line.startswith("[hooks.state.") and line.endswith("]"):
+                inner = line[len("[hooks.state."):-1]
+                key = json.loads(inner) if inner.startswith('"') else inner
+        elif key and line.startswith("trusted_hash"):
+            found[key] = json.loads(line.split("=", 1)[1].strip())
+    return found
+
+
+def app_server(home):
+    """`codex app-server` on stdio, as far as Glasscode asks it (P06): `initialize`, then
+    `hooks/list`, which reads CODEX_HOME's hooks.json. Each handler's key is
+    `<file>:<event>:<group>:<handler>`, its hash the sha256 of its definition, and it is trusted
+    when config.toml's `hooks.state` holds that hash for its key."""
+    path = os.path.join(home, "hooks.json")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if "id" not in message:
+            continue
+        method = message.get("method")
+        if method == "initialize":
+            result = {"userAgent": "codex-stand-in"}
+        elif method == "hooks/list":
+            try:
+                defined = json.load(open(path, encoding="utf-8")).get("hooks", {})
+            except (OSError, ValueError):
+                defined = {}
+            trust = hook_trust(home)
+            hooks = []
+            for event, groups in defined.items():
+                snake = re.sub(r"(?<!^)([A-Z])", r"_\1", event).lower()
+                for gi, group in enumerate(groups):
+                    for hi, handler in enumerate(group.get("hooks", [])):
+                        key = f"{path}:{snake}:{gi}:{hi}"
+                        current = "sha256:" + hashlib.sha256(json.dumps(handler, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                        status = "trusted" if trust.get(key) == current else ("modified" if key in trust else "untrusted")
+                        hooks.append({"key": key, "source": "user", "eventName": event[0].lower() + event[1:], "command": handler.get("command"), "currentHash": current, "trustStatus": status})
+            result = {"data": [{"cwd": (message.get("params", {}).get("cwds") or [""])[0], "hooks": hooks, "warnings": []}]}
+        else:
+            out(json.dumps({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": f"{method} is not imitated"}}) + "\n")
+            continue
+        out(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
+
+
+def codex(args, help_texts, version):
+    main = help_texts.get("codex --help", "")
+    opts = options(main)
+    opts.setdefault("--version", ("none", "--version"))
+    flags, positionals, command, rest = parse(args, opts, commands(main) | {"e"}, clap=True)
+    command = "exec" if command == "e" else command
+    sub = help_texts.get(f"codex {command} --help", main) if command else main
+    if command:
+        sub_opts = dict(opts)
+        sub_opts.update(options(sub))
+        more, positionals, inner, inner_rest = parse(rest, sub_opts, commands(sub), clap=True)
+        flags.update(more)
+        if inner:
+            # `codex exec resume <id> [prompt]`: the options of exec go on.
+            more, positionals, _, _ = parse(inner_rest, sub_opts, set(), clap=True)
+            flags.update(more)
+            positionals = [inner] + positionals
+    if flags.get("--help"):
+        out(sub)
+        finish(0)
+    if flags.get("--version"):
+        out(help_texts.get("codex --version", "codex-cli " + version + "\n"))
+        finish(0)
+    home = scratch("CODEX_HOME")
+    check_only(home)
+    if command == "login":
+        print("Stand-in Codex login: nothing to sign in to. Writing an empty auth.json in CODEX_HOME.")
+        with open(os.path.join(home, "auth.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        finish(0)
+    if command == "app-server":
+        app_server(home)
+        finish(0)
+    if command not in (None, "exec", "resume"):
+        fail(1, f"codex stand-in: `codex {command}` is not imitated")
+    exec_mode = command == "exec"
+    resume_id = None
+    if command == "resume" or (exec_mode and positionals[:1] == ["resume"]):
+        if exec_mode:
+            positionals = positionals[1:]
+        if not positionals:
+            fail(1, "codex stand-in: resume needs a session id (--last is not imitated)")
+        resume_id, positionals = positionals[0], positionals[1:]
+    scenario = scenario_for("-exec" if exec_mode else "")
+    start = start_ms(scenario)
+    cwd = last(flags, "--cd") or os.getcwd()
+    if resume_id:
+        sid = resume_id
+        rollout = find_rollout(home, sid)
+        if not rollout:
+            fail(1, f"Error: No saved session found with ID {sid}")
+    else:
+        sid = os.environ.get("GLASSCODE_TEST_SESSION_ID") or str(uuid.uuid4())
+        stamp = iso(start if start is not None else wall_ms())
+        day = os.path.join(home, "sessions", stamp[:4], stamp[5:7], stamp[8:10])
+        rollout = os.path.join(day, f"rollout-{stamp[:10]}T{stamp[11:19].replace(':', '-')}-{sid}.jsonl")
+    values = {
+        "session_id": sid,
+        "cwd": cwd,
+        "branch": branch(cwd),
+        "originator": "codex_exec" if exec_mode else "codex_cli_rs",
+        "source": "exec" if exec_mode else "cli",
+    }
+    player = Player(scenario, values, {"rollout": rollout, "history": os.path.join(home, "history.jsonl")}, {}, cwd, start)
+    if resume_id:
+        # A resumed conversation goes on in its rollout: its start is not written again.
+        player.scenario = dict(scenario, start=[])
+    prompt = " ".join(positionals) if positionals else None
+    if exec_mode:
+        player.output = "raw" if flags.get("--json") else "text"
+        if prompt in (None, "-"):
+            prompt = sys.stdin.read().strip()
+        session(player, [prompt], interactive=False)
+    session(player, [prompt] if prompt else [], interactive=True)
+
+
+def main():
+    found = help_files()
+    wanted = os.environ.get(f"GLASSCODE_TEST_{AGENT.upper()}_VERSION")
+    chosen = next((f for f in found if f[1] == wanted), None) if wanted else (found[-1] if found else None)
+    if not chosen:
+        fail(3, f"{AGENT} stand-in: no recorded help of {AGENT}{' ' + wanted if wanted else ''} in {os.path.abspath(help_folder())} (set GLASSCODE_TEST_CLI_HELP to script/cli-help)")
+    help_texts = sections(chosen[2])
+    version = chosen[1]
+    (codex if AGENT == "codex" else claude)(sys.argv[1:], help_texts, version)
+
+
+if __name__ == "__main__":
+    main()

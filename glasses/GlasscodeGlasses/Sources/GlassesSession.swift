@@ -34,6 +34,14 @@ final class GlassesSession: ObservableObject {
     /// Human-readable description of the last raw input event (shown under ⋯ for diagnosis).
     @Published var lastEvent = ""
     @Published var isListening = false
+    /// Stay on Glasscode. The glasses end our session for reasons the app cannot prevent
+    /// (Meta AI, the back gesture, a tap and hold on the touchpad, a call); while this is on,
+    /// a new session is started by itself. Only `disconnect()` — the person's own choice on
+    /// the phone — switches it off and leaves the glasses to Meta.
+    @Published private(set) var stayOn = true
+    /// The wearer paused the session on the glasses (one tap on the touchpad). Another tap
+    /// resumes it; the app cannot.
+    @Published private(set) var paused = false
 
     /// Neural-band / touchpad events, already normalized.
     var onInput: ((GlassesInput) -> Void)?
@@ -71,9 +79,40 @@ final class GlassesSession: ObservableObject {
     private var coreStateTask: Task<Void, Never>?
     private var errorTask: Task<Void, Never>?
 
+    // Staying on Glasscode
+    private var reconnectTask: Task<Void, Never>?
+    /// How many tries in a row have not reached a started lens (sets the wait before the next).
+    private var reconnectAttempt = 0
+    private var lastStopAt = Date.distantPast
+    /// When the lens was started again inside a living session (at most three a minute).
+    private var displayRestarts: [Date] = []
+    private var registrationToken: AnyListenerToken?
+    private var devicesToken: AnyListenerToken?
+    private var linkTokens: [AnyListenerToken] = []
+
     init(wearables: WearablesInterface = Wearables.shared) {
         self.wearables = wearables
         self.selector = AutoDeviceSelector(wearables: wearables, filter: { $0.supportsDisplay() })
+        // Three things mean "try again now": the app was approved in Meta AI, a pair of
+        // glasses was added, or the glasses came back in range.
+        registrationToken = wearables.addRegistrationStateListener { [weak self] state in
+            guard state == .registered else { return }
+            Task { @MainActor in self?.resume() }
+        }
+        devicesToken = wearables.addDevicesListener { [weak self] ids in
+            Task { @MainActor in self?.watchLinks(ids) }
+        }
+        watchLinks(wearables.devices)
+    }
+
+    private func watchLinks(_ ids: [DeviceIdentifier]) {
+        linkTokens = ids.compactMap { id -> AnyListenerToken? in
+            guard let device = wearables.deviceForIdentifier(id), device.supportsDisplay() else { return nil }
+            return device.addLinkStateListener { [weak self] link in
+                guard link == .connected else { return }
+                Task { @MainActor in self?.resume() }
+            }
+        }
     }
 
     // MARK: - rendering
@@ -98,7 +137,9 @@ final class GlassesSession: ObservableObject {
                 guard let self, let d = self.display, let v = self.latest else { return }
                 try? await d.send(v)
             }
-            if deviceSession == nil { attach() }
+            // Not connected: start (or keep waiting for) a session, unless the person
+            // handed the glasses back to Meta.
+            if deviceSession == nil, reconnectTask == nil { scheduleReconnect() }
             return
         }
         queuedView = view
@@ -130,12 +171,78 @@ final class GlassesSession: ObservableObject {
     /// Back-compat for the old passive HUD readout.
     func render(_ hud: GlasscodeHUD) { show(GlassesHUD.screen(hud)) }
 
-    func connect() { if deviceSession == nil { attach() } }
+    /// The person wants the glasses on Glasscode (the Connect button, or opening the app).
+    func connect() {
+        stayOn = true
+        reconnectAttempt = 0
+        BackgroundKeepAlive.shared.refresh()
+        guard deviceSession == nil else { return }
+        scheduleReconnect()
+    }
 
+    /// The person hands the glasses back to Meta. Nothing reconnects until `connect()`.
     func disconnect() {
+        stayOn = false
+        reconnectTask?.cancel(); reconnectTask = nil
         display?.stop()
         deviceSession?.stop()
         teardown()
+        statusText = "Glasses handed back to Meta"
+        BackgroundKeepAlive.shared.refresh()
+    }
+
+    /// Something changed that makes a new try worthwhile (the app came to the front, the
+    /// glasses came in range, the app was approved): try now instead of waiting out the pause.
+    func resume() {
+        guard stayOn, deviceSession == nil else { return }
+        reconnectAttempt = 0
+        scheduleReconnect()
+    }
+
+    // MARK: - staying on Glasscode
+
+    /// Start a new session after a pause. The first try comes as soon as Meta allows (two
+    /// seconds after the last session ended); every try that fails waits longer, up to a minute,
+    /// so glasses that are in their case are not asked over and over.
+    private func scheduleReconnect() {
+        guard stayOn, deviceSession == nil else { return }
+        reconnectTask?.cancel()
+        let pauses: [TimeInterval] = [0, 4, 8, 15, 30, 60]
+        let sinceStop = Date().timeIntervalSince(lastStopAt)
+        let delay = max(0.3, 2.5 - sinceStop, pauses[min(reconnectAttempt, pauses.count - 1)])
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTask = nil
+            guard self.stayOn, self.deviceSession == nil else { return }
+            self.reconnectAttempt += 1
+            // Not approved in Meta AI yet: nothing to connect to. The registration listener
+            // tries again the moment it is.
+            guard self.wearables.registrationState == .registered else { self.scheduleReconnect(); return }
+            self.attach()
+        }
+    }
+
+    /// The lens stopped while the session lives (a call, a notification, Meta AI on top of
+    /// us). Start the lens again instead of giving the session up. Three tries a minute; if
+    /// the lens still will not stay, end the session so a fresh one is made.
+    private func restartDisplay(_ session: DeviceSession) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, self.deviceSession === session, let display = self.display else { return }
+            // Stopping or stopped: the session handler makes a new one. Paused: wait for the
+            // wearer to resume; the `.started` that follows comes back here.
+            guard session.state == .started else { return }
+            let now = Date()
+            self.displayRestarts = self.displayRestarts.filter { now.timeIntervalSince($0) < 60 }
+            guard self.displayRestarts.count < 3 else {
+                self.displayRestarts = []
+                session.stop()
+                return
+            }
+            self.displayRestarts.append(now)
+            display.start()
+        }
     }
 
     // MARK: - session lifecycle
@@ -151,9 +258,26 @@ final class GlassesSession: ObservableObject {
                 for await st in states {
                     guard let self, !Task.isCancelled else { return }
                     switch st {
-                    case .started: self.requiresDATAppUpdate = false; await self.setupDisplay(session)
+                    case .started:
+                        self.requiresDATAppUpdate = false
+                        if self.paused {
+                            self.paused = false
+                            self.statusText = "Glasses connected"
+                        }
+                        if self.display == nil {
+                            await self.setupDisplay(session)
+                        } else if !self.isConnected {
+                            self.restartDisplay(session)          // the lens went down while paused
+                        } else if self.displayOn, let view = self.latest {
+                            self.sendToLens(view)                 // back from a pause: show where we are
+                        }
+                    case .paused:
+                        self.paused = true
+                        self.statusText = "Paused on the glasses · tap the touchpad to resume"
                     case .stopping: self.isConnected = false
-                    case .stopped: self.teardown()
+                    case .stopped:
+                        self.statusText = self.stayOn ? "Glasses left Glasscode · reconnecting…" : "Glasses not connected"
+                        self.teardown()
                     default: break
                     }
                 }
@@ -187,12 +311,18 @@ final class GlassesSession: ObservableObject {
                     case .started:
                         self.isConnected = true
                         self.statusText = "Glasses connected"
+                        self.reconnectAttempt = 0
                         self.attachInputs(session)
-                        if let action = self.pending { self.pending = nil; await action() }
+                        if let action = self.pending {
+                            self.pending = nil; await action()
+                        } else if self.displayOn, let view = self.latest {
+                            self.sendToLens(view)                 // the lens came back: redraw
+                        }
                     case .stopping: self.isConnected = false
                     case .stopped:
-                        self.isConnected = false; self.display = nil
-                        self.deviceSession?.stop()
+                        // The session is kept: only the lens is started again.
+                        self.isConnected = false
+                        self.restartDisplay(session)
                     default: break
                     }
                 }
@@ -332,7 +462,9 @@ final class GlassesSession: ObservableObject {
     // MARK: - teardown
 
     private func teardown() {
+        if deviceSession != nil { lastStopAt = Date() }
         isConnected = false
+        paused = false
         inputsAvailable = false
         isListening = false
         sendInFlight = false
@@ -355,5 +487,7 @@ final class GlassesSession: ObservableObject {
         deviceSession = nil
         pending = nil
         selector = AutoDeviceSelector(wearables: wearables, filter: { $0.supportsDisplay() })
+        // Whatever ended the session, come back by ourselves unless the person disconnected.
+        scheduleReconnect()
     }
 }

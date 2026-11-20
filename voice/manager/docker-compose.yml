@@ -1,0 +1,65 @@
+# The manager's voice on your own machine: a LiveKit server (the room) and the worker that
+# turns speech into text and text into speech. See README.md.
+#
+#   cp .env.example .env    # fill it in
+#   docker compose up -d
+#
+# Ports to open on this machine (to the Mac and the phone, not necessarily to the internet):
+#   7880/tcp  the room's address (ws://…:7880; with the tls profile it stays local and 443 is used)
+#   7881/tcp  audio when UDP is blocked
+#   7882/udp  audio
+#   443/tcp + 80/tcp  only with `--profile tls` (the certificate and wss://)
+#
+# Both run on the host's network: WebRTC needs the machine's real addresses and UDP ports,
+# and the worker reaches the server on 127.0.0.1.
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}"
+      # Empty: LiveKit picks the machine's own address.
+      NODE_IP: "${LIVEKIT_NODE_IP:-}"
+      LIVEKIT_CONFIG: |
+        port: 7880
+        log_level: info
+        rtc:
+          tcp_port: 7881
+          udp_port: 7882
+          use_external_ip: ${LIVEKIT_USE_EXTERNAL_IP:-false}
+        room:
+          # An empty room is closed quickly, so the next time someone joins the worker
+          # starts fresh.
+          empty_timeout: 30
+          departure_timeout: 5
+
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - livekit
+    # Not required for the file to load: without .env, the two LIVEKIT_API_* checks above say
+    # what is missing (instead of "env file not found").
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LIVEKIT_URL: ws://127.0.0.1:7880
+
+  # Optional: wss:// with a real certificate, for a machine that has a public name.
+  #   docker compose --profile tls up -d      (needs LIVEKIT_DOMAIN in .env, ports 80 and 443)
+  # Glasscode then gets wss://<LIVEKIT_DOMAIN>.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2.11.9
+    restart: unless-stopped
+    network_mode: host
+    command: caddy reverse-proxy --from "${LIVEKIT_DOMAIN:-voice.example.test}" --to 127.0.0.1:7880
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  caddy_data:

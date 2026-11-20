@@ -201,9 +201,13 @@ pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi
     std::env::split_paths(path.as_ref()).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
 }
 
-/// A command for `program`; Unix finds it on PATH by itself.
+/// A command for `program`; Unix finds it on PATH by itself. Git gets the v2 engine's overrides
+/// (`super::use_safe_git`).
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
-    std::process::Command::new(program)
+    let program = program.as_ref();
+    let mut command = std::process::Command::new(program);
+    super::safe_git(program, &mut command);
+    command
 }
 
 /// The person's own shell (zsh, the macOS default, when `SHELL` is not set), as a login shell

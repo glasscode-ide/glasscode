@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use glasscode_core::agents::AgentActivity;
+use glasscode_core::caller::Caller;
 use glasscode_core::model::AgentKind;
 use glasscode_core::paths;
 use glasscode_core::remote::{CreateSession, MirrorInput, MirrorMeta, MirrorSync, MirrorSyncReply, RemoteSession};
@@ -40,6 +41,12 @@ pub struct Mirror {
     /// Continued here: the server session it became.
     #[serde(default)]
     pub moved_to: Option<String>,
+    /// The Mac's machine id, for the owner record when a session is continued here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<glasscode_core::paths::MachineId>,
+    /// Its Mac said it is going to sleep (the last sync before it).
+    #[serde(default)]
+    pub asleep: bool,
     #[serde(skip)]
     pub inbox: Vec<MirrorInput>,
     /// The last reply, read from the conversation when it changes.
@@ -134,11 +141,24 @@ pub fn listed(mirrors: &HashMap<String, Mirror>) -> Vec<RemoteSession> {
 }
 
 /// `mirror.*` requests, and session requests for a mirror's id (phones treat mirrors like
-/// sessions). None: not ours, the daemon answers it.
-pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+/// sessions). None: not ours, the daemon answers it. What a phone types waits with the device its
+/// connection declared, so the Mac records it as that phone's words (M13.2).
+pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+    let device = match caller {
+        Caller::Phone { device } => Some(device.clone()),
+        _ => None,
+    };
     match method {
-        "mirror.sync" => Some(sync_from_mac(shared, params)),
+        "mirror.sync" => Some(sync_from_mac(shared, caller, params)),
         "mirror.conversation" => Some(append_conversation(shared, params)),
+        "mirror.conversation_size" => Some((|| {
+            let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+            if !crate::daemon::lock(shared).mirrors.contains_key(&id) {
+                bail!("no synced session {id}");
+            }
+            Ok(json!(std::fs::metadata(conversation_path(&id)).map(|m| m.len()).unwrap_or(0)))
+        })()),
+        "mirror.conversation_into" => Some(conversation_into(shared, params)),
         "mirror.take_over" => Some(take_over(shared, params)),
         "sessions.send" | "sessions.answer" | "sessions.keys" | "sessions.transcript" | "sessions.attach" | "sessions.stop" | "sessions.close" | "sessions.rename" | "sessions.peek" => {
             let id = params.get("session_id").and_then(Value::as_str)?.to_string();
@@ -153,10 +173,12 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
                 "sessions.send" => queue(shared, &id, MirrorInput::Text {
                     text: params.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
                     enter: params.get("enter").and_then(Value::as_bool).unwrap_or(true),
+                    device,
                 }),
                 "sessions.answer" => queue(shared, &id, MirrorInput::Answer {
                     option: params.get("option").and_then(Value::as_u64).unwrap_or(1) as u32,
                     text: params.get("text").and_then(Value::as_str).map(str::to_string),
+                    device,
                 }),
                 "sessions.keys" => queue(shared, &id, MirrorInput::Keys {
                     keys: params.get("keys").and_then(Value::as_array).map(|k| k.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default(),
@@ -169,22 +191,58 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
     }
 }
 
-fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
+fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Result<Value> {
     let mac_id = params.get("mac_id").and_then(Value::as_str).unwrap_or_default().to_string();
     let mut sync: MirrorSync = serde_json::from_value(params.clone())?;
+    // The Mac's approved authority: kept, one way (crit-5), and only from a connection that
+    // declared itself the Mac (`Caller::Machine`, M13.2), with the same machine id the copy names.
+    // A copy whose hash does not match is not kept, and nothing in the reply carries authority back.
+    let primary = match caller {
+        Caller::Machine { id } => is_primary(id),
+        _ => false,
+    };
+    if let Some(copy) = sync.authority.take() {
+        match caller {
+            Caller::Machine { id } if copy.from.as_ref() == Some(id) && !primary => {
+                crate::daemon::log(format!("authority from {id}, an observer Mac: not kept (this server keeps its primary Mac's)"));
+            }
+            Caller::Machine { id } if copy.from.as_ref() == Some(id) => crate::daemon::keep_authority(copy),
+            _ => crate::daemon::log("authority in a sync from a connection that is not that Mac's: not kept"),
+        }
+    }
+    // What the server's manager needs from the Mac (M57), from that Mac's own connection only.
+    if let Some(said) = sync.manager.take() {
+        match caller {
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) && primary => crate::brain::keep_from_mac(said),
+            Caller::Machine { .. } if !primary => {}
+            _ => crate::daemon::log("the manager's settings in a sync from a connection that is not that Mac's: not kept"),
+        }
+    }
+    // The Mac's engine switch, the same way (M57): this server's journal, words and conversation
+    // run as the Mac's do.
+    if let Some(engine) = sync.engine.take() {
+        match caller {
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) && primary => keep_engine(engine),
+            Caller::Machine { .. } if !primary => {}
+            _ => crate::daemon::log("an engine switch in a sync from a connection that is not that Mac's: not kept"),
+        }
+    }
     // Today for phones, and the `glasscode` command's answers and calls (kept until the Mac
     // confirms it has them; it sends back what it got last time).
-    let (today_ops, cli_calls) = crate::today::exchange(crate::today::Exchange {
+    let (today_ops, cli_calls, board) = crate::today::exchange(crate::today::Exchange {
         mac_id: mac_id.clone(),
         today: sync.today.take(),
+        board: sync.board.take(),
         replies: std::mem::take(&mut sync.cli_replies),
         today_acks: std::mem::take(&mut sync.today_acks),
         cli_acks: std::mem::take(&mut sync.cli_acks),
         skill_off: sync.skill_off,
     });
+    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, observer: !primary, ..Default::default() };
+    // The v2 stores, before the daemon's lock: they read and write the disk.
+    manager_stores(&mut sync, &mac_id, &mut reply);
     let mut daemon = crate::daemon::lock(shared);
     let at = now();
-    let mut reply = MirrorSyncReply { today_ops, cli_calls, ..Default::default() };
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -196,6 +254,8 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             meta: meta.clone(),
             synced_at: at,
             moved_to: None,
+            machine: sync.machine.clone(),
+            asleep: sync.asleep,
             inbox: Vec::new(),
             reply: None,
         });
@@ -205,6 +265,8 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mirror.meta.env = env;
         mirror.mac = sync.mac.clone();
         mirror.mac_id = mac_id.clone();
+        mirror.machine = sync.machine.clone();
+        mirror.asleep = sync.asleep;
         mirror.home = sync.home.clone();
         mirror.synced_at = at;
         if let Some(moved) = &mirror.moved_to {
@@ -219,6 +281,11 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             save(mirror);
         }
     }
+    // Who owns the worktrees of this Mac's sessions, where a record says.
+    let mut keys: Vec<glasscode_core::owners::WorktreeKey> = daemon.mirrors.values().filter(|m| m.mac_id == mac_id).filter_map(|m| m.meta.key.clone()).collect();
+    keys.extend(sync.worktree_keys.iter().cloned());
+    reply.owners = crate::owners::get(&keys);
+    reply.owners_unknown = !crate::owners::known();
     // This Mac's sessions it no longer has: closed, or moved here and closed there.
     let gone: Vec<String> = daemon.mirrors.iter().filter(|(id, m)| m.mac_id == mac_id && !listed.contains(*id)).map(|(id, _)| id.clone()).collect();
     for id in gone {
@@ -230,6 +297,142 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
     }
     Ok(serde_json::to_value(reply)?)
 }
+
+/// How long the primary Mac may be away before another Mac's authority is kept (a Mac replaced).
+const PRIMARY_AWAY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Whether `mac` is this server's primary Mac (M57): the one whose approved authority it keeps.
+/// Another Mac is an observer: it reads, shows and answers approvals, and acts on its own sessions
+/// only; its authority, engine and manager settings are not kept, and it is never the manager's
+/// home. With no authority kept yet, or the primary away for a week, any Mac may be the primary.
+pub fn is_primary(mac: &glasscode_core::paths::MachineId) -> bool {
+    use glasscode_core::store::Store as _;
+    let now = glasscode_core::clock::now_ms();
+    match glasscode_core::gate::FromMac::load().ok().and_then(|copy| copy.from.clone().map(|from| (from, copy.received_ms))) {
+        Some((primary, received_ms)) => &primary == mac || now.saturating_sub(received_ms) > PRIMARY_AWAY_MS,
+        None => true,
+    }
+}
+
+/// Keep the Mac's engine switch (its features) when it differs from this server's; the journal and
+/// the words ledger read the features again.
+fn keep_engine(engine: glasscode_core::store::EngineSwitch) {
+    use glasscode_core::store::{EngineSwitch, Store as _};
+    if EngineSwitch::load().ok().as_ref() == Some(&engine) {
+        return;
+    }
+    match glasscode_core::store::update::<EngineSwitch, ()>(|switch| *switch = engine) {
+        Ok(()) => {
+            glasscode_core::journal::decide_again();
+            glasscode_core::words::decide_again();
+            log("the manager's features here are the Mac's now".to_string());
+        }
+        Err(err) => log(format!("the Mac's engine switch was not kept: {err}")),
+    }
+}
+
+/// The manager's v2 stores (M57), both ways. The Mac's records come in: its own journal events
+/// (each once, by id: a lost reply sends them again), its effect records by key and generation, its
+/// words into its folder, its conversation changes by stamp, its pending actions (answers taken,
+/// no authority) and its work items by stamp. This server's own go back from where the Mac says it
+/// has them (`have`), and the reply says where they stopped: this server keeps no state of it, so
+/// a reply lost on the way brings them again.
+fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncReply) {
+    use glasscode_core::store::Store as _;
+    let here = glasscode_core::paths::MachineId::this().ok();
+    let mut not_taken: Vec<String> = Vec::new();
+    let journal = std::mem::take(&mut sync.journal);
+    if !journal.is_empty() {
+        let mut seen = JOURNAL_SEEN.lock().unwrap_or_else(|p| p.into_inner());
+        let seen = seen.get_or_insert_with(HashMap::new).entry(mac_id.to_string()).or_default();
+        if seen.len() > 100_000 {
+            // A run this long: the oldest ids are long past any resend.
+            seen.clear();
+        }
+        for event in journal {
+            if seen.insert(event.id.clone()) {
+                glasscode_core::journal::append_stamped(event);
+            }
+        }
+    }
+    if !sync.effects.is_empty() {
+        if let Err(err) = glasscode_core::effects::merge_theirs(&sync.effects) {
+            log(format!("effects: the Mac's records could not be merged: {err}"));
+            not_taken.push("effects".into());
+        }
+    }
+    if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
+        if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
+            log(format!("words: the Mac's records could not be kept: {err}"));
+            not_taken.push("words".into());
+        }
+    }
+    if let Err(err) = glasscode_core::conversation::take_from_other_home(std::mem::take(&mut sync.conversation)) {
+        log(format!("conversation: the Mac's changes could not be taken: {err}"));
+        not_taken.push("conversation".into());
+    }
+    if let (false, Some(mac), Some(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), here.as_ref()) {
+        let now = glasscode_core::clock::now_ms();
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, here, true, now)) {
+            log(format!("pending: the Mac's actions could not be merged: {err}"));
+            not_taken.push("pending".into());
+        }
+    }
+    if !sync.work.is_empty() {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, Vec<glasscode_core::identity::WorkKey>>(|ledger| ledger.merge_theirs(&sync.work)) {
+            log(format!("work: the Mac's items could not be merged: {err}"));
+            not_taken.push("work".into());
+        }
+    }
+    if !sync.follow_ups.is_empty() {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, bool>(|ledger| ledger.follow_merge(&sync.follow_ups)) {
+            log(format!("follow-ups: the Mac's could not be merged: {err}"));
+            not_taken.push("follow_ups".into());
+        }
+    }
+
+    // This server's own, from where the Mac has them.
+    let have = &sync.have;
+    let mut next = have.clone();
+    let read_at = glasscode_core::clock::now_ms();
+    reply.effects = glasscode_core::effects::changed_since(have.effects_ms).unwrap_or_default();
+    reply.pending = glasscode_core::gate::Pending::load().map(|p| p.changed_since(have.pending_ms)).unwrap_or_default();
+    (next.effects_ms, next.pending_ms) = (read_at, read_at);
+    reply.words = glasscode_core::words::own_since(have.words_ms);
+    if let Some(last) = reply.words.last() {
+        next.words_ms = last.at.wall_ms;
+    }
+    if let Some(here) = here.as_ref() {
+        reply.conversation = glasscode_core::conversation::own_changed(&mut next.conversation, here, 2_000);
+        let ledger = glasscode_core::work::WorkLedger::load().ok();
+        reply.work = ledger.as_ref().map(|ledger| ledger.own_changed(here, have.work.as_ref())).unwrap_or_default();
+        if let Some(last) = reply.work.last() {
+            next.work = Some(last.updated.clone());
+        }
+        reply.follow_ups = ledger.as_ref().map(|ledger| ledger.follow_changed(here, have.follow_ups.as_ref())).unwrap_or_default();
+        if let Some(last) = reply.follow_ups.last() {
+            next.follow_ups = Some(last.stamp.clone());
+        }
+    }
+    reply.have = next;
+    reply.not_taken = not_taken;
+    // This server's latest stamp (crit-9): the Mac tells by it whether its own clock went back.
+    if let Some(here) = here.as_ref() {
+        use glasscode_core::store::Store as _;
+        let last = glasscode_core::identity::LastStamp::load().ok().and_then(|file| file.last);
+        let now = glasscode_core::clock::now_ms();
+        reply.server_stamp = Some(match last {
+            Some(last) if last.wall_ms > now => glasscode_core::identity::Hlc { machine: here.clone(), ..last },
+            _ => glasscode_core::identity::Hlc { wall_ms: now, count: 0, machine: here.clone() },
+        });
+    }
+    reply.notices = crate::brain::take_notices();
+    reply.notices.extend(crate::followups::take_notices());
+    reply.window_ops = crate::brain::window_ops_for_mac(&sync.window_acks);
+}
+
+/// The ids of the journal events each Mac sent this run (a lost reply sends them again).
+static JOURNAL_SEEN: std::sync::Mutex<Option<HashMap<String, HashSet<String>>>> = std::sync::Mutex::new(None);
 
 fn delete_refs(daemon: &crate::daemon::Daemon, mirror: &Mirror) {
     if let Some(root) = daemon.project_root(&mirror.meta.project_id) {
@@ -258,6 +461,32 @@ fn append_conversation(shared: &Shared, params: &Value) -> anyhow::Result<Value>
     };
     file.write_all(&data)?;
     Ok(json!({ "size": offset + data.len() as u64 }))
+}
+
+/// A move to this server: the mirrored copy of a Mac session's conversation (the Mac sent only
+/// what it lacked) goes into an account here, with its folder paths rewritten to the worktree
+/// here. Returns where it is.
+fn conversation_into(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
+    let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+    let account_id = params.get("account_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let rel = PathBuf::from(params.get("rel").and_then(Value::as_str).unwrap_or_default());
+    if rel.as_os_str().is_empty() || rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        bail!("bad conversation path");
+    }
+    let from = PathBuf::from(params.get("from").and_then(Value::as_str).unwrap_or_default());
+    let to = PathBuf::from(params.get("to").and_then(Value::as_str).unwrap_or_default());
+    let account = {
+        let daemon = crate::daemon::lock(shared);
+        if !daemon.mirrors.contains_key(&id) {
+            bail!("no synced session {id}");
+        }
+        daemon.accounts().0.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no account {account_id}"))?
+    };
+    let content = sync::rewrite_cwd(&std::fs::read(conversation_path(&id))?, &from, &to);
+    let target = account.effective_dir().join(rel);
+    std::fs::create_dir_all(target.parent().unwrap_or(Path::new("/")))?;
+    std::fs::write(&target, content)?;
+    Ok(serde_json::to_value(target)?)
 }
 
 fn queue(shared: &Shared, id: &str, input: MirrorInput) -> anyhow::Result<Value> {
@@ -299,7 +528,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         let (accounts, defaults) = daemon.accounts();
         (mirror, project, paths::home(), accounts, defaults)
     };
-    let away = now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
+    // Asleep (its last sync said so) or silent for a while: a working session continues here.
+    let away = mirror.asleep || now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
     if mirror.meta.activity == Some(AgentActivity::Working) && !away {
         bail!("{} is working on {} right now; continue it here when it finishes", mirror.meta.session.title, mirror.mac);
     }
@@ -319,6 +549,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         Some(path) => path,
         None => {
             crate::daemon::lock(shared).stop_sessions_in(&path);
+            let repo_lock = crate::daemon::project_lock(&project.root.display().to_string());
+            let _one_at_a_time = repo_lock.lock().unwrap_or_else(|p| p.into_inner());
             sync::receive_worktree(&project.root, &path, mirror.meta.branch.as_deref(), &head, &snap)?
         }
     };
@@ -361,7 +593,14 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         review_files: Default::default(),
         model: session.model.clone(),
         mode: session.mode.clone(),
+        held: None,
     };
+    // The worktree is this server's from now on (a new epoch), before anything starts here, so
+    // a worktree the record gives to the Mac can be continued too; the Mac's copy stops when it
+    // next syncs.
+    if let (Some(key), Some(mac)) = (&mirror.meta.key, &mirror.machine) {
+        crate::owners::taken_here(key, mac);
+    }
     let created = crate::daemon::create_session(shared, create)?;
     {
         let mut daemon = crate::daemon::lock(shared);
@@ -372,5 +611,79 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         }
     }
     log(format!("continued {} from {} here", session.title, mirror.mac));
+    // A worktree moves as one: the Mac's other sessions in it continue here too.
+    if params.get("alone").and_then(Value::as_bool) != Some(true) {
+        if let Some(key) = &mirror.meta.key {
+            let siblings: Vec<String> = crate::daemon::lock(shared)
+                .mirrors
+                .iter()
+                .filter(|(other, m)| **other != id && m.mac_id == mirror.mac_id && m.meta.key.as_ref() == Some(key) && m.moved_to.is_none())
+                .map(|(other, _)| other.clone())
+                .collect();
+            for sibling in siblings {
+                if let Err(err) = take_over(shared, &json!({ "session_id": sibling, "alone": true })) {
+                    log(format!("could not continue {sibling} with its worktree: {err:#}"));
+                }
+            }
+        }
+    }
     Ok(serde_json::to_value(created)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use glasscode_core::gate::{Pending, PendingAction};
+    use glasscode_core::identity::{Hlc, WorkKey, WorkKind};
+    use glasscode_core::paths::{MachineId, ProjectKey};
+    use glasscode_core::work::{WorkItem, WorkLedger};
+
+    use super::*;
+
+    /// M57: the server takes the Mac's conversation into its manager stores, and keeps the Mac's
+    /// engine switch: its features are the server's then.
+    #[test]
+    fn the_server_takes_the_macs_switch() {
+        use glasscode_core::store::{Engine, EngineSwitch, Store as _};
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let machine = MachineId::parse("00000000000000aa").unwrap();
+        let record = glasscode_core::conversation::Record::Topic(serde_json::from_value(json!({ "id": "general", "at": { "wall_ms": 1, "count": 0, "machine": machine }, "title": "General" })).unwrap());
+        let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [] })).unwrap();
+        sync.conversation = vec![record];
+        let mut reply = MirrorSyncReply::default();
+        manager_stores(&mut sync, "mac-1", &mut reply);
+        assert!(reply.not_taken.is_empty(), "{:?}", reply.not_taken);
+
+        keep_engine(EngineSwitch { engine: Engine::V2, switches: std::collections::BTreeMap::from([("turn_hooks".to_string(), true)]) });
+        assert!(EngineSwitch::load().unwrap().is_on("turn_hooks"));
+        assert!(glasscode_core::journal::feature_on("turn_hooks"));
+        // Back to every feature off before the scratch home goes.
+        keep_engine(EngineSwitch::default());
+        assert!(!glasscode_core::journal::feature_on("turn_hooks"));
+    }
+
+    /// M57: the server keeps no record of what it sent a Mac. Its records go from where the Mac
+    /// says it has them, so a reply lost on the way brings them again; the reply's `have`, sent
+    /// back, brings nothing more. A journal event sent twice is kept once.
+    #[test]
+    fn a_lost_reply_brings_the_servers_records_again() {
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let here = MachineId::this().unwrap();
+        let now = glasscode_core::clock::now_ms();
+        glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(PendingAction { id: "a".repeat(32), created_ms: now - 1_000, expires_ms: now + 60_000, ..PendingAction::default() }, now)).unwrap();
+        let key = WorkKey { project: ProjectKey::parse("app-3f9a1c").unwrap(), kind: WorkKind::Branch, id: "feat/x".into() };
+        glasscode_core::store::update::<WorkLedger, ()>(|l| l.items.push(WorkItem::new(key, Hlc { wall_ms: now - 1_000, count: 0, machine: here.clone() }))).unwrap();
+
+        let ask = |have: glasscode_core::remote::HaveCursors| {
+            let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [], "have": have })).unwrap();
+            let mut reply = MirrorSyncReply::default();
+            manager_stores(&mut sync, "mac-1", &mut reply);
+            reply
+        };
+        let first = ask(Default::default());
+        assert_eq!((first.pending.len(), first.work.len()), (1, 1));
+        let lost = ask(Default::default());
+        assert_eq!((lost.pending.len(), lost.work.len()), (1, 1), "the reply was lost: again");
+        let next = ask(first.have.clone());
+        assert_eq!((next.pending.len(), next.work.len()), (0, 0), "taken in: nothing more");
+    }
 }

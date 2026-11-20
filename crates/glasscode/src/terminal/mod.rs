@@ -111,7 +111,19 @@ pub struct TerminalView {
     typed: keys::TypedText,
     /// The process of the program the terminal started (`child_pid`).
     child_pid: Option<u32>,
+    /// The session whose keys the person types here, for the words ledger and the shell-tab
+    /// caller ([`TerminalView::watch_input`]).
+    input: Option<Watch>,
     _events: Task<()>,
+}
+
+/// What the person types into a session's terminal: an agent's line goes to the words ledger
+/// on Enter; in a shell only the time of an Enter on a `glasscode` line is kept (people type
+/// passwords there), so the app knows that command was the person's (design D2).
+struct Watch {
+    session: String,
+    shell: bool,
+    line: glasscode_core::words::InputLine,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -246,8 +258,60 @@ impl TerminalView {
             files: files::FileTarget::Local,
             typed: keys::TypedText::default(),
             child_pid,
+            input: None,
             _events: events,
         }
+    }
+
+    /// From now on, the person's keys here are `session`'s (a shell's, or an agent's). Only the
+    /// key and paste events of this view count; what Glasscode writes in ([`TerminalView::write`],
+    /// [`TerminalView::paste_text`]) never does.
+    pub fn watch_input(&mut self, session: String, shell: bool) {
+        self.input = Some(Watch { session, shell, line: Default::default() });
+    }
+
+    /// A key the person pressed, as the bytes it sends to the program.
+    fn person_key(&mut self, bytes: &[u8]) {
+        let Some(shell) = self.input.as_ref().map(|watch| watch.shell) else { return };
+        if shell {
+            if bytes == b"\r" && glasscode_core::caller::runs_glasscode(&self.cursor_line()) {
+                if let Some(watch) = &self.input {
+                    glasscode_core::caller::note_typed_command(&watch.session);
+                }
+            }
+            return;
+        }
+        let Some(watch) = &mut self.input else { return };
+        if let Some((text, untyped)) = watch.line.key(bytes) {
+            glasscode_core::words::record_with(glasscode_core::words::Origin::TerminalKeys, &text, &untyped, Some(&watch.session), None);
+        }
+    }
+
+    /// Text the person pasted or dropped here, or an input method typed.
+    fn person_text(&mut self, text: &str, pasted: bool) {
+        if let Some(watch) = self.input.as_mut().filter(|watch| !watch.shell) {
+            if pasted {
+                watch.line.paste(text);
+            } else {
+                watch.line.typed(text);
+            }
+        }
+    }
+
+    /// The line the cursor is on, with the rows the terminal wrapped into it (what a shell shows
+    /// of the command being typed, after its prompt). It is only looked at, never kept.
+    fn cursor_line(&self) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cursor = grid.cursor.point.line;
+        let cols = grid.columns();
+        let row_text = |line: Line| -> String { (0..cols).map(|col| grid[line][Column(col)].c).collect() };
+        let wrapped = |line: Line| cols > 0 && grid[line][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        let mut first = cursor;
+        while first > grid.topmost_line() && cursor.0 - first.0 < 4 && wrapped(Line(first.0 - 1)) {
+            first = Line(first.0 - 1);
+        }
+        (first.0..=cursor.0).map(|line| row_text(Line(line))).collect()
     }
 
     /// The process of the program the terminal started (the shell or the agent, not what it
@@ -314,8 +378,21 @@ impl TerminalView {
         }
     }
 
-    /// Send raw bytes (keystrokes, pasted text) to the program.
+    /// Send raw bytes to the program, as Glasscode (not the person: their keys come through the
+    /// key handler). An Enter in them ends the line the person was typing, as far as the words
+    /// ledger knows.
     pub fn write(&mut self, bytes: impl Into<Cow<'static, [u8]>>, cx: &mut Context<Self>) {
+        let bytes = bytes.into();
+        if bytes.contains(&b'\r') {
+            if let Some(watch) = &mut self.input {
+                watch.line.clear();
+            }
+        }
+        self.send(bytes, cx);
+    }
+
+    /// Send raw bytes (keystrokes, pasted text) to the program.
+    fn send(&mut self, bytes: impl Into<Cow<'static, [u8]>>, cx: &mut Context<Self>) {
         if self.exit_code.is_some() {
             return;
         }
@@ -389,9 +466,36 @@ impl TerminalView {
         let mode = *self.term.lock().mode();
         if let Some(bytes) = keys::for_key_down(event, mode) {
             self.last_typed = Some(std::time::Instant::now());
-            self.write(bytes, cx);
+            self.person_key(&bytes);
+            self.send(bytes, cx);
             cx.stop_propagation();
         }
+    }
+
+    /// Debug builds' journeys (`GLASSCODE_DEBUG_KEYS`): `text` as the person's typed text, as the
+    /// window's input handler takes it.
+    #[cfg(debug_assertions)]
+    pub fn debug_person_types(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(bytes) = self.typed.commit(text) {
+            self.last_typed = Some(std::time::Instant::now());
+            self.person_text(text, false);
+            self.send(bytes, cx);
+        }
+        cx.notify();
+    }
+
+    /// Debug builds' journeys: the person's Return key, as `on_key_down` takes it.
+    #[cfg(debug_assertions)]
+    pub fn debug_person_enter(&mut self, cx: &mut Context<Self>) {
+        self.last_typed = Some(std::time::Instant::now());
+        self.person_key(b"\r");
+        self.send(&b"\r"[..], cx);
+        cx.notify();
+    }
+
+    /// The text selected in the terminal, as the copy key would copy it.
+    pub fn selected_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|text| !text.trim().is_empty()).map(|text| unwrap_lines(&text, self.size.cols))
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -406,8 +510,9 @@ impl TerminalView {
         let Some(item) = cx.read_from_clipboard() else { return };
         let incoming = files::from_clipboard(&item);
         if !incoming.is_empty() {
-            self.paste_files(incoming, cx);
+            self.put_files(incoming, true, cx);
         } else if let Some(text) = item.text() {
+            self.person_text(&text, true);
             self.paste_text(&text, cx);
         }
     }
@@ -415,18 +520,29 @@ impl TerminalView {
     /// Files dropped on the terminal (from Finder, a screenshot's thumbnail, …).
     fn drop_paths(&mut self, paths: &gpui::ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
-        self.paste_files(paths.paths().iter().cloned().map(files::Incoming::Path).collect(), cx);
+        self.put_files(paths.paths().iter().cloned().map(files::Incoming::Path).collect(), true, cx);
     }
 
     /// Type the paths of pasted or dropped files (saved or sent to the server first).
     pub fn paste_files(&mut self, incoming: Vec<files::Incoming>, cx: &mut Context<Self>) {
+        self.put_files(incoming, false, cx);
+    }
+
+    /// `by_person`: pasted or dropped on this view, so the paths are part of their line (as
+    /// pasted text).
+    fn put_files(&mut self, incoming: Vec<files::Incoming>, by_person: bool, cx: &mut Context<Self>) {
         self.last_typed = Some(std::time::Instant::now());
         let target = self.files.clone();
         let task = cx.background_spawn(async move { files::prepare_all(incoming, &target) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| match result {
-                Ok(text) => this.paste_text(&text, cx),
+                Ok(text) => {
+                    if by_person {
+                        this.person_text(&text, true);
+                    }
+                    this.paste_text(&text, cx)
+                }
                 Err(error) => cx.emit(TerminalEvent::Notice(format!("{error:#}"))),
             });
         })
@@ -441,7 +557,8 @@ impl TerminalView {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        self.write(payload.into_bytes(), cx);
+        // Text, not an Enter: the line the person types goes on (a bracketed paste never submits).
+        self.send(payload.into_bytes(), cx);
     }
 
     fn clear_scrollback(&mut self, _: &ClearScrollback, _: &mut Window, cx: &mut Context<Self>) {
@@ -614,7 +731,8 @@ impl EntityInputHandler for TerminalView {
     ) {
         if let Some(bytes) = self.typed.commit(text) {
             self.last_typed = Some(std::time::Instant::now());
-            self.write(bytes, cx);
+            self.person_text(text, false);
+            self.send(bytes, cx);
         }
         cx.notify();
     }

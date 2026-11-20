@@ -15,7 +15,7 @@ use glasscode_core::{git, naming};
 
 use crate::center::Center;
 use crate::shell::View;
-use crate::sidebar::{self, OnClick, PrState, ProjectLine, RowActions, RowState, SessionLine, Tree, TreeProject, TreeRow, TreeSession, WorktreeLine, without_number};
+use crate::sidebar::{self, OnClick, PrState, ProjectLine, RowActions, RowState, SessionLine, Tree, TreeProject, TreeRow, TreeSession, WorkLine, without_number};
 use crate::theme;
 use crate::workspace::{RIGHT_WIDTH, SIDEBAR_WIDTH, Side, Workspace};
 
@@ -217,6 +217,11 @@ impl Workspace {
     /// A session's agent changed what it is doing: say so when it finished its turn or needs
     /// the person, unless they are looking at it.
     pub fn activity_changed(&mut self, id: &str, previous: Option<AgentActivity>, now: AgentActivity, cx: &mut Context<Self>) {
+        self.journal_activity(id, previous, now);
+        // v2 (M42): working again, what the session said before is over.
+        if now == AgentActivity::Working {
+            crate::notify_ui::session_moved_on(id);
+        }
         let finished = previous == Some(AgentActivity::Working) && now == AgentActivity::Idle;
         let needs = now == AgentActivity::NeedsInput && previous != Some(AgentActivity::NeedsInput);
         let wanted = (finished && !self.state.notify.finished_off) || (needs && !self.state.notify.needs_input_off);
@@ -255,6 +260,7 @@ impl Workspace {
             removing: &self.removing,
             idle_open: &self.idle_worktrees_open,
             selected,
+            last: &self.last_in_worktree,
         };
         let rows = sidebar::tree(&tree, |s| self.session_title(s));
         // The GitHub account shows by the project's name when the sidebar has the room (it has
@@ -328,29 +334,37 @@ impl Workspace {
                     },
                 )
             }
-            TreeRow::Worktree { project_id, path, label, git, folded, state, sessions, pinned, current, pr } => {
+            TreeRow::Worktree { project_id, path, session, open_id, agent, title, label, git, state, running, sessions, open, pinned, current, selected, pr } => {
                 let key = sidebar::worktree_key(&project_id, &path);
                 let menu_open = self.row_menu.as_ref().is_some_and(|m| m.worktree.as_deref() == Some(path.as_path()));
-                let (fold, add_key) = (key.clone(), key.clone());
+                let account = self.state.session(&session).and_then(|s| self.account_note(s));
+                let click: OnClick = if sessions > 1 && current {
+                    // Its session is on screen: the click folds its list of sessions, or opens it.
+                    Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| this.fold(key.clone(), open, cx)))
+                } else {
+                    // The person asked for it: the Sessions view shows it (`select_session` is for
+                    // background events), and a worktree with several lists them.
+                    let id = open_id.clone();
+                    Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx)))
+                };
+                let close: Option<OnClick> = (sessions == 1).then(|| {
+                    let id = open_id.clone();
+                    Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_session(&id, window, cx))) as OnClick
+                });
                 let (add_project, add_path) = (project_id.clone(), path.clone());
-                let (menu_project, menu_path) = (project_id.clone(), path.clone());
-                let (right_project, right_path) = (project_id, path);
-                let row = sidebar::worktree_row(
-                    WorktreeLine { key, label, git, folded, state, sessions, pinned, current, pr, menu_open },
+                // The menu acts on the session a click opens, so that its "Rename…" renames that one.
+                let (menu_id, menu_project, menu_path) = (open_id.clone(), project_id.clone(), path.clone());
+                let (right_id, right_project, right_path) = (open_id, project_id, path.clone());
+                let row = sidebar::work_row(
+                    WorkLine { key: path.to_string_lossy().into_owned(), agent, running, title, label, git, account, state, sessions, open, pinned, selected, current, pr, menu_open },
                     RowActions {
-                        click: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| this.fold(fold.clone(), !folded, cx))),
-                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            // Opened, so that the new session is not hidden under the fold.
-                            if folded {
-                                this.fold(add_key.clone(), false, cx);
-                            }
-                            this.open_new_session(Some(add_project.clone()), Some(add_path.clone()), window, cx)
-                        }))),
+                        click,
+                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(add_project.clone()), Some(add_path.clone()), window, cx)))),
                         menu: Some((
-                            Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_row_menu(menu_project.clone(), Some(menu_path.clone()), event.position(), cx))),
-                            Box::new(cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_row_menu(right_project.clone(), Some(right_path.clone()), event.position, cx))),
+                            Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_session_menu(&menu_id, &menu_project, &menu_path, event.position(), cx))),
+                            Box::new(cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_session_menu(&right_id, &right_project, &right_path, event.position, cx))),
                         )),
-                        close: None,
+                        close,
                     },
                 );
                 sidebar::indent(1, row)

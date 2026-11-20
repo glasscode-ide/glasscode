@@ -252,6 +252,10 @@ pub struct State {
     /// Sessions started from a ticket: session id → the ticket's identifier ("ENG-826").
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_of: std::collections::BTreeMap<String, String>,
+    /// Sessions started to carry on with a pull request: session id → the pull request
+    /// (`owner/name#42`, `pr_ref`). The work ledger keys their work by it (M32).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_of: std::collections::BTreeMap<String, String>,
     /// Which ticket provider the board shows, and the chosen project per provider.
     #[serde(default)]
     pub tickets: TicketSettings,
@@ -282,6 +286,17 @@ pub struct State {
     /// projects never shows it, and one without projects shows it once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_run_done: bool,
+    /// The manager: its name, its brain, which projects it manages (Settings › Manager).
+    #[serde(default, deserialize_with = "lenient")]
+    pub manager: crate::manager::Settings,
+    /// Moves of the Server mode switch under way, so a restart finishes them by the server's
+    /// owner record (`switch::recover`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees_moving: Vec<crate::switch::MoveNote>,
+    /// Worktrees the server owns, as this Mac last heard: their sessions here do not start
+    /// (opening one brings the worktree back), even before the first sync after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees_elsewhere: Vec<crate::owners::WorktreeKey>,
 }
 
 /// The person's answer about one project's setup script.
@@ -569,6 +584,10 @@ pub struct NotifySettings {
     pub needs_input_off: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sound_off: bool,
+    /// Quiet hours (Manager v2, M42): minutes after local midnight, from and to; only urgent
+    /// notices pass them, and the rest come back as one digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<(u16, u16)>,
 }
 
 impl State {
@@ -611,6 +630,18 @@ impl State {
 
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// The pull request session `id` was started to carry on with (`pr_of`).
+    pub fn pr_link(&self, id: &str) -> Option<(String, u64)> {
+        parse_pr_ref(self.pr_of.get(id)?)
+    }
+
+    /// The work of `session` in project `project`: by its review, the pull request it was started
+    /// to carry on with, the ticket it was started from, else its branch (`WorkKey::for_session`).
+    pub fn work_key(&self, project: &crate::paths::ProjectKey, session: &Session) -> crate::identity::WorkKey {
+        let pr = self.pr_link(&session.id);
+        crate::identity::WorkKey::for_session(project, session, self.ticket_of.get(&session.id).map(String::as_str), pr.as_ref().map(|(repo, n)| (repo.as_str(), *n)))
     }
 
     pub fn session_mut(&mut self, id: &str) -> Option<&mut Session> {
@@ -683,6 +714,44 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+
+/// A pull request as `State::pr_of` keeps it: `owner/name#42`, lower case.
+pub fn pr_ref(repo: &str, number: u64) -> String {
+    format!("{}#{number}", repo.trim().to_lowercase())
+}
+
+/// `owner/name#42` back into its repository and number.
+pub fn parse_pr_ref(text: &str) -> Option<(String, u64)> {
+    let (repo, number) = text.rsplit_once('#')?;
+    let (owner, name) = repo.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some((repo.to_string(), number.parse().ok()?))
+}
+
+#[cfg(test)]
+mod pr_link_tests {
+    use super::*;
+
+    /// A session started to carry on with a pull request keeps it, and its work is that pull
+    /// request's (M32); a session with no link keeps its branch's.
+    #[test]
+    fn a_pr_session_works_on_its_pull_request() {
+        let project = crate::paths::ProjectKey::parse("app-3f9a1c").unwrap();
+        let session: Session = serde_json::from_value(serde_json::json!({ "id": "s1", "project_id": "p1", "worktree": "/work/app", "branch": "fix-login", "title": "Claude · fix-login", "agent": "claude", "created_at": 1 })).unwrap();
+        let mut state = State::default();
+        assert_eq!(state.work_key(&project, &session).kind, crate::identity::WorkKind::Branch);
+        state.pr_of.insert("s1".into(), pr_ref("Acme/App", 42));
+        assert_eq!(state.pr_link("s1"), Some(("acme/app".to_string(), 42)));
+        let key = state.work_key(&project, &session);
+        assert_eq!((key.kind, key.id.as_str()), (crate::identity::WorkKind::Pr, "acme/app#42"));
+        for bad in ["acme#4", "acme/app#x", "/app#4", "a/b/c#4", "acme/app"] {
+            assert_eq!(parse_pr_ref(bad), None, "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -70,9 +70,13 @@ pub struct Hello {
     pub codex: Option<String>,
     pub approved: ApprovedVersions,
     /// What this daemon can do beyond protocol 2 ("phone": prompts, transcripts, diffs, PRs,
-    /// phone keys). Older daemons send none.
+    /// phone keys; "owners": moves by worktree with an owner record). Older daemons send none.
     #[serde(default)]
     pub features: Vec<String>,
+    /// The server's machine id (`authority/machine.json` there), for the owner records of
+    /// worktrees. Older daemons send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +167,27 @@ pub struct ServerState {
     /// Sessions running on Macs, synced here (their `host` is the Mac).
     #[serde(default)]
     pub mirrors: Vec<RemoteSession>,
+    /// Worktrees a Mac left with uncommitted work and no open session at a switch: a copy is
+    /// here, and the worktree moves when it is opened here (`worktrees.open_parked`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<ParkedWorktree>,
+}
+
+/// A worktree's copy left on the server at a switch, without moving it (`worktrees.park`): its
+/// HEAD and uncommitted snapshot are in `refs/glasscode/parked/<token>/{head,snap}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedWorktree {
+    pub key: crate::owners::WorktreeKey,
+    /// The project on the server.
+    pub project_id: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub token: String,
+    /// The Mac that left it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
+    /// When (seconds since the epoch).
+    pub at: u64,
 }
 
 // ----- Mac sessions synced to the server ("mirrors") -----------------------------------------
@@ -200,6 +225,9 @@ pub struct MirrorMeta {
     /// Where a Codex conversation lives under the account's folder (Claude's is derived).
     #[serde(default)]
     pub conversation_rel: Option<PathBuf>,
+    /// Its worktree's owner-record key (`owners`). Older Macs send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::owners::WorktreeKey>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +238,57 @@ pub struct MirrorSync {
     pub home: PathBuf,
     /// Every session the Mac runs: the server forgets the ones not listed.
     pub sessions: Vec<MirrorMeta>,
+    /// The Mac's machine id (`authority/machine.json`), for the owner records. Older Macs send
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
+    /// The Mac's worktrees with no open session, by key: the reply's `owners` covers them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_keys: Vec<crate::owners::WorktreeKey>,
+    /// The Mac's Today board (a `board::Board`, as JSON): the server merges it into its own copy
+    /// and sends the merged board back. Older Macs send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
+    /// The Mac is going to sleep (its last sync before it): the server may continue a session
+    /// that was working at once, instead of after the usual wait. The next sync clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
+    /// The Mac's own journal events since the last sync (M57, v2; the server pulls back none of
+    /// them), and its effect records that changed (merged by key and generation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journal: Vec<crate::journal::Event>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<crate::effects::EffectRecord>,
+    /// The Mac's own words records since the last sync (M57), kept in `words/<mac>/` there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
+    /// The Mac's own changes to the manager's conversation since the last sync (M57), taken in
+    /// by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<crate::conversation::Record>,
+    /// The Mac's pending actions asked or answered since the last sync (M57; no authority).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<crate::gate::PendingAction>,
+    /// The Mac's own changes to work items since the last sync (M57), merged by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<crate::work::WorkItem>,
+    /// The Mac's own changes to the follow-ups since the last sync (M56.2), merged by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<crate::work::FollowSync>,
+    /// How far the Mac has the server's records (the last reply's `have`, once taken in).
+    #[serde(default)]
+    pub have: HaveCursors,
+    /// The Mac's engine switch (M57): the server keeps the same, one way like the authority, so
+    /// its journal, words and conversation run as the Mac's do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<crate::store::EngineSwitch>,
+    /// What the server's manager needs from the Mac to run its wakes while it is home (M57).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager: Option<ManagerFromMac>,
+    /// The window ops of the server's manager this Mac has (from earlier replies): the server
+    /// stops sending them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_acks: Vec<u64>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +305,12 @@ pub struct MirrorSync {
     /// Settings › Permissions' "Tell new sessions about the glasscode command" is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skill_off: bool,
+    /// The Mac's approved authority (M21.1, crit-5): its policy without the projects that stay on
+    /// the Mac, its pause and its paired phones. Only to a server that announces "authority"; the
+    /// server keeps it as `authority/from-mac.json`, decides its own sessions by it, and never
+    /// sends authority back: no reply has a field for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<crate::gate::FromMac>,
 }
 
 /// A list where an entry that does not read is left out instead of failing the message.
@@ -375,6 +460,10 @@ pub struct RemoteCall {
     /// The server project of that session (by name; the Mac finds its own by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// The op the words name in the registry (`ops::name_of`), for the Mac and the journal.
+    /// Older servers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -387,8 +476,21 @@ pub struct RemoteCallReply {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MirrorInput {
-    Text { text: String, enter: bool },
-    Answer { option: u32, #[serde(default)] text: Option<String> },
+    /// `device`: the phone that typed it, as its connection declared it (M13.2); none from an
+    /// older server, or when no phone sent it.
+    Text {
+        text: String,
+        enter: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
+    Answer {
+        option: u32,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
     Keys { keys: Vec<String> },
 }
 
@@ -410,6 +512,135 @@ pub struct MirrorSyncReply {
     /// `glasscode` commands from sessions on the server (`RemoteCall`s), until the Mac has them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cli_calls: Vec<Value>,
+    /// The owner records of the worktrees this Mac's sessions are in, when they have one, so the
+    /// Mac stops a copy that moved to the server meanwhile.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
+    /// The server cannot read its owner records (a damaged file): the Mac keeps what it knew,
+    /// and starts nothing it last knew to be the server's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owners_unknown: bool,
+    /// The server's Today board after merging the Mac's (a `board::Board`, as JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
+    /// The server's effect records that changed since this Mac's last sync (M57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<crate::effects::EffectRecord>,
+    /// The server's own words records since this Mac's last sync (a phone's input; never tier
+    /// one, which the Mac refuses from the server).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
+    /// The server's own changes to the manager's conversation since this Mac's last sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<crate::conversation::Record>,
+    /// The server's pending actions asked or settled since this Mac's last sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<crate::gate::PendingAction>,
+    /// The server's own changes to work items since this Mac's last sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<crate::work::WorkItem>,
+    /// The server's own changes to the follow-ups since this Mac's last sync (M56.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<crate::work::FollowSync>,
+    /// Where these records stopped: the Mac sends it back with its next sync once it took them
+    /// in, so a reply lost on the way brings them again.
+    #[serde(default)]
+    pub have: HaveCursors,
+    /// The kinds of the Mac's records this server could not take in ("journal", "effects",
+    /// "words", "conversation", "pending", "work", "follow_ups"): the Mac sends them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_taken: Vec<String>,
+    /// The notices of the server's manager since the last sync, for the Mac to show (M57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<ServerNotice>,
+    /// The window ops the server's manager asked for while the Mac was away (M57): the Mac runs
+    /// each once, through its own gate, and names it in `window_acks`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_ops: Vec<QueuedWindowOp>,
+    /// This Mac is an observer here (M57): another Mac is the primary, whose authority the server
+    /// keeps; this one reads, shows and answers approvals, and acts on its own sessions only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub observer: bool,
+    /// The server's latest stamp (its clock): whether the Mac's clock went back is told against it
+    /// too, and "use the server's copy" goes on from it (crit-9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_stamp: Option<crate::identity::Hlc>,
+}
+
+/// A window op of the server's manager, kept for the Mac (it runs in the window only).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueuedWindowOp {
+    pub id: u64,
+    /// `{"op": …, "args": …}`.
+    pub op: Value,
+    pub queued_ms: u64,
+    /// A card asked on the server that the person approved on the Mac, for an op only the Mac
+    /// runs: the Mac runs it as that approval, once its own copy of the card says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
+}
+
+/// What the server's manager needs from the Mac (M57): whether the manager is on, the brain the
+/// person chose, and the projects as a wake sees them (their keys and names, Careful ones, and
+/// whether the manager's account may read them), from the Mac's gate. Kept on the server, so its
+/// wakes run while the Mac is away.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManagerFromMac {
+    pub enabled: bool,
+    /// The brain's agent; none: Claude's (the only wake lane in release 1).
+    pub agent: Option<crate::model::AgentKind>,
+    pub model: Option<String>,
+    /// The account the person chose for it, by its id or name; the server uses its own account of
+    /// that name, else its default one (no credential is ever copied).
+    pub account: Option<String>,
+    pub projects: Vec<crate::runtime::situation::Project>,
+    /// What the follow-ups need on the server while it is home (M56.2); none: the `follow-ups`
+    /// built-in is off on the Mac (or the Mac is older), and they do not run there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_ups: Option<FollowUpsFromMac>,
+}
+
+/// The follow-ups' part of what the Mac tells the server (M56.2): the person's GitHub login (whose
+/// reviews are followed; the server's own `gh` account may be another), and the teammates by name
+/// and login, as Settings › Manager has them (no contact: messages are the Mac's to send).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FollowUpsFromMac {
+    pub me: Option<String>,
+    pub people: Vec<Teammate>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Teammate {
+    pub name: String,
+    pub github: String,
+}
+
+/// A notice of the server's manager (one a matter: a newer one replaces it).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerNotice {
+    pub title: String,
+    pub body: String,
+    pub matter: String,
+}
+
+/// How far the Mac has the server's records of each kind (M57). The server keeps nothing of it:
+/// each reply says where its records stopped, and the Mac sends that back once it took them in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaveCursors {
+    /// The server's clock when it read its effect records, and its pending actions.
+    pub effects_ms: u64,
+    pub pending_ms: u64,
+    /// The newest of the server's own words records sent.
+    pub words_ms: u64,
+    pub conversation: crate::conversation::SyncCursor,
+    pub work: Option<crate::identity::Hlc>,
+    pub follow_ups: Option<crate::identity::Hlc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -444,6 +675,41 @@ pub struct CreateSession {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Part of a move: the session is made but its agent waits until the move commits
+    /// (`owners.commit`), and making it again with the same tag gives the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<MoveTag>,
+}
+
+/// One session of a move: the worktree, the epoch it moves to, and the session it continues.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveTag {
+    pub key: crate::owners::WorktreeKey,
+    pub epoch: u64,
+    /// The session on the machine the worktree leaves.
+    pub from: String,
+}
+
+/// `owners.begin`: start moving a worktree from `from` to `to`; `epoch` is the one read.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnersBegin {
+    pub key: crate::owners::WorktreeKey,
+    pub from: crate::paths::MachineId,
+    pub to: crate::paths::MachineId,
+    pub epoch: u64,
+}
+
+/// What `owners.begin`, `owners.commit` and `owners.abort` answer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnersReply {
+    Ok {
+        record: crate::owners::OwnerRecord,
+        /// After a commit here: the held sessions whose agent could not start (titles).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_started: Vec<String>,
+    },
+    Refused { error: crate::owners::OwnerError },
 }
 
 /// Where a new session's work starts.
@@ -491,6 +757,9 @@ pub struct ReceiveWorktree {
     pub token: String,
     #[serde(default)]
     pub env: Vec<EnvFile>,
+    /// Part of a move to this epoch: accepted only while that move is under way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_epoch: Option<(crate::owners::WorktreeKey, u64)>,
 }
 
 /// `worktrees.snapshot`: a worktree's state, left in `refs/glasscode/out/<token>/{head,snap}`
@@ -773,10 +1042,32 @@ pub struct RemoteClient {
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl RemoteClient {
-    /// Start `glasscoded rpc` on the server and check that it speaks our protocol.
+    /// Start `glasscoded rpc` on the server and check that it speaks our protocol. Every
+    /// connection this machine opens says it is this machine (M13.2), when the server takes it.
     pub fn connect(config: &ServerConfig) -> anyhow::Result<RemoteClient> {
         let (program, args) = config.remote_command(false, &[config.remote_bin.clone(), "rpc".into()]);
-        Self::spawn(crate::sys::command(program).args(args))
+        let client = Self::spawn(crate::sys::command(program).args(args))?;
+        match crate::paths::MachineId::this() {
+            Ok(id) => {
+                if let Err(err) = client.declare(&crate::caller::Caller::Machine { id }) {
+                    eprintln!("glasscode: the server did not take this machine's id: {err:#}");
+                }
+            }
+            // A damaged machine file: the connection goes on undeclared, as before M13.2, and
+            // what needs the machine id (the moves' owner records) is refused by the server.
+            Err(err) => eprintln!("glasscode: no machine id for the server: {err}"),
+        }
+        Ok(client)
+    }
+
+    /// Name this connection's caller, once, before its other calls (M13.2). A server that does
+    /// not take declarations (no `"caller"` in its features) is left as it was: false.
+    pub fn declare(&self, caller: &crate::caller::Caller) -> anyhow::Result<bool> {
+        if !self.hello.features.iter().any(|f| f == crate::caller::DAEMON_FEATURE) {
+            return Ok(false);
+        }
+        self.call_value(crate::caller::DECLARE_METHOD, serde_json::to_value(caller)?)?;
+        Ok(true)
     }
 
     /// Connect through any command whose stdio is a `glasscoded rpc` (tests run it locally).
@@ -829,6 +1120,7 @@ impl RemoteClient {
                 codex: None,
                 approved: ApprovedVersions::default(),
                 features: Vec::new(),
+                machine: None,
             },
         };
         let hello: Hello = client.call("hello", Value::Null).map_err(|err| {

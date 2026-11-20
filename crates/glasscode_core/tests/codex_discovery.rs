@@ -120,7 +120,7 @@ fn a_codex_session_from_npm_starts_without_cmd_and_trusts_its_worktree() {
     assert_eq!(launch.args[at - 1], "-c");
     // Codex reads the value as TOML.
     let value: toml::Table = toml::from_str(&launch.args[at].replacen("developer_instructions=", "v = ", 1)).unwrap();
-    assert_eq!(value["v"].as_str(), Some(glasscode_core::cli::CODEX_INSTRUCTIONS));
+    assert_eq!(value["v"].as_str(), Some(glasscode_core::cli::codex_instructions()));
     assert_eq!(launch.env.get("CODEX_HOME").map(PathBuf::from), Some(account.effective_dir()));
 
     let config: toml::Table = toml::from_str(&std::fs::read_to_string(account.effective_dir().join("config.toml")).unwrap()).unwrap();

@@ -24,6 +24,8 @@ pub enum View {
     Settings,
     /// The first run (`first_run.rs`): no sidebars, no status bar.
     FirstRun,
+    /// The manager's page (`manager_ui.rs`): the agent above every session.
+    Manager,
 }
 
 /// A tab of the centre: a session of the worktree on screen, or a file (`file_view.rs`). The
@@ -319,6 +321,7 @@ impl Workspace {
             }
             View::FirstRun => self.open_first_run(crate::first_run::Step::Projects, cx),
             View::Usage => self.show_view(View::Usage, cx),
+            View::Manager => self.show_manager(window, cx),
             View::Settings => {
                 let section = self.settings.section;
                 self.open_settings(section, window, cx);
@@ -466,6 +469,11 @@ impl Workspace {
         // The first run has no status bar: nothing of it is in use yet.
         let status_bar = (self.view != View::FirstRun).then(|| frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element()));
         let popover = self.popover.map(|p| self.render_popover(p, window, cx));
+        // The manager's bubble, in the bottom right corner of each view but its own page and
+        // the first run, and not while a popover of the status bar takes that corner. A toast
+        // goes above it.
+        let bubble = (self.view != View::FirstRun && self.popover.is_none()).then(|| self.render_manager_bubble(cx)).flatten();
+        let toast_bottom = if bubble.is_some() { 96. } else { 40. };
         let shell = div()
             .size_full()
             .flex()
@@ -486,6 +494,7 @@ impl Workspace {
             )
             .children(status_bar)
             .children(popover)
+            .children(bubble)
             .when_some(self.render_kit(cx), |d, kit| d.child(kit))
             .when_some(self.render_backdrop_page(window, cx), |d, page| d.child(page))
             .when_some(self.render_row_menu(cx), |d, menu| d.child(menu))
@@ -496,7 +505,7 @@ impl Workspace {
                     deferred(
                         div()
                             .absolute()
-                            .bottom(theme::sz(40.))
+                            .bottom(theme::sz(toast_bottom))
                             .right(theme::sz(16.))
                             .max_w(theme::sz(460.))
                             .px_4()
@@ -527,6 +536,7 @@ impl Workspace {
             View::Usage => self.render_usage(window, cx),
             View::Settings => self.render_settings(window, cx),
             View::FirstRun => self.render_first_run(window, cx),
+            View::Manager => self.render_manager(window, cx),
             View::Sessions => match self.center.clone() {
                 crate::center::Center::Session => self.render_center(window, cx).into_any_element(),
                 crate::center::Center::Server(id) => self.render_server_center(&id, cx),
@@ -603,6 +613,8 @@ impl Workspace {
             .pb(theme::sz(6.))
             .border_b_1()
             .border_color(theme::border())
+            // The manager first, where the rail had it (only while it is on).
+            .children(self.render_manager_nav(cx))
             .child(nav_row("nav-today", crate::icons::TODAY, "Today", view == View::Today, today_count, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Today, window, cx))))
             .child(
                 nav_row("nav-board", crate::icons::TICKETS, "Board", view == View::Board, board_count, None)
@@ -668,6 +680,7 @@ impl Workspace {
                 String::new(),
             ),
             _ if self.view == View::Today => ("Today".to_string(), String::new()),
+            _ if self.view == View::Manager => (self.state.manager.name.clone(), String::new()),
             _ if self.view == View::FirstRun => ("Set up Glasscode".to_string(), String::new()),
             _ if self.view == View::PullRequests => ("Pull requests".to_string(), "GitHub".to_string()),
             _ if self.view == View::Board => (

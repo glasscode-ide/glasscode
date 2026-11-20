@@ -44,6 +44,15 @@ if [[ -f "$HELPER_BIN" ]]; then
 else
   echo "warning: glasscode-voice helper not built ($HELPER_BIN); Glasscode's voice won't run" >&2
 fi
+# The manager's voice helper (Swift + LiveKit): built by the same `swift build` above, and it
+# loads the same two frameworks.
+MANAGER_VOICE_BIN="voice/helper/.build/release/manager-voice"
+if [[ -f "$MANAGER_VOICE_BIN" && -d "$APP/Contents/Frameworks" ]]; then
+  cp "$MANAGER_VOICE_BIN" "$APP/Contents/Resources/manager-voice"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/Resources/manager-voice" 2>/dev/null || true
+else
+  echo "warning: manager-voice helper not built ($MANAGER_VOICE_BIN); the manager's voice won't run" >&2
+fi
 # Linux builds of the server daemon, installed on a developer's server from the Server dialog.
 # Built with Docker by script/build-glasscoded.sh; skipped (with a warning) when missing.
 if ls target/glasscoded/glasscoded-linux-* >/dev/null 2>&1; then
@@ -92,8 +101,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 ENTITLEMENTS="script/Glasscode.entitlements"
-# Nested code (the LiveKit frameworks and the voice helper) must be signed before the app.
-# The helper gets the same entitlements so its microphone use is covered.
+# Nested code (the LiveKit frameworks and the voice helpers) must be signed before the app.
+# The helpers get the same entitlements so their microphone use is covered.
 SIGN_ID="${SIGN_IDENTITY:--}" # '-' = ad-hoc
 RUNTIME_FLAGS=()
 [[ -n "${SIGN_IDENTITY:-}" ]] && RUNTIME_FLAGS=(--options runtime --timestamp)
@@ -103,9 +112,11 @@ if [[ -d "$APP/Contents/Frameworks" ]]; then
     [[ -e "$fw" ]] && codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --sign "$SIGN_ID" "$fw"
   done
 fi
-if [[ -f "$APP/Contents/Resources/glasscode-voice" ]]; then
-  codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP/Contents/Resources/glasscode-voice"
-fi
+for helper in glasscode-voice manager-voice; do
+  if [[ -f "$APP/Contents/Resources/$helper" ]]; then
+    codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP/Contents/Resources/$helper"
+  fi
+done
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP"
 else

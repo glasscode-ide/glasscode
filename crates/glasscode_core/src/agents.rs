@@ -38,10 +38,13 @@ pub fn settings_file(session_id: &str) -> PathBuf {
     paths::settings_dir().join(format!("{session_id}.json"))
 }
 
-/// Remove what Glasscode keeps for a session's agent: its hook events and (on Windows) its
-/// Claude settings.
+/// Remove what Glasscode keeps for a session's agent: its hook events (with their counter and
+/// lock) and (on Windows) its Claude settings.
 pub fn remove_session_files(session_id: &str) {
-    let _ = std::fs::remove_file(events_file(session_id));
+    let events = events_file(session_id);
+    let _ = std::fs::remove_file(crate::cli::spool_counter(&events));
+    let _ = std::fs::remove_file(crate::cli::spool_lock(&events));
+    let _ = std::fs::remove_file(events);
     let _ = std::fs::remove_file(settings_file(session_id));
 }
 
@@ -49,16 +52,32 @@ pub fn remove_session_files(session_id: &str) {
 /// keeps Claude's plan limits for Usage (then runs the person's own status line), and Claude's
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
-fn claude_hook_settings() -> String {
+///
+/// Every hook is `glasscode hook` by the absolute path of this program, on every platform, which
+/// appends each payload in one write under the spool's lock (events-20), with a timeout, and
+/// `SessionEnd` reports too. Only when this program's path cannot be read do the hooks append the
+/// payload to the events file themselves, as before M56.
+///
+/// With the v2 feature "turn_hooks" on too, the hooks of P05 report as well: `StopFailure`,
+/// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and
+/// `PostCompact` (M30). Each exists in the approved versions; an event a version does not know
+/// would stop an interactive start on a dialog, so they stay behind the switch.
+///
+/// `StopFailure` alone (`failure_hook`) reports in every v2 home whose Claude is at least
+/// `versions::MIN_CLAUDE`, the version P05 checked it on: a failed turn ends there, and the work
+/// ledger's "three failed turns in a row" counts it (M32).
+fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, failure_hook: bool, brief: bool) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
-        ("glasscode hook", "glasscode statusline")
+        (if v2.is_some() { "glasscode hook --stamp" } else { "glasscode hook" }.to_string(), "glasscode statusline")
+    } else if let Some(program) = v2 {
+        (format!("{} cli hook --stamp", crate::remote::shell_quote(&program.to_string_lossy())), crate::usage::STATUSLINE_COMMAND)
     } else {
-        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#, crate::usage::STATUSLINE_COMMAND)
+        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#.to_string(), crate::usage::STATUSLINE_COMMAND)
     };
-    let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
-    serde_json::json!({
+    let hook = if v2.is_some() { serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }]) } else { serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]) };
+    let mut settings = serde_json::json!({
         "hooks": {
             "SessionStart": hook,
             "UserPromptSubmit": hook,
@@ -70,14 +89,71 @@ fn claude_hook_settings() -> String {
         // Claude's message bars and diffs match Glasscode's theme whatever the person's own
         // setting; Glasscode tells it when the theme changes.
         "theme": "auto",
-    })
-    .to_string()
+    });
+    if v2.is_some() && turn_hooks {
+        for event in TURN_HOOKS {
+            settings["hooks"][event] = hook.clone();
+        }
+    }
+    if v2.is_some() && failure_hook {
+        settings["hooks"]["StopFailure"] = hook.clone();
+    }
+    if v2.is_some() {
+        settings["hooks"]["SessionEnd"] = hook.clone();
+        // A project's own settings cannot turn the reporting hooks off (P08).
+        settings["disableAllHooks"] = Value::Bool(false);
+    }
+    if brief {
+        // The memory brief (M20.2, P03): on start, resume and after a compaction, the current brief
+        // is this hook's `additionalContext`, by the absolute path of the command (D11).
+        let brief_command = if cfg!(windows) {
+            "glasscode memory brief --hook".to_string()
+        } else if let Some(program) = v2 {
+            format!("{} cli memory brief --hook", crate::remote::shell_quote(&program.to_string_lossy()))
+        } else {
+            format!("{} memory brief --hook", crate::remote::shell_quote(&crate::cli::command_file().to_string_lossy()))
+        };
+        settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [hook[0]["hooks"][0].clone(), { "type": "command", "command": brief_command, "timeout": 20 }] }]);
+        // Before Claude compacts the conversation, the app writes the session's last turns into
+        // its work file (land-18), which the brief after the compaction carries.
+        settings["hooks"]["PreCompact"] = hook.clone();
+    }
+    settings.to_string()
+}
+
+/// The hooks M30's turns read, beyond the four of v1 and `SessionEnd` (P05).
+pub const TURN_HOOKS: [&str; 7] = ["StopFailure", "SubagentStart", "SubagentStop", "PermissionRequest", "PermissionDenied", "CwdChanged", "PostCompact"];
+
+/// The program whose `cli hook` the hooks run: this one (the app on the Mac, glasscoded on the
+/// server), by its absolute path. A test names its own (`GLASSCODE_TEST_HOOK_PROGRAM`): the test
+/// binary is no `glasscode`.
+fn v2_hook_program() -> Option<PathBuf> {
+    if crate::paths::testing()
+        && let Some(program) = std::env::var_os("GLASSCODE_TEST_HOOK_PROGRAM")
+    {
+        return Some(program.into());
+    }
+    std::env::current_exe().ok()
+}
+
+/// Whether the Claude on `env`'s PATH knows `StopFailure`: it is at least `versions::MIN_CLAUDE`.
+/// The launch runs on the main thread, so the version is the one already read (Settings ›
+/// Updates' check, or a read this starts in the background): until it is known, the session
+/// starts without the hook, as it did before.
+fn claude_knows_stop_failure(env: &HashMap<String, String>) -> bool {
+    crate::versions::version_soon(Path::new("claude"), env).is_some_and(|version| crate::versions::below_minimum(AgentKind::Claude, &version).is_none())
 }
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
-fn claude_settings_arg(session_id: &str) -> String {
-    let settings = claude_hook_settings();
+fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>, env: &HashMap<String, String>) -> String {
+    let v2 = v2_hook_program();
+    let failure_hook = v2.is_some() && claude_knows_stop_failure(env);
+    let settings = claude_hook_settings(v2.as_deref(), crate::journal::feature_on("turn_hooks"), failure_hook, brief_on());
+    let settings = match profile {
+        Some(profile) => with_profile(&settings, &profile.claude_settings),
+        None => settings,
+    };
     if !cfg!(windows) {
         return settings;
     }
@@ -105,6 +181,21 @@ fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
 /// arguments that come before Glasscode's. An npm `.cmd` file on Windows gives way to the program
 /// it starts (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would
 /// not arrive as it was written.
+/// The Codex program and the arguments it starts with (a script's interpreter on Windows): what
+/// `codex app-server` is asked through (`codex_hooks`).
+pub fn codex_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
+    agent_program("codex", env)
+}
+
+/// The command of memory's brief hook (M20.2): this program's `cli memory brief --hook`, by its
+/// absolute path; on Windows the `glasscode` command.
+pub fn brief_hook_command() -> Option<String> {
+    if cfg!(windows) {
+        return v2_hook_program().map(|_| "glasscode memory brief --hook".to_string());
+    }
+    v2_hook_program().map(|program| format!("{} cli memory brief --hook", crate::remote::shell_quote(&program.to_string_lossy())))
+}
+
 fn agent_program(name: &str, env: &HashMap<String, String>) -> (String, Vec<String>) {
     let Some(found) = resolve_program(name, env) else { return (name.to_string(), Vec::new()) };
     let path = env.get("PATH").map(String::as_str).unwrap_or_default();
@@ -177,6 +268,13 @@ pub fn claude_mode(mode: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether sessions get v2's memory brief: the engine is v2 and its "brief" switch is on (rule 2:
+/// with v1, nothing of it reaches a session). As the journal read the switch at the start: no disk
+/// read here.
+fn brief_on() -> bool {
+    crate::journal::feature_on("brief")
+}
+
 /// What tells an agent about the `glasscode` command (when the app has written it, and the
 /// person has not turned it off): Claude's skill as a plugin, allowed to run `glasscode`
 /// without asking (the app asks itself for what needs the person); Codex's instructions.
@@ -195,10 +293,17 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
             }
             // An override replaces the account's own instructions, so theirs come first.
             let own = config_dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).and_then(|t| toml_string(&t, "developer_instructions"));
-            let text = match own {
-                Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::CODEX_INSTRUCTIONS),
-                _ => crate::cli::CODEX_INSTRUCTIONS.to_string(),
+            let mut text = match own {
+                Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::codex_instructions()),
+                _ => crate::cli::codex_instructions().to_string(),
             };
+            // v2's memory (M20.2): fixed text only, as Codex keeps a thread's first instructions on
+            // resume (P03). The brief comes from its SessionStart hook once Codex trusts it
+            // (`codex_hooks`); until then the session asks for it.
+            if brief_on() {
+                let by_hook = config_dir.is_some_and(crate::codex_hooks::brief_by_hook);
+                text = if by_hook { format!("{text}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS) } else { format!("{text}\n\n{}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK) };
+            }
             vec!["-c".into(), format!("developer_instructions={}", serde_json::to_string(&text).unwrap_or_default())]
         }
         AgentKind::Shell => Vec::new(),
@@ -225,6 +330,49 @@ fn ensure_codex_trusts(codex_home: &Path, worktree: &Path) {
     out.push_str(&format!("\n[projects.{}]\ntrust_level = \"trusted\"\n", toml_key(dir)));
     let _ = std::fs::create_dir_all(codex_home);
     let _ = std::fs::write(&file, out);
+}
+
+/// A Codex `config.toml` without the trust tables Glasscode added for folders below `under` (its
+/// worktrees: `ensure_codex_trusts`), each with its lines up to the next table; everything else
+/// stays as it is. How many went. For uninstall (M25).
+pub fn without_codex_trust(text: &str, under: &Path) -> (String, usize) {
+    let mut out: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    let mut gone = 0;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            let key = trimmed
+                .strip_prefix('[')
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix("projects"))
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('.'))
+                .and_then(|r| toml_quoted(r.trim_start()))
+                .filter(|(_, after)| after.trim_start().starts_with(']'))
+                .map(|(key, _)| key);
+            skipping = key.is_some_and(|key| Path::new(&key).starts_with(under));
+            if skipping {
+                gone += 1;
+                // The blank line written before it goes with it.
+                while out.last().is_some_and(|l| l.trim().is_empty()) {
+                    out.pop();
+                }
+                continue;
+            }
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    if gone == 0 {
+        return (text.to_string(), 0);
+    }
+    let mut kept = out.join("\n");
+    if !kept.is_empty() {
+        kept.push('\n');
+    }
+    (kept, gone)
 }
 
 /// A folder as a TOML key, quoted as Codex (toml_edit) quotes the entries it writes itself: in
@@ -289,11 +437,67 @@ fn codex_projects(text: &str) -> Vec<String> {
     keys
 }
 
+/// Glasscode's own `--settings` with a session profile's over them (M22): the profile's hooks are
+/// added to the reporting hooks, every other key of the profile is set.
+pub fn with_profile(settings: &str, profile: &Value) -> String {
+    let mut out: Value = serde_json::from_str(settings).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(base), Value::Object(over)) = (out.as_object_mut(), profile) {
+        for (key, value) in over {
+            match (key.as_str(), base.get_mut(key), value) {
+                ("hooks", Some(Value::Object(hooks)), Value::Object(more)) => {
+                    for (event, entries) in more {
+                        match (hooks.get_mut(event), entries) {
+                            (Some(Value::Array(have)), Value::Array(add)) => have.extend(add.iter().cloned()),
+                            _ => {
+                                hooks.insert(event.clone(), entries.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    out.to_string()
+}
+
+/// Claude's own memory folder of a repository in an account folder (the vendor's layout, D19):
+/// `projects/<the path with every character but letters and digits as ->/memory`.
+pub fn claude_memory_dir(account_dir: &Path, repo_root: &Path) -> PathBuf {
+    let slug: String = repo_root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    account_dir.join("projects").join(slug).join("memory")
+}
+
+/// A profile's environment, after everything else the caller adds (the project's GitHub
+/// account's token included): what it sets, and what it takes out.
+pub fn apply_profile_env(launch: &mut Launch, profile: &crate::profile::SessionProfile) {
+    for key in &profile.env_remove {
+        launch.env.remove(key);
+    }
+    for (key, value) in &profile.env_set {
+        launch.env.insert(key.clone(), value.clone());
+    }
+}
+
 pub fn launch(
     session: &Session,
     account: Option<&Account>,
     base_env: &HashMap<String, String>,
 ) -> Launch {
+    launch_with(session, account, base_env, None)
+}
+
+/// [`launch`] under a session profile (M22, the v2 engine with "profiles" on): its settings, flags
+/// and environment. With none, the launch is today's, byte for byte.
+pub fn launch_with(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+) -> Launch {
+    let restricted = profile.is_some_and(|p| p.origin != crate::profile::SessionOrigin::Person);
     let mut env = base_env.clone();
     env.insert("GLASSCODE_SESSION_ID".into(), session.id.clone());
     // Note: the fork injects no vendored CLI onto PATH — sessions run with the user's own PATH only.
@@ -343,7 +547,12 @@ pub fn launch(
             }
             // The Glasscode Browser's tools (on the Mac). Its flags take several values, so
             // they come before `--settings`, never right before the prompt.
-            args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id));
+            // Not for a session the manager drives: no signed-in browser for it (D28, M23), only
+            // a throwaway one of its project's sites when the project names any.
+            match profile.filter(|_| restricted) {
+                None => args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id)),
+                Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Claude, &session.id, &profile.browser_hosts)),
+            }
             args.extend(cli_args(AgentKind::Claude, config_dir.as_deref()));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
                 args.push("--model".into());
@@ -351,12 +560,16 @@ pub fn launch(
             }
             // The mode it was started with; later the person changes it there (Shift-Tab), so a
             // resumed conversation starts in Claude's own default again.
-            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists) {
+            // A session the manager drives never starts in bypass (its settings disable it too).
+            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists).filter(|m| !(restricted && *m == "bypassPermissions")) {
                 args.push("--permission-mode".into());
                 args.push(mode.into());
             }
+            if let Some(profile) = profile {
+                args.extend(profile.claude_args.iter().cloned());
+            }
             args.push("--settings".into());
-            args.push(claude_settings_arg(&session.id));
+            args.push(claude_settings_arg(&session.id, profile, base_env));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -374,24 +587,31 @@ pub fn launch(
             // without cmd.exe, as for Claude.
             let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
+            match profile.filter(|_| restricted) {
+                None => args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id)),
+                Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Codex, &session.id, &profile.browser_hosts)),
+            }
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
             // prompt is easy to miss in chat view.
-            ensure_codex_trusts(&codex_home, &session.worktree);
+            // Not for automation and quarantine sessions (trust-19): what a repository carries for
+            // Codex gets its prompt there.
+            if profile.is_none_or(|p| p.pretrust) {
+                ensure_codex_trusts(&codex_home, &session.worktree);
+            }
             args.extend(cli_args(AgentKind::Codex, Some(&codex_home)));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
                 args.push("--model".into());
                 args.push(model.to_string());
             }
-            match session.mode.as_deref() {
-                Some("full-auto" | "auto") => args.push("--full-auto".into()),
-                Some("read-only") => {
-                    args.push("--sandbox".into());
-                    args.push("read-only".into());
-                }
-                _ => {}
+            // The person's mode as before; a session the manager drives runs in its profile's
+            // permission profile instead, never with danger-full-access or the bypass.
+            if !restricted {
+                args.extend(codex_mode_args(session.mode.as_deref()));
+            }
+            if let Some(profile) = profile {
+                args.extend(profile.codex_args.iter().cloned());
             }
             match &session.agent_session_id {
                 Some(id) => {
@@ -410,50 +630,48 @@ pub fn launch(
     }
 }
 
-/// Run the agent once, non-interactively, and return what it prints to stdout. The local
-/// auto-reviewer uses this to get a pull-request overview without opening a session. It is
-/// read-only work: the agent may read files and run `gh`/`git`, and is given no session,
-/// hooks or browser. `config_dir` is the account's login folder, so it runs as the right
-/// account, exactly as a normal session does. The run is bounded to five minutes.
-pub fn headless(
+/// The Codex options for a session's mode. Codex 0.167 removed `--full-auto`, which was a short
+/// form of "the workspace-write sandbox, and the model asks when it needs to" (`--sandbox
+/// workspace-write --ask-for-approval on-request`); passing it made Codex exit before starting.
+fn codex_mode_args(mode: Option<&str>) -> Vec<String> {
+    let args: &[&str] = match mode {
+        Some("full-auto" | "auto") => &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+        Some("read-only") => &["--sandbox", "read-only"],
+        _ => &[],
+    };
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// The arguments of a headless run (after the program's own first words), under its profile.
+pub fn headless_args(agent: AgentKind, profile: &crate::profile::SessionProfile) -> Vec<String> {
+    match agent {
+        AgentKind::Claude => profile.claude_args.clone(),
+        AgentKind::Codex => profile.codex_args.clone(),
+        AgentKind::Shell => Vec::new(),
+    }
+}
+
+/// Run the agent once, non-interactively, under a headless profile (M23,
+/// `profile::headless_profile`): no command, file, web or MCP tool, with `input` on stdin as
+/// labelled data, and the answer as the profile binds it (Claude's JSON on stdout; Codex's last
+/// message in its answer file, `answer`). `config_dir` is the account's login folder, so it runs
+/// as that account. No GitHub token reaches it. The run is bounded to five minutes.
+pub fn headless_run(
     agent: AgentKind,
     config_dir: Option<&Path>,
-    prompt: &str,
+    profile: &crate::profile::SessionProfile,
+    input: &str,
+    answer: Option<&Path>,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
+    use std::io::Write as _;
     use std::process::Stdio;
-    let mut cmd = match agent {
-        AgentKind::Claude => {
-            let (program, first) = agent_program("claude", base_env);
-            let mut cmd = crate::sys::command(program);
-            cmd.args(first);
-            cmd.envs(base_env);
-            cmd.env("DISABLE_AUTOUPDATER", "1");
-            if let Some(dir) = config_dir {
-                cmd.env("CLAUDE_CONFIG_DIR", dir);
-            }
-            // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's
-            // diff, nothing that writes. Tools not listed are denied, never prompted.
-            cmd.args(["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"]);
-            cmd
-        }
-        AgentKind::Codex => {
-            let (program, first) = agent_program("codex", base_env);
-            let mut cmd = crate::sys::command(program);
-            cmd.args(first);
-            cmd.envs(base_env);
-            if let Some(dir) = config_dir {
-                cmd.env("CODEX_HOME", dir);
-            }
-            // `exec` is non-interactive; full-auto lets it run `gh` without stopping to ask.
-            cmd.args(["exec", "--full-auto", prompt]);
-            cmd
-        }
-        AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
-    };
-    cmd.current_dir(std::env::temp_dir());
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut cmd = headless_command(agent, config_dir, profile, base_env)?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
     let deadline = SystemTime::now() + std::time::Duration::from_secs(300);
     loop {
         if child.try_wait()?.is_some() {
@@ -461,7 +679,7 @@ pub fn headless(
         }
         if SystemTime::now() >= deadline {
             let _ = child.kill();
-            anyhow::bail!("review timed out after 5 minutes");
+            anyhow::bail!("the run timed out after 5 minutes");
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -469,7 +687,54 @@ pub fn headless(
     if !output.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    match answer.filter(|_| agent == AgentKind::Codex) {
+        Some(file) => Ok(std::fs::read_to_string(file)?.trim().to_string()),
+        None => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+    }
+}
+
+/// The command of a headless run ([`headless_run`]). It runs in the manager's work folder
+/// (`paths::manager_work_dir`), a folder of Glasscode's that no session writes, and never in a
+/// repository or a shared temporary folder: `claude -p` runs the hooks of its folder's
+/// `.claude/settings.json` and connects its `.mcp.json` servers without asking (exec-24).
+fn headless_command(agent: AgentKind, config_dir: Option<&Path>, profile: &crate::profile::SessionProfile, base_env: &HashMap<String, String>) -> anyhow::Result<std::process::Command> {
+    let (program, first) = match agent {
+        AgentKind::Claude => agent_program("claude", base_env),
+        AgentKind::Codex => agent_program("codex", base_env),
+        AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
+    };
+    let mut cmd = crate::sys::command(program);
+    cmd.args(first);
+    cmd.envs(base_env);
+    for key in &profile.env_remove {
+        cmd.env_remove(key);
+    }
+    match agent {
+        AgentKind::Claude => {
+            cmd.env("DISABLE_AUTOUPDATER", "1");
+            if let Some(dir) = config_dir {
+                cmd.env("CLAUDE_CONFIG_DIR", dir);
+            }
+        }
+        _ => {
+            if let Some(dir) = config_dir {
+                cmd.env("CODEX_HOME", dir);
+            }
+        }
+    }
+    cmd.args(headless_args(agent, profile));
+    let folder = crate::paths::manager_work_dir();
+    std::fs::create_dir_all(&folder)?;
+    // The profile's Claude settings (`disableAllHooks: true`) must reach the run, or the hooks of
+    // the account's own settings would run in it. They go as a file in the work folder, so no
+    // command line (or cmd.exe on Windows) has to carry the JSON.
+    if agent == AgentKind::Claude && profile.claude_settings.as_object().is_some_and(|o| !o.is_empty()) {
+        let file = folder.join(format!("{}-settings.json", profile.label));
+        std::fs::write(&file, profile.claude_settings.to_string())?;
+        cmd.arg("--settings").arg(&file);
+    }
+    cmd.current_dir(folder);
+    Ok(cmd)
 }
 
 /// A login run in a terminal: the CLI handles the browser sign-in itself.
@@ -516,6 +781,8 @@ pub struct HookUpdate {
     pub conversation_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub activity: Option<AgentActivity>,
+    /// The lines read, as they were (the journal's `HookIntake` takes them).
+    pub lines: Vec<String>,
 }
 
 /// Reads new hook events appended to a session's events file.
@@ -529,6 +796,22 @@ impl EventsTail {
         let path = events_file(session_id);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         Self { path, offset }
+    }
+
+    /// Read on from `offset`, where a reader stopped before a restart (the journal's cursors,
+    /// events-4), so the lines written meanwhile are read too. An offset past the file's end (it
+    /// was made again) starts at its end, as [`EventsTail::new`] does.
+    pub fn resume(session_id: &str, offset: Option<u64>) -> Self {
+        let mut tail = Self::new(session_id);
+        if let Some(offset) = offset.filter(|offset| *offset <= tail.offset) {
+            tail.offset = offset;
+        }
+        tail
+    }
+
+    /// Where it has read up to.
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 
     pub fn poll(&mut self) -> Option<HookUpdate> {
@@ -548,6 +831,7 @@ impl EventsTail {
         self.offset += consumed as u64;
         let mut update = HookUpdate::default();
         for line in text[..consumed].lines().filter(|l| !l.trim().is_empty()) {
+            update.lines.push(line.to_string());
             let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
             if let Some(id) = value.get("session_id").and_then(Value::as_str) {
                 update.conversation_id = Some(id.to_string());
@@ -564,6 +848,25 @@ impl EventsTail {
         }
         Some(update)
     }
+}
+
+/// The whole lines of a session's spool between two offsets (what a tail would have read there).
+pub fn spool_lines(session_id: &str, from: u64, to: u64) -> Vec<String> {
+    spool_lines_of(&events_file(session_id), from, to)
+}
+
+/// The whole lines of a file between two offsets.
+pub fn spool_lines_of(path: &Path, from: u64, to: u64) -> Vec<String> {
+    let Ok(mut file) = std::fs::File::open(path) else { return Vec::new() };
+    if to <= from || file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    if file.take(to - from).read_to_string(&mut text).is_err() {
+        return Vec::new();
+    }
+    let whole = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    text[..whole].lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()
 }
 
 /// How long Claude may take from its launch to its first hook event before Glasscode says that it
@@ -704,6 +1007,17 @@ pub fn codex_turn_event(line: &str) -> Option<CodexTurn> {
     }
 }
 
+/// A rollout line that is part of a turn's state (`task_started`, `task_complete`,
+/// `turn_aborted`, `error`), parsed; None for the rest.
+pub fn codex_turn_line(line: &str) -> Option<Value> {
+    if !["task_started", "task_complete", "turn_aborted", "\"error\""].iter().any(|kind| line.contains(kind)) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let kind = value["payload"]["type"].as_str()?;
+    (value["type"].as_str() == Some("event_msg") && matches!(kind, "task_started" | "task_complete" | "turn_aborted" | "error")).then_some(value)
+}
+
 /// How much of a rollout the first read takes: the turn that matters is at its end.
 const ROLLOUT_TAIL: u64 = 256 * 1024;
 
@@ -713,12 +1027,26 @@ pub struct RolloutTail {
     path: PathBuf,
     offset: u64,
     pub turn: CodexTurn,
+    /// The turn's own lines (`task_started`, `task_complete`, `turn_aborted`, `error`), kept for
+    /// the reader that asked for them ([`RolloutTail::keeping_events`], M30's turns).
+    events: Option<Vec<Value>>,
 }
 
 impl RolloutTail {
     /// A conversation that this launch started: its turns so far count.
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown }
+        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, events: None }
+    }
+
+    /// Keep each turn line it reads, for [`RolloutTail::take_events`].
+    pub fn keeping_events(mut self) -> Self {
+        self.events = Some(Vec::new());
+        self
+    }
+
+    /// The turn lines read since the last call.
+    pub fn take_events(&mut self) -> Vec<Value> {
+        self.events.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// A conversation that this launch resumed: a turn that an earlier run left open in the file
@@ -726,7 +1054,7 @@ impl RolloutTail {
     /// in case Codex writes it somewhere else).
     pub fn resumed(path: &Path) -> Self {
         let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown }
+        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, events: None }
     }
 
     /// Read what was added; true when the turn changed.
@@ -760,8 +1088,14 @@ impl RolloutTail {
             if std::mem::take(&mut cut) {
                 continue;
             }
-            if let Some(turn) = codex_turn_event(&String::from_utf8_lossy(&line)) {
+            let text = String::from_utf8_lossy(&line);
+            if let Some(turn) = codex_turn_event(&text) {
                 self.turn = turn;
+            }
+            if let Some(events) = self.events.as_mut()
+                && let Some(event) = codex_turn_line(&text)
+            {
+                events.push(event);
             }
         }
         self.offset = at;
@@ -817,6 +1151,58 @@ pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option
 
 #[cfg(test)]
 mod tests {
+
+    /// exec-24: every headless run (a study pass of moving in, an automatic review) starts in the
+    /// manager's work folder, never in a repository or a shared temporary folder, with the flags
+    /// that keep it to no tool and set its permission mode itself.
+    #[test]
+    fn every_headless_run_starts_in_the_work_folder() {
+        crate::paths::use_test_root();
+        let work = crate::paths::manager_work_dir();
+        let env: HashMap<String, String> = [("PATH".to_string(), String::new())].into();
+        for kind in [crate::profile::HeadlessKind::Study, crate::profile::HeadlessKind::AutoReview] {
+            for agent in [AgentKind::Claude, AgentKind::Codex] {
+                let profile = crate::profile::headless_profile(kind, agent, &serde_json::json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt"));
+                let cmd = headless_command(agent, None, &profile, &env).unwrap();
+                assert_eq!(cmd.get_current_dir(), Some(work.as_path()), "{kind:?} {agent:?}");
+                let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                let has = |pair: &[&str]| argv.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+                let wanted: &[&[&str]] = match agent {
+                    AgentKind::Claude => &[&["--permission-mode", "dontAsk"], &["--strict-mcp-config"], &["--tools", ""], &["--restricted"]],
+                    _ => &[&["--sandbox", "read-only"], &["--ephemeral"]],
+                };
+                for pair in wanted {
+                    assert!(has(pair), "{kind:?} {agent:?}: {pair:?} in {argv:?}");
+                }
+                // The profile's settings reach Claude, so the account's own hooks stay off.
+                if agent == AgentKind::Claude {
+                    let at = argv.iter().position(|a| a == "--settings").unwrap_or_else(|| panic!("{kind:?}: no --settings in {argv:?}"));
+                    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&argv[at + 1]).unwrap()).unwrap();
+                    assert_eq!(settings["disableAllHooks"], true, "{kind:?}");
+                } else {
+                    assert!(!argv.iter().any(|a| a == "--settings"), "{kind:?} {agent:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_modes_use_options_the_cli_still_has() {
+        let auto = ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"].map(String::from).to_vec();
+        assert_eq!(codex_mode_args(Some("full-auto")), auto);
+        assert_eq!(codex_mode_args(Some("auto")), auto);
+        assert_eq!(codex_mode_args(Some("read-only")), ["--sandbox", "read-only"].map(String::from).to_vec());
+        assert!(codex_mode_args(Some("default")).is_empty());
+        assert!(codex_mode_args(None).is_empty());
+        // The headless run is read-only with the network off now (M23, trust-m2).
+        let profile = crate::profile::headless_profile(crate::profile::HeadlessKind::AutoReview, AgentKind::Codex, &serde_json::json!({}), Path::new("/s.json"), Path::new("/a.txt"));
+        let headless = headless_args(AgentKind::Codex, &profile);
+        assert!(headless.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+        for args in [codex_mode_args(Some("full-auto")), codex_mode_args(Some("auto")), headless] {
+            assert!(!args.iter().any(|a| a == "--full-auto"), "codex 0.167 rejects --full-auto: {args:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -949,8 +1335,79 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_brief_is_a_second_session_start_hook_only_when_on() {
+        let off: Value = serde_json::from_str(&claude_hook_settings(None, false, false, false)).unwrap();
+        assert_eq!(off["hooks"]["SessionStart"][0]["hooks"].as_array().map(Vec::len), Some(1), "v1: as before");
+        let on: Value = serde_json::from_str(&claude_hook_settings(None, false, false, true)).unwrap();
+        let hooks = on["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0], off["hooks"]["SessionStart"][0]["hooks"][0]);
+        assert!(hooks[1]["command"].as_str().unwrap().ends_with("memory brief --hook"));
+        for event in ["UserPromptSubmit", "Stop", "Notification"] {
+            assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
+        }
+        // In a v2 home, by this program's path, as the other hooks.
+        let v2: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false, true)).unwrap();
+        let brief = v2["hooks"]["SessionStart"][0]["hooks"][1]["command"].as_str().unwrap().to_string();
+        if !cfg!(windows) {
+            assert_eq!(brief, "'/opt/Glass code/glasscode' cli memory brief --hook");
+        }
+    }
+
+    #[test]
+    fn in_a_v2_home_every_hook_is_one_write_of_glasscode_hook() {
+        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false, false)).unwrap();
+        let hooks = settings["hooks"].as_object().unwrap();
+        assert_eq!(hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["Notification", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].into_iter().collect());
+        for (event, hook) in hooks {
+            let hook = &hook[0]["hooks"][0];
+            assert_eq!(hook["timeout"], 10, "{event}");
+            if cfg!(windows) {
+                assert_eq!(hook["command"], "glasscode hook --stamp", "{event}");
+            } else {
+                assert_eq!(hook["command"], "'/opt/Glass code/glasscode' cli hook --stamp", "{event}");
+            }
+        }
+        assert_eq!(settings["disableAllHooks"], false);
+        // With "turn_hooks", P05's hooks too; never without the v2 engine.
+        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true, false, false)).unwrap();
+        assert_eq!(turns["hooks"].as_object().unwrap().len(), 5 + TURN_HOOKS.len());
+        assert!(TURN_HOOKS.iter().all(|event| turns["hooks"][event][0]["hooks"][0]["command"] == turns["hooks"]["Stop"][0]["hooks"][0]["command"]));
+        assert_eq!(hooks.len(), 5, "not without turn_hooks");
+        // On a Claude that knows it, `StopFailure` reports in every v2 home (M32's failed turns).
+        let failure: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), false, true, false)).unwrap();
+        assert_eq!(failure["hooks"].as_object().unwrap().len(), 6);
+        assert_eq!(failure["hooks"]["StopFailure"], failure["hooks"]["Stop"]);
+    }
+
+    /// The failure hook follows the Claude on the session's PATH: at the minimum version it knows
+    /// `StopFailure`; an older one, or one whose version cannot be read, does not get it.
+    #[cfg(unix)]
+    #[test]
+    fn stop_failure_is_hooked_only_on_a_claude_that_knows_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for (says, knows) in [(format!("{} (Claude Code)", crate::versions::MIN_CLAUDE), true), ("2.1.200 (Claude Code)".to_string(), false), ("no version here".to_string(), false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let program = dir.path().join("claude");
+            std::fs::write(&program, format!("#!/bin/sh\necho '{says}'\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env: HashMap<String, String> = [("PATH".to_string(), dir.path().display().to_string())].into();
+            // Not known yet: no hook, and a read starts in the background; then it is known.
+            assert!(!claude_knows_stop_failure(&env), "{says}: nothing runs on the launch's thread");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while knows && crate::versions::cached_version(Path::new("claude"), &env).is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            crate::versions::program_version(Path::new("claude"), &env);
+            assert_eq!(claude_knows_stop_failure(&env), knows, "{says}");
+        }
+        assert!(!claude_knows_stop_failure(&HashMap::new()), "no Claude at all");
+    }
+
+    #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings()).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true, true, false)).unwrap();
+        assert!(settings.get("disableAllHooks").is_none());
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
         if cfg!(windows) {

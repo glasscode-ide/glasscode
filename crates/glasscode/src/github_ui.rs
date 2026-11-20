@@ -22,7 +22,7 @@ pub struct GithubUi {
     pub details: HashMap<PrKey, PrDetails>,
     pub loading: HashSet<PrKey>,
     pub errors: HashMap<PrKey, String>,
-    fetched: HashMap<PrKey, Instant>,
+    pub(crate) fetched: HashMap<PrKey, Instant>,
     /// Sections the developer opened or closed, by "<repo>#<n>:<section>".
     open: HashMap<String, bool>,
     threads_open: HashSet<String>,
@@ -203,8 +203,10 @@ impl Workspace {
         Some(Target { repo: status.repo.clone()?, number: status.pr.as_ref()?.number, worktree: session.worktree.clone() })
     }
 
-    /// Every tick: keep the shown PR fresh while its Checks or Pull request tab is open (every
-    /// 30 s).
+    /// Every tick: keep the shown PR fresh while its Checks or Pull request tab is open: every
+    /// 15 s while its checks run or GitHub works out whether it merges, else every minute (four
+    /// times slower while Glasscode is not the active app), and at once when the status refresh
+    /// saw its checks change.
     pub fn gh_tick(&mut self, cx: &mut Context<Self>) {
         // Debug builds: GLASSCODE_DEBUG_RIGHT_TAB=files|changes|checks|pr opens that tab once;
         // files:changed shows only changed files, files:<path> reveals that file; checks:sample
@@ -247,7 +249,22 @@ impl Workspace {
         }
         let Some(target) = self.gh_target() else { return };
         let key = (target.repo.clone(), target.number);
-        let stale = self.gh.fetched.get(&key).is_none_or(|t| t.elapsed() > Duration::from_secs(30));
+        let details = self.gh.details.get(&key);
+        let settled = details.is_some_and(|d| !d.checks.iter().any(|c| c.state() == github::CheckState::Running) && d.mergeable != "UNKNOWN");
+        let fresh_for = Duration::from_secs(match (settled, self.window_active) {
+            (false, true) => 15,
+            (true, true) | (false, false) => 60,
+            (true, false) => 240,
+        });
+        let fetched = self.gh.fetched.get(&key).copied();
+        let mut stale = fetched.is_none_or(|t| t.elapsed() > fresh_for);
+        // The status refresh saw other checks than the panel shows: read it again now.
+        if let (Some(details), Some(at)) = (details, fetched) {
+            let seen = self.active_session().and_then(|s| self.prs.map.get(&s.id)).filter(|s| s.confirmed).and_then(|s| s.ci.as_ref());
+            if seen.is_some_and(|ci| ci.checks != details.checks) && at.elapsed() > Duration::from_secs(10) {
+                stale = true;
+            }
+        }
         if stale && !self.gh.loading.contains(&key) {
             self.gh_fetch(cx);
         }
@@ -262,7 +279,7 @@ impl Workspace {
         let repo = "acme/app".to_string();
         let pr = serde_json::json!({ "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "headRefName": session.branch, "baseRefName": "main", "state": "OPEN" });
         let Ok(pr) = serde_json::from_value::<github::PullRequest>(pr) else { return };
-        self.prs.map.insert(session.id.clone(), crate::pr_status::PrStatus { repo: Some(repo.clone()), branch: session.branch.clone(), pr: Some(pr), error: None, ci: None });
+        self.prs.map.insert(session.id.clone(), crate::pr_status::PrStatus { repo: Some(repo.clone()), branch: session.branch.clone(), pr: Some(pr), error: None, ci: None, confirmed: true });
         let key = (repo, 42);
         self.gh.fetched.insert(key.clone(), Instant::now());
         if self.gh.details.contains_key(&key) {
@@ -310,6 +327,11 @@ impl Workspace {
                 match result {
                     Ok(details) => {
                         this.gh.errors.remove(&key);
+                        // Kept on disk with the statuses (`pr_status`) when it changed.
+                        let same = this.gh.details.get(&key).is_some_and(|old| serde_json::to_value(old).ok() == serde_json::to_value(&details).ok());
+                        if !same {
+                            this.prs.dirty = true;
+                        }
                         this.gh.details.insert(key, details);
                     }
                     Err(err) => {
@@ -352,7 +374,8 @@ impl Workspace {
     }
 
     fn gh_is_open(&self, key: &PrKey, section: &str, default: bool) -> bool {
-        self.gh.expand.as_deref().is_some_and(|e| e == section || (e == "all" && section != "passed")) || self.gh.open.get(&format!("{}#{}:{section}", key.0, key.1)).copied().unwrap_or(default)
+        // A section the manager points at is open while it does.
+        self.manager_points_at(section) || self.gh.expand.as_deref().is_some_and(|e| e == section || (e == "all" && section != "passed")) || self.gh.open.get(&format!("{}#{}:{section}", key.0, key.1)).copied().unwrap_or(default)
     }
 
     fn gh_toggle(&mut self, key: &PrKey, section: &str, current: bool, cx: &mut Context<Self>) {
@@ -372,6 +395,8 @@ impl Workspace {
             return;
         }
         let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Review comments are other people's words: recorded as Glasscode's before they are typed.
+        glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::Review), &line, Some(session_id), None);
         terminal.update(cx, |t, cx| t.write(line.into_bytes(), cx));
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(Duration::from_millis(200)).await;
@@ -599,7 +624,7 @@ impl Workspace {
 
         // --- sections: open by themselves only when they need you ---
         let section = |id: &'static str, open: bool, title: &'static str, summary: String, color: Hsla| {
-            div()
+            let heading = div()
                 .id(SharedString::from(format!("gh-section-{id}")))
                 .flex()
                 .items_baseline()
@@ -609,7 +634,9 @@ impl Workspace {
                 .cursor_pointer()
                 .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).text_color(color).child(summary))
-                .child(div().text_size(theme::sz(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }))
+                .child(div().text_size(theme::sz(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }));
+            // Marked while the manager points at this section.
+            self.manager_mark(id, heading)
         };
         let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
 

@@ -1,6 +1,6 @@
 // Provision (or update) the Glasscode agent in your ElevenLabs account.
 //   ELEVENLABS_API_KEY=... node scripts/create-agent.mjs
-// Optional: TEDDY_VOICE_ID=<voice> to pin a voice, TEDDY_LLM=<model> to pick the brain.
+// Optional: GLASSCODE_VOICE_ID=<voice> to pin a voice, GLASSCODE_LLM=<model> to pick the brain.
 // Writes the resulting agentId into voice.config.json so the server/app pick it up.
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,7 @@ if (!KEY) {
 const headers = { 'xi-api-key': KEY, 'content-type': 'application/json' };
 
 async function resolveVoice() {
-  const pinned = process.env.TEDDY_VOICE_ID || process.env.LUNA_VOICE_ID;
+  const pinned = process.env.GLASSCODE_VOICE_ID;
   if (pinned) return pinned;
   const r = await fetch(`${EL_API}/v1/voices`, { headers });
   if (!r.ok) throw new Error(`list voices failed: ${r.status} ${await r.text()}`);

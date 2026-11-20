@@ -262,6 +262,12 @@ impl TicketsUi {
 }
 
 impl Workspace {
+    /// The GitHub repository of a project's folder, as the last background scan read it (none
+    /// before it has run): what the `glasscode` command's `ops::targets` name, never a git call.
+    pub(crate) fn tickets_repo_of(&self, root: &std::path::Path) -> Option<String> {
+        repo_of(root, self.tickets.repos.as_deref().unwrap_or_default())
+    }
+
     // ----- which provider, which project -------------------------------------------------
 
     /// GitHub repository slugs of the git projects, in project order, from the last scan.

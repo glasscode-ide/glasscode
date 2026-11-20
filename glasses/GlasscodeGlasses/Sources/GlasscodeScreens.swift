@@ -1,6 +1,6 @@
 import MWDATDisplay
 
-// Builds the root FlexBox for each screen of the Glasscode browse flow. One `send()`
+// Builds the root FlexBox for each screen of the browse flow (the manager first, then projects). One `send()`
 // per state change; the selected row is the one the neural band is pointing at.
 //
 // This file imports only MWDATDisplay (no SwiftUI) so the DSL names `Text`/`Button`
@@ -10,20 +10,26 @@ enum GlasscodeScreens {
 
     // MARK: list screens
 
-    static func projects(_ items: [GlasscodeProject], selected: Int) -> FlexBox {
-        FlexBox(direction: .column, spacing: 10) {
-            crumb("Projects")
-            if items.isEmpty {
+    /// Home: the manager first (talk with it, today's update), then the projects. `notice`
+    /// says why the manager is not there when it is not ("Manager is off — …"); `banner` is a
+    /// note about the last thing done ("Hung up").
+    static func home(crumb title: String, notice: String, banner: String, rows: [GlasscodeRow]) -> FlexBox {
+        let selected = rows.firstIndex { $0.selected } ?? 0
+        return FlexBox(direction: .column, spacing: 10) {
+            crumb(title)
+            if !notice.isEmpty { note(notice) }
+            if !banner.isEmpty { hint(banner) }
+            if rows.isEmpty {
                 hint("No projects yet")
             } else {
-                let window = windowed(items.count, selected)
+                let window = windowed(rows.count, selected)
                 for i in window {
-                    row(prefix: i == selected,
-                        title: items[i].name,
-                        subtitle: subtitleFor(items[i]),
-                        selected: i == selected)
+                    row(prefix: rows[i].selected,
+                        title: rows[i].title,
+                        subtitle: rows[i].subtitle,
+                        selected: rows[i].selected)
                 }
-                if items.count > window.count { hint("\(items.count) projects · swipe to scroll") }
+                if rows.count > window.count { hint("\(rows.count) rows · swipe to scroll") }
             }
             footer("swipe ▲▼ move · ▶ open")
         }
@@ -50,18 +56,19 @@ enum GlasscodeScreens {
 
     // MARK: session actions (Voice / Talk)
 
-    static func sessionActions(title: String, context: String, selected: Int) -> FlexBox {
+    static func sessionActions(title: String, context: String, talkDetail: String, banner: String, selected: Int) -> FlexBox {
         FlexBox(direction: .column, spacing: 10) {
             crumb(title)
             FlexBox(direction: .column, spacing: 4) {
-                Text("Glasscode has this session's context", style: .meta, color: .secondary)
+                Text("Latest in this session", style: .meta, color: .secondary)
                 Text(context, style: .body)
             }
             .padding(14)
             .background(.card)
 
+            if !banner.isEmpty { hint(banner) }
             action(icon: "🎙", name: "Voice — free", detail: "Speak, it goes to the thread", selected: selected == 0)
-            action(icon: "💬", name: "Talk — live", detail: "Discuss with Glasscode", selected: selected == 1)
+            action(icon: "💬", name: "Talk — live", detail: talkDetail, selected: selected == 1)
             footer("swipe ▲▼ choose · ▶ start · ◀ back")
         }
     }
@@ -73,7 +80,7 @@ enum GlasscodeScreens {
             crumb("\(session) ▸ Voice")
             FlexBox(direction: .column, spacing: 6) {
                 Text(listening ? "● Listening — free" : "Voice", style: .heading)
-                Text(text.isEmpty ? "Speak, then pinch to send to the thread." : text, style: .body)
+                Text(text.isEmpty ? "Speak, then swipe ▶ to send to the thread." : text, style: .body)
             }
             .padding(16)
             .background(.card)
@@ -81,16 +88,34 @@ enum GlasscodeScreens {
         }
     }
 
-    static func talk(session: String, line: String, billing: String) -> FlexBox {
+    /// A talk with the manager: what the room is doing (listening / thinking / speaking), what
+    /// it heard, and the caption of what the manager says.
+    static func managerTalk(crumb title: String, state: String, heard: String, caption: String, foot: String) -> FlexBox {
         FlexBox(direction: .column, spacing: 10) {
-            crumb("\(session) ▸ Talk · \(billing)")
+            crumb(title)
             FlexBox(direction: .column, spacing: 6) {
-                Text("Live with Glasscode", style: .heading)
-                Text(line.isEmpty ? "Ask about this session, or say \u{201C}jump to…\u{201D}." : line, style: .body)
+                Text(state, style: .heading)
+                if !heard.isEmpty { Text(clip(heard, 140), style: .meta, color: .secondary) }
+                if !caption.isEmpty { Text(clip(caption, 280), style: .body) }
             }
             .padding(16)
             .background(.card)
-            footer("swipe ◀ to hang up")
+            footer(foot)
+        }
+    }
+
+    /// Today's update: one line at a time ("2 of 7"), with the voice's state under the title.
+    static func brief(crumb title: String, title heading: String, state: String, text: String, foot: String) -> FlexBox {
+        FlexBox(direction: .column, spacing: 10) {
+            crumb(title)
+            FlexBox(direction: .column, spacing: 6) {
+                Text(heading, style: .heading)
+                if !state.isEmpty { Text(state, style: .meta, color: .secondary) }
+                Text(clip(text, 280), style: .body)
+            }
+            .padding(16)
+            .background(.card)
+            footer(foot)
         }
     }
 
@@ -125,6 +150,18 @@ enum GlasscodeScreens {
         FlexBox(direction: .column) { Text(text, style: .meta, color: .secondary) }.padding(6)
     }
 
+    /// A plain sentence in a card of its own (why the manager is not there).
+    private static func note(_ text: String) -> FlexBox {
+        FlexBox(direction: .column) { Text(text, style: .meta, color: .secondary) }
+            .padding(12)
+            .background(.card)
+    }
+
+    /// The lens has room for a few lines: keep the start of a long text.
+    private static func clip(_ text: String, _ limit: Int) -> String {
+        text.count <= limit ? text : String(text.prefix(limit - 1)) + "…"
+    }
+
     private static func row(prefix selected: Bool, title: String, subtitle: String?, selected rowSelected: Bool) -> FlexBox {
         FlexBox(direction: .column, spacing: 2) {
             Text((rowSelected ? "▸ " : "  ") + title, style: .body)
@@ -152,12 +189,5 @@ enum GlasscodeScreens {
         if start < 0 { start = 0 }
         if start + maxRows > count { start = count - maxRows }
         return Array(start..<(start + maxRows))
-    }
-
-    private static func subtitleFor(_ p: GlasscodeProject) -> String? {
-        var parts: [String] = []
-        if let repo = p.repo, !repo.isEmpty { parts.append(repo) }
-        parts.append("\(p.sessionCount) session\(p.sessionCount == 1 ? "" : "s")")
-        return parts.joined(separator: " · ")
     }
 }

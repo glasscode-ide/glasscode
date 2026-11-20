@@ -115,6 +115,11 @@ impl Voice {
 impl Workspace {
     /// How a session shows now: its own switch, else Themes › "Sessions open as" (a shell is
     /// always its terminal).
+    /// The text selected in a session's Chat view, if any.
+    pub(crate) fn chat_view_selection(&self, session: &str) -> Option<String> {
+        self.chat.panes.get(session).and_then(|pane| pane.sel.copied())
+    }
+
     pub fn session_view(&self, session: &Session) -> SessionView {
         if session.agent == AgentKind::Shell {
             return SessionView::Terminal;
@@ -396,6 +401,7 @@ impl Workspace {
         let Some(session) = self.state.session(id).cloned() else { return };
         let Some(pane) = self.chat.panes.get(id) else { return };
         let text = pane.composer.read(cx).text();
+        let untyped = pane.composer.read(cx).typing().within(0..text.trim_end().len());
         let attached = pane.attached;
         if text.trim().is_empty() && attached == 0 {
             return;
@@ -424,6 +430,11 @@ impl Workspace {
             return;
         }
         let message = text.trim_end().to_string();
+        // Typed in the Chat view's box: the person's words, where they typed them, recorded before
+        // they reach the agent (D1).
+        if !message.trim().is_empty() {
+            glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ChatView), &message, &untyped, Some(id), None);
+        }
         let claude = session.agent == AgentKind::Claude;
         let sid = id.to_string();
         cx.spawn(async move |this, cx| {
@@ -834,6 +845,8 @@ impl Workspace {
             .then(|| std::fs::read(glasscode_core::usage::limits_file(&id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()))
             .flatten();
         let ws = cx.entity().downgrade();
+        // The manager points at the agent's last message ("<name> is pointing here").
+        let pointing = self.manager_points_at("reply").then(|| self.state.manager.name.clone());
         let pane = self.chat.panes.get_mut(&id).unwrap();
         // Stay at the newest message unless the person scrolled up (back at the bottom, it
         // follows again).
@@ -910,12 +923,18 @@ impl Workspace {
                     let shown_from = rows.get(hidden).map(first_entry);
                     unanswered = log.unanswered.filter(|at| shown_from.is_none_or(|from| *at >= from));
                 }
-                for row in rows.into_iter().skip(hidden) {
+                // The agent's last message is marked while the manager points at it.
+                let pointed_at = pointing.as_ref().and_then(|_| rows.iter().rposition(|r| matches!(r, Row::One(i) if matches!(log.entries[*i], Entry::Text(_)))));
+                for (n, row) in rows.into_iter().enumerate().skip(hidden) {
                     if unanswered.is_some_and(|at| first_entry(&row) >= at) {
                         items.push(unanswered_notice(&id, sel, cx));
                         unanswered = None;
                     }
-                    items.push(render_row(&row, log, open, images, sel, &id, ws.clone(), cx));
+                    let item = render_row(&row, log, open, images, sel, &id, ws.clone(), cx);
+                    items.push(match &pointing {
+                        Some(name) if pointed_at == Some(n) => crate::manager_view::pointed(name, item, false),
+                        _ => item,
+                    });
                 }
                 if unanswered.is_some() {
                     items.push(unanswered_notice(&id, sel, cx));
@@ -1007,7 +1026,7 @@ impl Workspace {
         let waiting = (card.is_none() && !working && terminal.is_some() && prompt::has_live_menu(&tail))
             .then(|| self.render_needs_input(&id, agent, window, cx));
         // What this session's agent asked Glasscode to do and waits for the person to allow.
-        let asks: Vec<AnyElement> = self.control.pending_for(&id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
+        let asks: Vec<AnyElement> = self.control.pending_for(&id).into_iter().map(|a| crate::today_ui::render_approval(a, true, self.control.expanded.contains(&a.id), cx)).collect();
         let footer = self.render_composer(&id, agent, &composer, mode, model, context, terminal.is_some(), cx);
         let scroll = pane.scroll.clone();
         let (wheel_id, latest_id) = (id.clone(), id.clone());
@@ -1404,6 +1423,7 @@ impl Workspace {
                         // surfaces right here as buttons (the chat polls the screen) — no need
                         // to leave for the terminal.
                         if let Some(t) = this.terminals.get(&model_id).cloned() {
+                            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), "/model", Some(&model_id), None);
                             t.update(cx, |t, cx| t.paste_text("/model", cx));
                             cx.spawn(async move |_, cx| {
                                 cx.background_executor().timer(Duration::from_millis(150)).await;
@@ -1590,7 +1610,7 @@ fn spinner_line(line: &str) -> Option<String> {
 }
 
 /// Claude's mode, from its footer: "⏵⏵ auto mode on (shift+tab to cycle)" → "Auto mode".
-fn mode_line(tail: &str) -> Option<String> {
+pub(crate) fn mode_line(tail: &str) -> Option<String> {
     let lines: Vec<&str> = tail.lines().rev().filter(|l| !l.trim().is_empty()).take(8).collect();
     for line in &lines {
         let l = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
@@ -1957,7 +1977,7 @@ fn detail_box(lines: &[Line], sel: &mut Selection) -> AnyElement {
 }
 
 /// An agent's reply: Markdown in the reading font, code in chips and boxes.
-fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>) -> AnyElement {
+pub(crate) fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>) -> AnyElement {
     let size = theme::chat_text_size();
     let blocks = markdown::parse(text);
     let _ = ws;

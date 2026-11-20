@@ -40,8 +40,29 @@ fn owners_dir() -> PathBuf {
     dir().join("tabs")
 }
 
-pub fn port() -> u16 {
-    std::env::var("GLASSCODE_BROWSER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9333)
+/// The DevTools port of the running browser: a new random one each launch (trust-m1), which
+/// Chrome writes into its profile folder (`DevToolsActivePort`, with the browser's secret path);
+/// that folder is the Cache class, which sessions are denied. `GLASSCODE_BROWSER_PORT` fixes it
+/// (tests).
+pub fn port() -> Option<u16> {
+    if let Some(port) = std::env::var("GLASSCODE_BROWSER_PORT").ok().and_then(|p| p.parse().ok()) {
+        return Some(port);
+    }
+    active_port().map(|(port, _)| port)
+}
+
+/// `DevToolsActivePort` of the profile: the port, and the browser's WebSocket path (its secret).
+fn active_port() -> Option<(u16, String)> {
+    let text = std::fs::read_to_string(profile_dir().join("DevToolsActivePort")).ok()?;
+    let mut lines = text.lines();
+    let port = lines.next()?.trim().parse().ok()?;
+    let path = lines.next().unwrap_or_default().trim().to_string();
+    Some((port, path))
+}
+
+/// The `--remote-debugging-port` a launch asks for: 0, a random one, unless a test fixes it.
+fn launch_port() -> u16 {
+    std::env::var("GLASSCODE_BROWSER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0)
 }
 
 /// The browser it runs on, as the Browser dialog and messages name it.
@@ -95,13 +116,21 @@ pub struct Running {
 
 fn http_json(path: &str) -> Option<Value> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(800)).build();
-    let response = agent.get(&format!("http://127.0.0.1:{}{path}", port())).call().ok()?;
+    let response = agent.get(&format!("http://127.0.0.1:{}{path}", port()?)).call().ok()?;
     serde_json::from_str(&response.into_string().ok()?).ok()
 }
 
 pub fn running() -> Option<Running> {
     let version = http_json("/json/version")?;
-    Some(Running { ws_url: version["webSocketDebuggerUrl"].as_str()?.to_string(), product: version["Browser"].as_str().unwrap_or_default().to_string() })
+    let ws_url = version["webSocketDebuggerUrl"].as_str()?.to_string();
+    // The browser this launch wrote down, at its secret path; not whatever answers on a port.
+    if std::env::var_os("GLASSCODE_BROWSER_PORT").is_none() {
+        let (port, path) = active_port()?;
+        if !path.is_empty() && ws_url != format!("ws://127.0.0.1:{port}{path}") {
+            return None;
+        }
+    }
+    Some(Running { ws_url, product: version["Browser"].as_str().unwrap_or_default().to_string() })
 }
 
 /// A tab open in it, and the session it belongs to (none: the person's own).
@@ -185,6 +214,8 @@ pub fn ensure_running() -> anyhow::Result<Running> {
         return Ok(r);
     }
     forget_closed_tabs(&[]);
+    // The last launch's port and secret: a new launch writes its own.
+    let _ = std::fs::remove_file(profile_dir().join("DevToolsActivePort"));
     let chrome = chrome().with_context(|| format!("{FULL_NAME} is not installed (the Glasscode Browser runs on it)"))?;
     std::fs::create_dir_all(profile_dir().join("Default"))?;
     // A name and colour of its own, so its window is not mistaken for the person's Chrome.
@@ -194,7 +225,7 @@ pub fn ensure_running() -> anyhow::Result<Running> {
     }
     let mut args = vec![
         format!("--user-data-dir={}", profile_dir().display()),
-        format!("--remote-debugging-port={}", port()),
+        format!("--remote-debugging-port={}", launch_port()),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--disable-features=ChromeWhatsNewUI".to_string(),
@@ -228,7 +259,7 @@ pub fn ensure_running() -> anyhow::Result<Running> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    bail!("the Glasscode Browser did not come up on port {}", port())
+    bail!("the Glasscode Browser did not come up (no DevTools port in {})", profile_dir().display())
 }
 
 /// Quit it (its profile, and so its sign-ins, stay).
@@ -281,7 +312,40 @@ pub fn write_mcp_config(exe: &std::path::Path) -> anyhow::Result<PathBuf> {
 /// Extra arguments for an agent on this Mac or PC: the browser tools, usable without asking,
 /// told which session they serve (its tab is labelled with it).
 /// Nothing when it is switched off or not set up.
+/// Whether `url` is on one of `hosts` (a host or its subdomains: `docs.rs` covers
+/// `www.docs.rs`), over http or https. A page with no network (`about:blank`, `data:`) is always
+/// on it; anything else that is not one of them is not.
+pub fn host_allowed(hosts: &[String], url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with("about:") || url.starts_with("data:") || url.starts_with("blob:") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // No `user@`, and the port is not the host.
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = if host.starts_with('[') { host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or_default().to_string() };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !host.is_empty()
+        && hosts.iter().map(|h| h.trim().trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).any(|h| host == h || host.ends_with(&format!(".{h}")))
+}
+
+/// The browser of a session the person does not drive (M23, D28): the same tools, in a throwaway
+/// context with no sign-ins that reaches only `hosts`. Nothing when there are none.
+pub fn throwaway_args(agent: crate::model::AgentKind, session: &str, hosts: &[String]) -> Vec<String> {
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let joined = hosts.join(",");
+    server_args(agent, &["browser-mcp", "--session", session, "--hosts", &joined])
+}
+
 pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> {
+    server_args(agent, &["browser-mcp", "--session", session])
+}
+
+/// The agent's arguments that start the browser's MCP server with `args`.
+fn server_args(agent: crate::model::AgentKind, args: &[&str]) -> Vec<String> {
     let config = mcp_config_file();
     if !cfg!(any(target_os = "macos", windows)) || !agents_enabled() {
         return Vec::new();
@@ -289,7 +353,6 @@ pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> 
     let Some(command) = std::fs::read_to_string(&config).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["mcpServers"]["glasscode-browser"]["command"].as_str().map(str::to_string)) else {
         return Vec::new();
     };
-    let args = ["browser-mcp", "--session", session];
     match agent {
         crate::model::AgentKind::Claude => {
             let config = serde_json::json!({ "mcpServers": { "glasscode-browser": { "type": "stdio", "command": command, "args": args } } });
@@ -391,12 +454,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _root = SetVar::new("GLASSCODE_HOME", home.path());
         let _headless = SetVar::new("GLASSCODE_BROWSER_HEADLESS", "1");
-        assert!(running().is_none(), "something answers on port {} already; this test starts a browser of its own", port());
+        assert!(running().is_none(), "something answers on port {:?} already; this test starts a browser of its own", port());
         let started = Instant::now();
         let browser = ensure_running().unwrap();
         let took = started.elapsed();
         assert!(took < Duration::from_secs(20), "{took:?}");
-        assert!(browser.ws_url.starts_with(&format!("ws://127.0.0.1:{}/", port())), "{}", browser.ws_url);
+        assert!(browser.ws_url.starts_with(&format!("ws://127.0.0.1:{}/", port().unwrap())), "{}", browser.ws_url);
         assert!(profile_dir().starts_with(home.path()) && profile_dir().is_dir());
         // A page, as an agent's tab opens.
         cdp::once(&browser.ws_url, "Target.createTarget", serde_json::json!({ "url": "about:blank", "background": true })).unwrap();
@@ -404,5 +467,47 @@ mod tests {
         reset().unwrap();
         assert!(running().is_none(), "it still answers after reset");
         assert!(!profile_dir().exists(), "its profile is still there");
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    /// trust-m1: the DevTools port is a new random one each launch, written only into the
+    /// profile folder with the browser's secret path; whatever answers on another port, or at
+    /// another path, is not taken for the Glasscode Browser.
+    #[test]
+    fn devtools_requires_secret() {
+        let _home = crate::testkit::home::Home::new();
+        // SAFETY: the core tests run one at a time.
+        unsafe { std::env::remove_var("GLASSCODE_BROWSER_PORT") };
+        assert_eq!(launch_port(), 0, "a random port, not a fixed open one");
+        assert_eq!(port(), None, "no launch wrote one");
+        std::fs::create_dir_all(profile_dir()).unwrap();
+        std::fs::write(profile_dir().join("DevToolsActivePort"), "54321\n/devtools/browser/0b1c-secret\n").unwrap();
+        assert_eq!(port(), Some(54321));
+        assert_eq!(active_port().unwrap().1, "/devtools/browser/0b1c-secret");
+        // Nothing listens there: not running, and no guess at 9333.
+        assert!(running().is_none());
+        assert!(crate::paths::class_of(&profile_dir().join("DevToolsActivePort")).class() == Some(crate::paths::PathClass::Cache), "sessions are denied it");
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// M23: a host or its subdomains, over http or https; no other scheme, no lookalike.
+    #[test]
+    fn hosts_are_kept_to() {
+        let hosts = vec!["docs.rs".to_string(), "*.example.org".to_string()];
+        for ok in ["https://docs.rs/", "https://www.docs.rs/x?y#z", "http://DOCS.RS:8080/", "https://a.b.example.org/", "about:blank", "data:text/html,hi"] {
+            assert!(host_allowed(&hosts, ok), "{ok}");
+        }
+        for no in ["https://notdocs.rs/", "https://docs.rs.evil.com/", "https://evil.com/?u=https://docs.rs", "https://docs.rs@evil.com/", "file:///etc/passwd", "javascript:alert(1)", "ftp://docs.rs/"] {
+            assert!(!host_allowed(&hosts, no), "{no}");
+        }
+        assert!(!host_allowed(&[], "https://docs.rs/"));
     }
 }

@@ -1,0 +1,205 @@
+//! An op's arguments as a JSON schema, for the manager's typed tools (M34) and for help: the
+//! shape of the op's own JSON, which `parse` makes from the command line.
+
+use serde_json::{Map, Value, json};
+
+use super::spec::{ArgKind, ArgSpec, OpSpec};
+use crate::board::{List, Section};
+
+/// `{"type": "object", "properties": {…}, "required": […]}`, with what the op does as its
+/// description. Words only a person types ("fri", "the start of an id") are not in it: a
+/// typed caller sends the values `parse` would have made of them.
+pub fn json_schema(spec: &OpSpec) -> Value {
+    let mut properties = Map::new();
+    for arg in spec.args {
+        properties.insert(arg.name.to_string(), property(arg));
+    }
+    if spec.dry_runs() {
+        properties.insert("dry_run".into(), json!({ "type": "boolean", "description": "say what it would do, and do nothing (the v2 engine's)" }));
+    }
+    let required: Vec<&str> = spec.args.iter().filter(|a| a.required).map(|a| a.name).collect();
+    json!({
+        "type": "object",
+        "description": description(spec),
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+/// What an op does, as a typed caller reads it (a tool's description): its command words, which
+/// name what it acts on, then its summary ("session open: show it in the window"), so the nouns
+/// an op is chosen by come first (ops-23).
+pub fn description(spec: &OpSpec) -> String {
+    format!("{}: {}", spec.cli.join(" "), spec.summary)
+}
+
+fn property(arg: &ArgSpec) -> Value {
+    let (mut p, typed) = match arg.kind {
+        ArgKind::Word | ArgKind::Text | ArgKind::Project | ArgKind::Task | ArgKind::Ticket | ArgKind::Every => (json!({ "type": "string" }), None),
+        ArgKind::Switch => (json!({ "type": "boolean" }), None),
+        ArgKind::Count | ArgKind::Number => (json!({ "type": "integer", "minimum": 0 }), None),
+        ArgKind::Pr => (json!({ "type": "integer", "minimum": 1 }), Some("its number")),
+        ArgKind::Day => (json!({ "type": ["string", "null"], "format": "date" }), Some("YYYY-MM-DD, or null for none")),
+        ArgKind::Until => (json!({ "type": "string", "format": "date" }), Some("YYYY-MM-DD, after today")),
+        ArgKind::Session => (json!({ "type": "string" }), Some("its whole id")),
+        ArgKind::List => (json!({ "type": "string", "enum": [List::Todo, List::Asked, List::Waiting, List::Later] }), None),
+        ArgKind::Section => (json!({ "type": "string", "enum": Section::ALL.iter().map(|s| s.key()).collect::<Vec<_>>() }), None),
+        ArgKind::Movable => (json!({ "type": "string", "enum": Section::ALL.iter().filter(|s| s.movable()).map(|s| s.key()).collect::<Vec<_>>() }), None),
+        ArgKind::Many => (json!({ "type": "array", "items": { "type": "string" } }), None),
+    };
+    // What a typed caller sends where a person types words ("fri", the start of an id).
+    p["description"] = json!(match typed {
+        Some(typed) => format!("{}; here {typed}", arg.help),
+        None => arg.help.to_string(),
+    });
+    if let (ArgKind::Count, Some(n)) = (arg.kind, arg.default.and_then(|d| d.parse::<u64>().ok())) {
+        p["default"] = json!(n);
+    }
+    p
+}
+
+/// An op from a typed caller (a key bound to an op, a tool of M34): its arguments as JSON, checked
+/// against the op's schema before anything runs. A typed caller sends what `parse` would have made
+/// of the words: whole ids, numbers, `YYYY-MM-DD` days; a word that names a project, a task or a
+/// ticket stays a word, which its handler looks up.
+pub fn typed(name: &str, args: Value) -> Result<super::Op, super::OpError> {
+    use super::{ErrorCode, Op, OpError};
+    let spec = super::find(name).ok_or_else(|| OpError::new(ErrorCode::Usage, format!("There is no op “{name}”.")))?;
+    let args = match args {
+        Value::Null => Value::Object(Map::new()),
+        Value::Object(map) => Value::Object(map),
+        other => return Err(OpError::new(ErrorCode::Usage, format!("{name}: its arguments are an object, not {other}."))),
+    };
+    check(spec, &args).map_err(|why| OpError::new(ErrorCode::Usage, format!("{name}: {why}")))?;
+    Ok(Op { spec, args })
+}
+
+/// Why `args` does not fit the schema of `spec`, if it does not.
+fn check(spec: &OpSpec, args: &Value) -> Result<(), String> {
+    let schema = json_schema(spec);
+    let properties = schema["properties"].as_object().expect("an object schema");
+    let given = args.as_object().expect("checked by the caller");
+    for required in schema["required"].as_array().expect("a list") {
+        let required = required.as_str().unwrap_or_default();
+        if !given.contains_key(required) {
+            return Err(format!("{required} is missing ({}).", spec.args.iter().find(|a| a.name == required).map(|a| a.missing).unwrap_or_default()));
+        }
+    }
+    for (key, value) in given {
+        let property = properties.get(key).ok_or_else(|| format!("it takes no argument “{key}”."))?;
+        if !fits(property, value) {
+            return Err(format!("{key} is not {}.", property["description"].as_str().unwrap_or("what it takes")));
+        }
+    }
+    Ok(())
+}
+
+/// A value against one property of the flat subset `json_schema` makes.
+fn fits(property: &Value, value: &Value) -> bool {
+    let types: Vec<&str> = match &property["type"] {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => return false,
+    };
+    let typed = types.iter().any(|kind| match *kind {
+        "string" => value.as_str().is_some_and(|text| property["format"] != "date" || crate::day::parse_iso(text).is_some()),
+        "integer" => value.as_u64().is_some_and(|n| property["minimum"].as_u64().is_none_or(|min| n >= min)),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        "array" => value.as_array().is_some_and(|items| items.iter().all(|item| fits(&property["items"], item))),
+        _ => false,
+    });
+    typed && property["enum"].as_array().is_none_or(|choices| choices.contains(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::{OPS, find};
+
+    #[test]
+    fn typed_ops_are_checked_against_their_schema() {
+        let op = typed("board.done", json!({ "task": "zysg" })).unwrap();
+        assert_eq!((op.name(), op.text("task")), ("board.done", Some("zysg")));
+        assert_eq!(typed("session.list", Value::Null).unwrap().args, json!({}));
+        let error = |name: &str, args: Value| typed(name, args).unwrap_err().text;
+        assert!(error("board.nothing", json!({})).contains("no op"));
+        assert!(error("board.done", json!({})).contains("task is missing"));
+        assert!(error("board.done", json!({ "task": "zysg", "force": true })).contains("no argument “force”"));
+        assert!(error("board.done", json!({ "task": 7 })).contains("task is not"));
+        assert!(error("board.done", json!(["zysg"])).contains("an object"));
+        assert!(error("board.move", json!({ "task": "zysg", "to": "nowhere" })).contains("to is not"));
+        assert!(error("board.add", json!({ "title": "x", "due": "fri" })).contains("due is not"));
+        assert_eq!(typed("board.add", json!({ "title": "x", "due": "2026-11-20" })).unwrap().day("due"), Some(crate::day::parse_iso("2026-11-20")));
+        assert!(typed("board.add", json!({ "title": "x", "due": null })).is_ok());
+        assert!(error("pr.status", json!({ "number": 0 })).contains("number is not"));
+    }
+
+    #[test]
+    fn the_schema_has_every_argument_and_only_them() {
+        for op in OPS {
+            let schema = json_schema(op);
+            let properties = schema["properties"].as_object().unwrap();
+            assert_eq!(properties.len(), op.args.len() + usize::from(op.dry_runs()), "{}", op.name);
+            for arg in op.args {
+                let p = &properties[arg.name];
+                assert!(p["type"].is_string() || p["type"].is_array(), "{}: {}", op.name, arg.name);
+                assert!(p["description"].as_str().is_some_and(|d| d.starts_with(arg.help)), "{}: {}", op.name, arg.name);
+                assert_eq!(schema["required"].as_array().unwrap().contains(&json!(arg.name)), arg.required, "{}: {}", op.name, arg.name);
+            }
+            assert_eq!(schema["additionalProperties"], json!(false));
+            assert_eq!(schema["description"], json!(description(op)));
+            assert!(description(op).ends_with(op.summary), "{}", op.name);
+        }
+    }
+
+    /// The schemas stay in the flat subset a hand-written generator can make and every MCP client
+    /// reads (ops-7): strings, integers, booleans, string enums, arrays of strings, a null for "no
+    /// day"; no `$ref`, no `oneOf` or `anyOf`, nothing nested deeper than an array's items.
+    #[test]
+    fn schemas_are_flat() {
+        fn depth(value: &Value) -> usize {
+            match value {
+                Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
+                Value::Array(items) => items.iter().map(depth).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        for op in OPS {
+            let schema = json_schema(op);
+            let text = schema.to_string();
+            for word in ["$ref", "oneOf", "anyOf", "allOf", "$defs"] {
+                assert!(!text.contains(word), "{}: {word}", op.name);
+            }
+            for (name, p) in schema["properties"].as_object().unwrap() {
+                // The property, and an array's items: two levels at most.
+                assert!(depth(p) <= 2, "{}: {name} is nested too deep: {p}", op.name);
+                let types: Vec<&str> = match &p["type"] {
+                    Value::String(t) => vec![t.as_str()],
+                    Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+                    _ => panic!("{}: {name} has no type", op.name),
+                };
+                assert!(types.iter().all(|t| ["string", "integer", "boolean", "array", "null"].contains(t)), "{}: {name}: {types:?}", op.name);
+                if types.contains(&"array") {
+                    assert_eq!(p["items"], json!({ "type": "string" }), "{}: {name}", op.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn values_have_the_types_parse_makes() {
+        let add = json_schema(find("board.add").unwrap());
+        assert_eq!(add["required"], json!(["title"]));
+        assert_eq!(add["properties"]["list"]["enum"], json!(["todo", "asked", "waiting", "later"]));
+        assert_eq!(add["properties"]["due"]["type"], json!(["string", "null"]));
+        assert_eq!(add["properties"]["links"]["items"], json!({ "type": "string" }));
+        let moved = json_schema(find("board.move").unwrap());
+        assert_eq!(moved["properties"]["to"]["enum"], json!(["asked", "todo", "reviews", "tickets", "waiting", "later"]));
+        let read = json_schema(find("session.read").unwrap());
+        assert_eq!(read["properties"]["last"], json!({ "type": "integer", "minimum": 0, "description": "how many of its last messages", "default": 6 }));
+        assert_eq!(read["properties"]["session"]["description"], json!("an id, its start, or words from its title (\"this\" is the session the command runs in); here its whole id"));
+        assert_eq!(json_schema(find("pr.status").unwrap())["properties"]["number"]["type"], json!("integer"));
+    }
+}

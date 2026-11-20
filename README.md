@@ -60,15 +60,25 @@ Today, Settings and the sessions; it can be switched off.
 - **First run.** With no project yet, Glasscode lists the folders you opened in Cursor or VS Code
   or worked in with Claude Code or Codex, and the logins it found; you tick what to bring in, then
   choose the look.
-- **One Settings page** with twelve sections and a search. Appearance has the themes (Glasscode
-  Light and Dark, Classic, High contrast, Auto), the accent, the backdrop (Prism, Aurora, Dusk or
-  none, smooth or dithered) and the scale of the whole interface (90 to 130 %).
+- **One Settings page** with thirteen sections (one of them the manager's) and a search.
+  Appearance has the themes (Glasscode Light and Dark, Classic, High contrast, Auto), the accent,
+  the backdrop (Prism, Aurora, Dusk or none, smooth or dithered) and the scale of the whole
+  interface (90 to 130 %).
 - **Project settings in the repository.** `.glasscode/settings.json` can name a setup script for
   each new worktree (it runs only after you approve that exact command), a branch name template and
   a worktree folder template.
 - **Team-approved CLI versions.** Settings › Updates shows each CLI's installed version, the
   newest published to npm, and a one-click **Update** — per person, without changing the team's
   pinned version for everyone else.
+- **A manager above your sessions** (off until you switch it on). One agent you name watches
+  every session, tells a session when its pull request was reviewed, keeps track of what you
+  asked of teammates in reviews, drafts messages that wait for your OK, and walks you through
+  the day when you ask. One memory per project that every agent shares, a report for every turn
+  of every session, and a level per project (Careful, Standard, Autopilot) that decides what it
+  may do without asking; everything else waits on a card. Its brain has only Glasscode's tools
+  and runs in its own folder. See [docs/manager.md](docs/manager.md), and what it cannot do in
+  [docs/manager.md](docs/manager.md#what-it-cannot-do); how it is built, in
+  [docs/architecture.md](docs/architecture.md#the-manager).
 - **Run anywhere.** Hand a session to a Linux server daemon (`glasscoded`) and follow or decide
   on it from your iPhone; bring it back to the Mac when you want. (Not on Windows yet.)
 - **Self-updating.** On Windows, Glasscode looks for a newer release on GitHub, checks it against
@@ -244,10 +254,10 @@ and another person builds the Mac version.
 | `crates/glasscoded` | The Linux server daemon that hosts handed-off sessions |
 | `relay/` | Optional self-hosted relay, to reach the Mac or a server from any network |
 | `glasses/` | The iPhone app that puts your sessions on Meta Ray-Ban Display glasses |
-| `voice/` | The voice copilot's control server and Mac helper |
+| `voice/` | The voice control server, the Mac helpers, and the manager's voice worker (`voice/manager/`) |
 | `vendor/` | Vendored [Zed](https://github.com/zed-industries/zed) GPUI crates (Apache-2.0) |
 | `script/` | Build, bundle, and release scripts |
-| `docs/` | Architecture notes, the Windows guide, the Windows port plans, and the UI redesign plan, mock and acceptance list |
+| `docs/` | Architecture notes, the Windows guide, the Windows port plans, the UI redesign plan, mock and acceptance list, the connectivity guide, the manager guide, and the Manager v2 plan (`manager-v2-design.md`, `manager-v2-slices.md`, `manager-v2-proofs.md`, `manager-v2-acceptance.md`) |
 
 ## Contributing
 
