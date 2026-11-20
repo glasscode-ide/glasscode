@@ -808,6 +808,20 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/tokens.json",
+        store: Some("manager/tokens"),
+        module: "runtime::budget",
+        writer: "the app (the brain's runtime), or glasscoded in its home",
+        format: "JSON, schema v1 (tokens per UTC day and lane, the last hour's wakes, each vendor window, the caps)",
+        retention: "30 days",
+        on_damage: "empty; the count starts again (the vendors' own limits still hold)",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "journal/cursors.json",
         store: Some("journal/cursors"),
         module: "journal",
@@ -860,7 +874,8 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "authority/from-mac.json", store: Some("authority/from-mac"), planned: None, module: "gate", writer: "glasscoded, from the Mac's sync", format: "JSON, schema v1 (the Mac's approved policy, pause and paired phones)", retention: "until the next sync", on_damage: "refuse, with no fallback to `.prev`; the server's sessions count as Careful and the manager there as paused", export: "no", local_only: "—", forget: "project", sync: "Mac to server only; never sent back" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: None, module: "playbooks", writer: "the app only", format: "JSON, schema v1 (the person's playbooks, the manager's proposals and the built-ins' settings and pauses)", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/approved/playbooks.json", store: Some("authority/approved/playbooks"), planned: None, module: "playbooks", writer: "the app only, when the person approves", format: "JSON, schema v1 (the hash this machine approved, by playbook id)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; no playbook but the built-ins runs", export: "yes", local_only: "yes: each machine approves for itself", forget: "—", sync: "never: a playbook that arrives by sync is not approved there" },
-    DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
+    DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: None, module: "schedule", writer: "the app only", format: "JSON, schema v1 (schedules: spec in local time, action, misfire, expiry in UTC, where it runs)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server; approved per machine (`schedule:<id>` in the approved playbooks)" },
+    DataRow { path: "authority/schedules-state.json", store: Some("authority/schedules-state"), planned: None, module: "schedule", writer: "the app only, before a run starts", format: "JSON, schema v1 (each schedule's last evaluation, last run started and run going; the latest wall time seen)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; no schedule runs until it is repaired", export: "no", local_only: "yes: each machine's own runs", forget: "—", sync: "never" },
     DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: None, module: "gate", writer: "the app only", format: "JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state)", retention: "until done or expired, plus 7 days", on_damage: "refuse, with no fallback to `.prev`; cards show \"could not load\" and nothing waiting runs", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority" },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), module: "memstore", writer: "the app and glasscoded (memory's one writer per machine)", format: "JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: you, org/<employer>, projects/<key>)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
     DataRow { path: "glasscode-memory.json", module: "the voice copilot (voice/memory.mjs)", writer: "the voice copilot", format: "JSON", retention: "the voice plan decides", sync: "none; M20.3 proposes its facts to memory once and leaves the file as it is", ..TODAY },
@@ -997,11 +1012,14 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::gate::FromMac>(),
     StoreInfo::of::<crate::playbooks::PlaybookFile>(),
     StoreInfo::of::<crate::playbooks::ApprovedPlaybooks>(),
+    StoreInfo::of::<crate::schedule::ScheduleFile>(),
+    StoreInfo::of::<crate::schedule::ScheduleState>(),
     StoreInfo::of::<crate::gate::SessionOrigins>(),
     StoreInfo::of::<crate::memstore::MemoryHead>(),
     StoreInfo::of::<crate::journal::Cursors>(),
     StoreInfo::of::<crate::work::WorkLedger>(),
     StoreInfo::of::<crate::gate::Pending>(),
+    StoreInfo::of::<crate::runtime::budget::Ledger>(),
 ];
 
 #[cfg(test)]

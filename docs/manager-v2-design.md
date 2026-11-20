@@ -279,12 +279,15 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
 | `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
-| `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON, schema v1 (playbooks: the person's, the manager's proposals, the built-ins' settings and pauses) | lasting | refuse, with no fallback to `.prev`; nothing runs but the built-ins, which are app behaviour | yes | — | — | Mac to server; not approved on arrival |
+| `authority/playbooks.json` | `playbooks` | JSON, schema v1 (playbooks: the person's, the manager's proposals, the built-ins' settings and pauses) | lasting | refuse, with no fallback to `.prev`; nothing runs but the built-ins, which are app behaviour | yes | — | — | Mac to server; not approved on arrival |
+| `authority/schedules.json` | `schedule` | JSON, schema v1 (schedules: spec in local time, action, misfire, expiry in UTC, where it runs) | lasting | refuse, with no fallback to `.prev`; nothing runs | yes | — | — | Mac to server; approved per machine (`schedule:<id>` in the approved playbooks) |
+| `authority/schedules-state.json` | `schedule` | JSON, schema v1 (each schedule's last evaluation, last run started and run going; the latest wall time seen) | lasting | refuse, with no fallback to `.prev`; no schedule runs until it is repaired | no | yes: each machine's own runs | — | never |
 | `authority/approved/playbooks.json` | `playbooks` | JSON, schema v1 (this machine's approved hash, by playbook id) | lasting | refuse, with no fallback to `.prev`; no playbook but the built-ins runs | yes | yes: each machine approves for itself | — | never |
 | `authority/pending.json` | `gate` | JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state) | until done or expired, plus 7 days | refuse, with no fallback to `.prev`; cards show "could not load" and nothing waiting runs | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines, `v` per line (UTC days) | 30 days | skip bad lines, log once | no | — | person (redact), project | the Mac pulls the server's by cursor (`journal.since`, M14); both ways in M57 |
+| `manager/tokens.json` | `runtime::budget` | JSON, schema v1 (tokens per UTC day and lane, the last hour's wakes, each vendor window, the caps) | 30 days | empty: the count starts again (the vendors' own limits still hold) | no | yes | — | never |
 | `journal/cursors.json` | `journal` | JSON, schema v1 (each hook spool's offset, each server's cursor) | lasting | empty: each spool is read from its end again, and the reconciler fills the gap | no | yes | — | never |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines: a claim, then a finish, by key and attempt; append only under `effects/.lock`, synced before it returns (no rename, so the Windows rename caveat of section 7 does not reach a claim) | 1 year (setting): whole month files are deleted | refuse new at-most-once effects until repaired; a line a crash cut off is cut away before the next is written | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memstore` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
@@ -900,6 +903,28 @@ pub const builtins::BUILTINS: &[Builtin];                  // native: ci-fix, co
                                                            // review-tell, follow-ups, daily-brief, stuck-session, usage-handoff
 pub mod builtins::ci_fix { pub fn step(..) -> (Step, bool); pub fn subject(..) -> String; pub fn group(..) -> String; pub fn key(..) -> EffectKey; }  // M31's key, to the letter
 
+// glasscode_core::schedule (M41) — due-ness from the wall clock every tick, never from sleeping timers
+pub enum Misfire { Skip /* on time only */, Once /* the last missed, once, within its window */ }
+pub enum Place { Home, Either }
+pub struct Schedule { pub id: String, pub name: String, pub spec: playbooks::ScheduleSpec, pub then: playbooks::Action, pub autonomy: Autonomy, pub misfire: Misfire,
+                      pub expires_ms: Option<u64> /* UTC */, pub place: Place, pub enabled: bool, pub proposed_by: Option<String>, pub made_ms: u64 }
+impl Schedule { pub fn hash(&self) -> [u8; 32]; pub fn approval_id(&self) -> String /* "schedule:<id>" */; pub fn grace_ms(&self) -> u64; }  // 6 h daily; min(period/2, 2 h)
+pub struct ScheduleFile { pub schedules: Vec<Schedule> }                    // authority/schedules.json; refuse, FALLS_BACK = false
+pub struct ScheduleState { pub seen_ms: u64 /* the latest wall time seen */, pub runs: BTreeMap<String, RunState> }  // authority/schedules-state.json; refuse
+pub fn daily_at(local_day: i64, minutes: u16) -> Option<u64>;             // a skipped time: the next valid minute; a repeated one: the first
+pub fn last_occurrence(spec: &ScheduleSpec, made_ms: u64, after_ms: u64, until_ms: u64) -> Option<(u64, u32)>;
+pub fn evaluate(schedules: &[Schedule], approved: &dyn Fn(&Schedule) -> bool, state: &mut ScheduleState, now_ms: u64, home: bool) -> (Vec<Due>, Vec<Skip>);
+                                                                           // missed ones collapse into one; overlap skipped; expiry against seen_ms
+pub fn started(..); pub fn finished(..); pub fn after_restart(state) -> Vec<(String, u64)>;  // marked before it acts: never twice
+pub fn pace(due: Vec<Due>, since_wake_ms: u64, last_late_ms: Option<u64>, now_ms: u64) -> Vec<Due>;  // a minute after a wake; late ones one a minute
+pub fn key(schedule: &str, occurrence_ms: u64, op: &str, target: &str) -> EffectKey;  // the schedule's id and the occurrence's UTC instant
+pub fn propose(schedule: Schedule, by: Option<&str>) -> Result<(), ScheduleError>;  // anyone but the person: off, only proposed (M44's checks)
+pub fn approve(id: &str, person: bool) -> Result<(), ScheduleError>; pub fn is_approved(schedule: &Schedule, approved: &ApprovedPlaybooks) -> bool;
+pub fn round(now_ms, home, clear, since_wake_ms, last_late_ms) -> Result<(Vec<(Due, Schedule)>, Vec<(Skip, String)>, Vec<(String, u64)>), ScheduleError>;
+                                                                           // under the state's lock: evaluate, pace, mark started, save; a due one
+                                                                           // held back by pace stays due until started or past its window
+// autonomy: watch records only; tell tells the person, nothing runs; ask and act run the op through the gate as the manager's wake
+
 // glasscode_core::runtime — what only the app or only glasscoded can do; the runtime itself is shared
 pub trait Host: Send + Sync {
     fn machine(&self) -> &MachineId;
@@ -907,7 +932,15 @@ pub trait Host: Send + Sync {
     fn has(&self, host: OpHost) -> bool;
     fn notify(&self, title: &str, body: &str, matter: &str);
 }
-// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50).
+// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50), with one more method:
+//     fn brain_checked(&self, lane: Lane, wake: Option<&str>);   // its MCP server's calls are served from now on
+// M50's runtime: pub trait BrainDriver { new_session, prompt, next(wait) -> Option<Update>, cancel, stop, pid, session_id, stderr_tail }
+// (ACP-shaped); ClaudeDriver, CodexDriver; pub enum Update { Session, Init { tools, model, version }, Text, ToolCall, Permission, RateLimit,
+// Usage, Ended(TurnEnd) }; pub fn run_turn(driver, text, checked, expected, on_checked, on_update, Limits) -> Outcome;
+// pub struct Brain { … } with ask(host, &mut Ledger, text, Turn::{Chat, Wake}, now, on_update) -> Result<Outcome, Refusal { Health, Budget }>;
+// pub enum BrainHealth { Ready, NotInstalled, SignedOut, LoginExpiresSoon, OutOfUsage, Overloaded, VersionNotApproved, Crashed,
+// ToolListWrong, SwitchedOff } with sentence() and backoff(); budget::Ledger (store manager/tokens); wrap::wrap(source, text);
+// layout(instructions, memory, situation, question) -> (system, user); restart_due(turns, rss).
 
 // glasscode_core::profile
 pub enum SessionOrigin { Person, Automation, Quarantine }

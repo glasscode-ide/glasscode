@@ -148,6 +148,9 @@ pub struct Workspace {
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
+    /// v2 (M41): schedules, the idle-sleep assertion, and a quit or restart that waits for
+    /// automation turns.
+    pub lifetime: crate::lifetime::Lifetime,
     pub auto_review: crate::auto_review::AutoReview,
     /// Worktrees being removed in the background (their sidebar rows say so).
     pub removing: HashSet<PathBuf>,
@@ -186,6 +189,10 @@ pub struct Workspace {
     pub session_more: bool,
     /// The `glasscode` command: its socket, waiting requests, what agents did.
     pub control: crate::control_ui::ControlUi,
+    /// The brain runtime's host (M50), with the engine at v2: what the manager's lanes (M51) and
+    /// the chat (M52) run their brains with.
+    #[allow(dead_code)]
+    pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
     /// The Today board.
     pub today: crate::today_ui::TodayUi,
     /// The UI kit page (debug hook `kit`).
@@ -276,6 +283,7 @@ impl Workspace {
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
+            lifetime: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
             removing: HashSet::new(),
             idle_worktrees_open: HashSet::new(),
@@ -300,6 +308,7 @@ impl Workspace {
             chat: Default::default(),
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
+            brain_host: None,
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),
@@ -371,7 +380,7 @@ impl Workspace {
         // The window's close button (and Alt+F4) asks first about text not saved in an editor;
         // it closes once the person answered (`answer_unsaved`).
         let workspace = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |_, cx| workspace.update(cx, |this, cx| !this.ask_before_quitting(false, cx)).unwrap_or(true));
+        window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |this, cx| !(this.lifetime_holds_quit(window, cx) || this.ask_before_quitting(false, cx))).unwrap_or(true));
 
         // The Chat view on screen follows its session file closely.
         cx.spawn(async move |this, cx| {
@@ -1431,6 +1440,7 @@ impl Workspace {
         self.switch_tick(cx);
         self.gh_tick(cx);
         self.ci_fix_tick(cx);
+        self.lifetime_tick(cx);
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);
@@ -1916,9 +1926,10 @@ impl Workspace {
         self.toggle_right(cx);
     }
 
-    fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
-        // Text not saved in an editor is asked about first (U20); the answer quits.
-        if self.ask_before_quitting(false, cx) {
+    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        // v2: automation turns that run are asked about first (M41); then text not saved in an
+        // editor (U20). The answer quits.
+        if self.lifetime_holds_quit(window, cx) || self.ask_before_quitting(false, cx) {
             return;
         }
         self.save();

@@ -111,6 +111,7 @@ macro_rules! kinds {
 const APP: &str = "crates/glasscode/src/journal_ui.rs";
 const DAEMON: &str = "crates/glasscoded/src/daemon.rs";
 const CORE: &str = "crates/glasscode_core/src/journal.rs";
+const BRAIN: &str = "crates/glasscode_core/src/runtime/health.rs";
 const RECONCILE: &str = "crates/glasscode_core/src/reconcile.rs";
 const TURNS: &str = "crates/glasscode_core/src/turns.rs";
 const WORK: &str = "crates/glasscode_core/src/work.rs";
@@ -161,6 +162,9 @@ kinds! {
     APP_QUIT = "app.quit", Info, "crates/glasscode/src/journal_ui.rs", "running sessions", "M30 (AppQuit turns)";
     APP_SLEPT = "app.slept", Info, "crates/glasscode_core/src/journal.rs", "from, to (wall clock ms)", "M30 (Slept turns), reconciler";
     APP_WOKE = "app.woke", Info, "crates/glasscode_core/src/journal.rs", "asleep for (ms)", "reconciler";
+    // ----- the manager's brain: M50
+    MANAGER_BRAIN_DOWN = "brain.down", Warn, "crates/glasscode_core/src/runtime/health.rs", "agent, lane, health (state and its words)", "the chat, Activity";
+    MANAGER_BRAIN_UP = "brain.up", Info, "crates/glasscode_core/src/runtime/health.rs", "agent, lane, health", "the chat";
     LINK_LOST = "link.lost", Warn, "planned:M58", "the server, since", "M58";
     LINK_BACK = "link.back", Info, "planned:M58", "the server, after (ms)", "M58";
     CLOCK_JUMPED = "clock.jumped", Warn, "crates/glasscode_core/src/journal.rs", "by (ms)", "M41";
@@ -184,7 +188,7 @@ kinds! {
 }
 
 /// The files that write the kinds of the catalogue, for the reader of the table.
-pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK];
+pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK, BRAIN];
 
 #[cfg(test)]
 mod tests {
