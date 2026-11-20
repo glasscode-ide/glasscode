@@ -1500,6 +1500,18 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same.
 - **Addresses:** requirement R9 (part 2)
+- **Result:**
+  - **Built:**
+    - `runtime/study.rs`: the schema, the input and the parse that drops lines with no given source;
+    - in `movein.rs`: `study_reads`, `study_profile`, `Progress` (the store `manager/movein.json`), `study_next`, the questions and `answer`;
+    - `Memory::remember_answer`;
+    - `Turn::Study` and `Ledger::record_study`;
+    - the dialog's stage "Getting to know your projects": studies, the question asked now with its answer box, "Try again now" while paused, and "Undo this move-in".
+  - **Tests:** the four the slice lists, and a stand-in study whose answers become facts.
+  - **Codex:** a Codex study's tokens are counted at four characters a token (its answer file has no usage).
+  - **Left out:**
+    - the owner run with the real CLIs, and the demonstration (fast-track rules);
+    - the chat surface (M52), which will show the topic "Moving in": until then the questions are answered in the dialog.
 
 ### M57 Server home: the server acts (wave 5, L)
 

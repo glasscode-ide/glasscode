@@ -425,6 +425,9 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "read the ticked sources", "move_in_read", "Only you can move in.", Place::Settings(Section::Manager)),
     person("Manager", "accept or drop what moving in proposes", "move_in_accept", "Only you accept what moving in proposes.", Place::Settings(Section::Manager)),
     person("Manager", "undo a move-in", "move_in_undo", "Only you can undo a move-in.", Place::Settings(Section::Manager)),
+    person("Manager", "study the projects as part of moving in", "move_in_study_start", "Only you start the study: it runs a model on your plan.", Place::Settings(Section::Manager)),
+    person("Manager", "try a paused study again", "move_in_study_step", "Only you can start the study again.", Place::Settings(Section::Manager)),
+    person("Manager", "answer or skip a question of moving in", "move_in_answer", "Only you can answer what moving in asks.", Place::Settings(Section::Manager)),
     person("Manager", "export your data to Downloads", "data_export_now", "Only you can export your data.", Place::Settings(Section::Manager)),
     person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
     // ----- voice
