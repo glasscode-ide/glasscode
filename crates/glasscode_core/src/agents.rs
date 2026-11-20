@@ -591,6 +591,7 @@ pub fn launch_with(
                 None => args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id)),
                 Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Codex, &session.id, &profile.browser_hosts)),
             }
+            args.extend(["-c".to_string(), CODEX_NO_UPDATE_CHECK.to_string()]);
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
@@ -629,6 +630,13 @@ pub fn launch_with(
         }
     }
 }
+
+/// Codex's own update check, off in every session (as `DISABLE_AUTOUPDATER` is for Claude):
+/// versions are Glasscode's to manage. With it on, Codex 0.167 opens "Update available" at start
+/// with "Update now" (`brew upgrade --cask codex`) chosen, so the first Enter, the person's or a
+/// message Glasscode types in, would upgrade the CLI that every session shares (P06; the live
+/// checks of 2026-11-20 saw it in a Glasscode session).
+const CODEX_NO_UPDATE_CHECK: &str = "check_for_update_on_startup=false";
 
 /// The Codex options for a session's mode. Codex 0.167 removed `--full-auto`, which was a short
 /// form of "the workspace-write sandbox, and the model asks when it needs to" (`--sandbox
@@ -1332,6 +1340,29 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    /// Every Codex session starts with Codex's own update check off, new or resumed, the person's
+    /// or under any profile: its "Update available" dialog has "Update now" chosen, and a first
+    /// Enter would run `brew upgrade` on the CLI every session shares.
+    #[test]
+    fn a_codex_session_never_checks_for_updates() {
+        use crate::profile::{ProfileFacts, SessionOrigin};
+        let account = Account { id: format!("codex-update-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let facts = ProfileFacts { worktree: "/tmp".into(), ..ProfileFacts::default() };
+        let profiles = [None, Some(SessionOrigin::Person), Some(SessionOrigin::Automation), Some(SessionOrigin::Quarantine)];
+        for conversation in [None, Some("019a0000-0000-7000-8000-000000000001")] {
+            for origin in profiles {
+                let profile = origin.map(|o| crate::profile::session_profile(o, AgentKind::Codex, &crate::gate::ProjectPolicy::default(), &facts));
+                let args = launch_with(&session(AgentKind::Codex, conversation), Some(&account), &HashMap::new(), profile.as_ref()).args;
+                let at = args.windows(2).position(|w| w == ["-c", CODEX_NO_UPDATE_CHECK]);
+                let end = args.iter().position(|a| a == "resume" || a == "--").unwrap_or(args.len());
+                assert!(at.is_some_and(|at| at < end), "{origin:?}, {conversation:?}: {args:?}");
+            }
+        }
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
