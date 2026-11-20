@@ -1793,6 +1793,9 @@ struct MemoryAsk {
     links: glasscode_core::model::State,
     /// The policy header of the project (its level, from the gate).
     policy: Option<String>,
+    /// The projects the caller may not read at all: for the manager, those bound to another
+    /// account than its own (D17). Its reads that name no project leave them out.
+    hidden: Vec<glasscode_core::paths::ProjectKey>,
 }
 
 impl MemoryAsk {
@@ -1900,6 +1903,19 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         return Err(denied("This command runs in no project's session, so it has no project's memory."));
     }
     let everywhere = reach == Reach::Everywhere;
+    // D17: the manager reads no project bound to another account, named or not (the gate refuses
+    // one an op names; a session named here is about its project too).
+    let hidden = if who == Who::Manager {
+        let set = ws.control_policy_set();
+        set.hidden_from_manager(ws.control.project_keys.values())
+    } else {
+        Vec::new()
+    };
+    if let Some((_, _, Some(key))) = &project
+        && hidden.contains(key)
+    {
+        return Err(denied(format!("Only the account the person chose may read {key}, and the manager runs on another.")));
+    }
     let policy = project.as_ref().and_then(|(_, _, key)| key.as_ref()).map(|key| {
         let level = ws.control_policy_set().policy.of(key).level;
         format!("Project {key} is at the {level:?} level. Glasscode's gate decides what runs; this line only says so.")
@@ -1910,7 +1926,7 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         links.ticket_of.extend(ws.state.ticket_of.get(&s.id).map(|t| (s.id.clone(), t.clone())));
         links.pr_of.extend(ws.state.pr_of.get(&s.id).map(|p| (s.id.clone(), p.clone())));
     }
-    Ok(MemoryAsk { who, everywhere, project, session, links, policy })
+    Ok(MemoryAsk { who, everywhere, project, session, links, policy, hidden })
 }
 
 /// A memory error as the command's reply.
@@ -1952,7 +1968,7 @@ fn memory_search(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let key = if ask.everywhere { None } else { ask.key()? };
             let work = key.as_ref().and_then(|key| ask.work(key));
             let root = ask.project.as_ref().map(|(_, root, _)| root.as_path());
-            glasscode_core::ops::core_reads::memory_search(key.as_ref(), work.as_ref(), root, &query, limit, history)
+            glasscode_core::ops::core_reads::memory_search(key.as_ref(), work.as_ref(), root, &query, limit, history, &ask.hidden)
         };
         run().unwrap_or_else(|reply| reply)
     })
@@ -1964,7 +1980,7 @@ fn memory_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     memory_plan(Kind::Read, "read memory", move || {
         let run = || -> Result<Reply, Reply> {
             let key = if ask.everywhere { None } else { ask.key()? };
-            glasscode_core::ops::core_reads::memory_show(key.as_ref(), &what)
+            glasscode_core::ops::core_reads::memory_show(key.as_ref(), &what, &ask.hidden)
         };
         run().unwrap_or_else(|reply| reply)
     })
@@ -1979,6 +1995,8 @@ fn memory_brief(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             .projects
             .iter()
             .filter_map(|p| ws.control.project_keys.get(&p.id).map(|key| (p, key)))
+            // D17: a project bound to another account is not in the manager's brief.
+            .filter(|(_, key)| set.manager_may_read(key))
             .map(|(p, key)| {
                 let policy = set.policy.of(key);
                 memstore::brief::ProjectLine { key: key.clone(), name: p.name.clone(), level: format!("{:?}", policy.level), local_only: policy.local_only }
@@ -2936,7 +2954,8 @@ fn manager_memory(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         let run = || -> Result<Reply, Reply> {
             let snap = Memory::open().snapshot().map_err(memory_reply)?;
             let key = if ask.everywhere { None } else { ask.key()? };
-            let scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
+            let mut scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
+            scope.hidden = ask.hidden.clone();
             let hits = memstore::search::search(&snap, if query.is_empty() { "*" } else { &query }, &scope, limit).map_err(memory_reply)?;
             Ok(Reply::ok(memstore::search::as_data(&hits, snap.commit()), json!({ "commit": snap.commit() })))
         };
