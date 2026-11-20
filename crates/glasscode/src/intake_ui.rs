@@ -200,7 +200,7 @@ impl Workspace {
 
     /// How loaded a project is now.
     fn intake_load(&self, project_id: &str) -> Load {
-        let snap = self.manager_snapshot();
+        let snap = self.v2_snapshot();
         let ours: Vec<&glasscode_core::manager::SessionInfo> = snap.sessions.iter().filter(|s| s.project_id == project_id).collect();
         // An automation session holds a place while its work is not done (a session whose pull
         // request is ready and green, or merged, gives its place back).
