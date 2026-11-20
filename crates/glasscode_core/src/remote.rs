@@ -279,6 +279,9 @@ pub struct MirrorSync {
     /// its journal, words and conversation run as the Mac's do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<crate::store::EngineSwitch>,
+    /// What the server's manager needs from the Mac to run its wakes while it is home (M57).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager: Option<ManagerFromMac>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -537,6 +540,32 @@ pub struct MirrorSyncReply {
     /// "words", "conversation", "pending", "work"): the Mac sends them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_taken: Vec<String>,
+    /// The notices of the server's manager since the last sync, for the Mac to show (M57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<ServerNotice>,
+}
+
+/// What the server's manager needs from the Mac (M57): whether the manager is on, the brain the
+/// person chose, and the projects as a wake sees them (their keys and names, Careful ones, and
+/// whether the manager's account may read them), from the Mac's gate. Kept on the server, so its
+/// wakes run while the Mac is away.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManagerFromMac {
+    pub enabled: bool,
+    /// The brain's agent; none: Claude's (the only wake lane in release 1).
+    pub agent: Option<crate::model::AgentKind>,
+    pub model: Option<String>,
+    pub projects: Vec<crate::runtime::situation::Project>,
+}
+
+/// A notice of the server's manager (one a matter: a newer one replaces it).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerNotice {
+    pub title: String,
+    pub body: String,
+    pub matter: String,
 }
 
 /// How far the Mac has the server's records of each kind (M57). The server keeps nothing of it:

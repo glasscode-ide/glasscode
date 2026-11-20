@@ -89,7 +89,7 @@ impl Workspace {
     /// The projects as a wake's situation sees them: their keys and names; Careful ones; and
     /// whether the manager's account may read them (D17: a project bound to another account is
     /// none of its business).
-    fn lanes_projects(&self) -> Vec<Project> {
+    pub(crate) fn lanes_projects(&self) -> Vec<Project> {
         let set = self.control_policy_set();
         self.state
             .visible_projects()
@@ -114,10 +114,14 @@ impl Workspace {
     /// the manager on and a Claude brain (D6: no Codex wake lane in release 1). A change of the
     /// manager's settings starts it again, with them.
     pub(crate) fn lanes_refresh(&mut self) {
+        // The chat's brain starts again with the settings too, at its next question.
+        self.chat_restart();
         if let Some(stop) = self.lanes.stop.take() {
             stop.store(true, Ordering::SeqCst);
         }
-        if !self.control.engine_v2 || !self.state.manager.enabled {
+        // Only the home runs wakes (M57): this Mac while no server is paired or while it holds the
+        // lease; else the server's worker does.
+        if !self.control.engine_v2 || !self.state.manager.enabled || !self.home_here() {
             return;
         }
         let Some(host) = self.brain_host.clone() else { return };

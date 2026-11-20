@@ -59,6 +59,15 @@ fn with_record<R>(f: impl FnOnce(&mut HomeRecord, &MachineId) -> anyhow::Result<
     Ok(result)
 }
 
+/// The generation at which this server is the manager's home now; none when a Mac is, or the
+/// record is damaged (then no machine is home).
+pub fn server_generation() -> Option<u64> {
+    let server = server().ok()?;
+    let guard = file();
+    let record = guard.as_ref()?.record.clone().unwrap_or_else(|| HomeRecord::server(&server));
+    record.is_home(&server, &server, glasscode_core::clock::now_ms()).then_some(record.generation)
+}
+
 /// The server's tick: a Mac's lease ran out (and the grace after it), so the server is home.
 pub fn tick() {
     let now = glasscode_core::clock::now_ms();

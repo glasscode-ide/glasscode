@@ -26,6 +26,7 @@ mod lifetime;
 mod kit;
 mod glasscode_ui;
 mod manager_cmd;
+mod manager_chat;
 mod manager_home;
 mod manager_lanes;
 mod manager_settings;

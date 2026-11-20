@@ -59,6 +59,8 @@ pub struct Outcome {
     pub work: Vec<crate::work::WorkItem>,
     /// How far this Mac's own journal went now, for the app to keep.
     pub journal_sent: Option<crate::journal::Cursor>,
+    /// The server's manager's notices, to show.
+    pub notices: Vec<crate::remote::ServerNotice>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -93,6 +95,8 @@ pub struct Extras {
     pub authority: Option<crate::gate::FromMac>,
     /// How far this Mac's own journal went to this server (kept with the journal's cursors).
     pub journal_sent: Option<crate::journal::Cursor>,
+    /// What the server's manager needs from this Mac (v2).
+    pub manager: Option<crate::remote::ManagerFromMac>,
 }
 
 #[derive(Default)]
@@ -407,6 +411,7 @@ impl Syncer {
             work,
             have: self.have.clone(),
             engine: Some(crate::store::EngineSwitch::current()),
+            manager: extras.manager,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -477,6 +482,7 @@ impl Syncer {
             // except for a kind it could not take in, which comes again.
             let mut have = reply.have.clone();
             outcome.work = reply.work;
+            outcome.notices = reply.notices;
             // The server's asks come as cards here (answered here, run there); nothing it says
             // answers or adds an ask of this Mac's.
             if let (false, Some(server), Some(here)) = (reply.pending.is_empty(), client.hello.machine.as_ref(), machine.as_ref()) {

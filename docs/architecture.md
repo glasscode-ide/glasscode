@@ -655,6 +655,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   gate refuses its actions; one lane at a time works on a session or a repository (claims per
   work key, "busy: who, what"). What the manager asks is a card in its conversation too. The
   app's worker is `manager_lanes.rs`, with the engine at v2 and the manager on.
+- **The manager's chat** (`manager_chat.rs`, M52.1) with the engine at v2: every way to ask
+  comes through `mtick_ask`; answers from code come at once; anything else goes to the chat lane
+  on a thread of its own, which resumes the brain conversation of the newest rollover link. One
+  writer thread posts to the conversation store and loads it again when another writer changed
+  it; the answer being written stays in memory. A message sent while it answers is queued; Stop
+  reaches the brain through its stop handle. One thread component shows it on the Manager page
+  and under the Today box, whose Session | Ask control says what Enter does.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool

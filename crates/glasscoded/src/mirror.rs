@@ -203,6 +203,13 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
             _ => crate::daemon::log("authority in a sync from a connection that is not that Mac's: not kept"),
         }
     }
+    // What the server's manager needs from the Mac (M57), from that Mac's own connection only.
+    if let Some(said) = sync.manager.take() {
+        match caller {
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) => crate::brain::keep_from_mac(said),
+            _ => crate::daemon::log("the manager's settings in a sync from a connection that is not that Mac's: not kept"),
+        }
+    }
     // The Mac's engine switch, the same way (M57): this server's journal, words and conversation
     // run as the Mac's do.
     if let Some(engine) = sync.engine.take() {
@@ -376,6 +383,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     }
     reply.have = next;
     reply.not_taken = not_taken;
+    reply.notices = crate::brain::take_notices();
 }
 
 /// The ids of the journal events each Mac sent this run (a lost reply sends them again).
