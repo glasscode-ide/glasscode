@@ -412,7 +412,12 @@ impl Daemon {
         if let Some(dir) = account.as_ref().and_then(Account::config_dir) {
             std::fs::create_dir_all(&dir)?;
         }
-        let mut launch = agents::launch(&session, account.as_ref(), &self.env);
+        // The same session profiles as on the Mac (M22), with the engine at v2 and "profiles" on.
+        let profile = server_profile(&session, &self.state);
+        let mut launch = agents::launch_with(&session, account.as_ref(), &self.env, profile.as_ref());
+        if let Some(profile) = &profile {
+            agents::apply_profile_env(&mut launch, profile);
+        }
         // The `glasscode` command: which session it runs in (signed), and where to leave
         // requests when a sandbox keeps it from the socket.
         launch.env.insert("GLASSCODE_SESSION_SIG".into(), crate::today::signature(&session.id));
@@ -1851,6 +1856,45 @@ pub fn serve() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A server session's profile (M22): None with the engine at v1 or "profiles" off, and for a
+/// shell. Its origin is this machine's record (`authority/origins.json`; a session nobody marked
+/// is the person's); its policy the Mac's approved default (the server has no project keys yet).
+/// Linux runs Claude's sandbox through bubblewrap.
+fn server_profile(session: &Session, state: &State) -> Option<glasscode_core::profile::SessionProfile> {
+    use glasscode_core::profile::{self, GitFacts, HookProgram, ProfileFacts};
+    use glasscode_core::store::Store as _;
+    let switch = glasscode_core::store::EngineSwitch::current();
+    if session.agent == AgentKind::Shell || !switch.is_on("profiles") {
+        return None;
+    }
+    let origin = glasscode_core::gate::SessionOrigins::load().map(|o| o.origin(&session.id)).unwrap_or(glasscode_core::gate::SessionOrigin::Automation);
+    let policy = glasscode_core::gate::FromMac::load().map(|copy| copy.effective(glasscode_core::clock::now_ms()).0.default).unwrap_or_default();
+    let other_worktrees = state.sessions.iter().filter(|s| s.project_id == session.project_id && s.worktree != session.worktree).map(|s| s.worktree.clone()).collect();
+    let env_files = std::fs::read_dir(&session.worktree)
+        .map(|entries| entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".env") && e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let facts = ProfileFacts {
+        worktree: session.worktree.clone(),
+        other_worktrees,
+        git: GitFacts::of(&session.worktree, &session.branch),
+        notes: None,
+        env_files,
+        hook: std::env::current_exe().ok().map(|program| HookProgram { program, prefix: vec!["cli".into()] }),
+        events: agents::events_file(&session.id),
+        permission_file: paths::settings_dir().join(format!("{}.permission.json", session.id)),
+        registries: ["registry.npmjs.org", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org"].map(String::from).to_vec(),
+        forge: vec!["github.com".into(), "api.github.com".into()],
+        default_branch: None,
+        socket: glasscode_core::control::socket_path(),
+    };
+    let made = profile::session_profile(origin, session.agent, &policy, &facts);
+    if let Ok(bytes) = serde_json::to_vec(&made.permission) {
+        let _ = std::fs::create_dir_all(paths::settings_dir());
+        let _ = std::fs::write(&facts.permission_file, bytes);
+    }
+    Some(made)
 }
 
 /// Keep the Mac's approved authority that came with its sync (`authority/from-mac.json`), as

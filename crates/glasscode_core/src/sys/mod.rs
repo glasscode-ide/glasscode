@@ -431,6 +431,23 @@ fn openable_link(url: &str) -> std::io::Result<String> {
     Err(refuse("only http, https and mailto links open"))
 }
 
+/// The app's (and glasscoded's) own git calls pass `profile::GIT_OVERRIDES` once this is on (the
+/// v2 engine, M22, trust-m7): a session can write its worktree's git configuration, and git must
+/// not run the hooks, fsmonitor or ssh command it names for Glasscode.
+static SAFE_GIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn the overrides of Glasscode's own git calls on or off.
+pub fn use_safe_git(on: bool) {
+    SAFE_GIT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn safe_git(program: &std::ffi::OsStr, command: &mut std::process::Command) {
+    let name = std::path::Path::new(program).file_stem().map(|s| s.to_string_lossy().to_lowercase());
+    if SAFE_GIT.load(std::sync::atomic::Ordering::Relaxed) && name.as_deref() == Some("git") {
+        command.args(crate::profile::GIT_OVERRIDES);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

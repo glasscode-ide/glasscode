@@ -123,8 +123,12 @@ fn v2_hook_program() -> Option<PathBuf> {
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
-fn claude_settings_arg(session_id: &str) -> String {
+fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>) -> String {
     let settings = claude_hook_settings(v2_hook_program().as_deref(), crate::journal::feature_on("turn_hooks"), brief_on());
+    let settings = match profile {
+        Some(profile) => with_profile(&settings, &profile.claude_settings),
+        None => settings,
+    };
     if !cfg!(windows) {
         return settings;
     }
@@ -348,11 +352,67 @@ fn codex_projects(text: &str) -> Vec<String> {
     keys
 }
 
+/// Glasscode's own `--settings` with a session profile's over them (M22): the profile's hooks are
+/// added to the reporting hooks, every other key of the profile is set.
+pub fn with_profile(settings: &str, profile: &Value) -> String {
+    let mut out: Value = serde_json::from_str(settings).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(base), Value::Object(over)) = (out.as_object_mut(), profile) {
+        for (key, value) in over {
+            match (key.as_str(), base.get_mut(key), value) {
+                ("hooks", Some(Value::Object(hooks)), Value::Object(more)) => {
+                    for (event, entries) in more {
+                        match (hooks.get_mut(event), entries) {
+                            (Some(Value::Array(have)), Value::Array(add)) => have.extend(add.iter().cloned()),
+                            _ => {
+                                hooks.insert(event.clone(), entries.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    out.to_string()
+}
+
+/// Claude's own memory folder of a repository in an account folder (the vendor's layout, D19):
+/// `projects/<the path with every character but letters and digits as ->/memory`.
+pub fn claude_memory_dir(account_dir: &Path, repo_root: &Path) -> PathBuf {
+    let slug: String = repo_root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    account_dir.join("projects").join(slug).join("memory")
+}
+
+/// A profile's environment, after everything else the caller adds (the project's GitHub
+/// account's token included): what it sets, and what it takes out.
+pub fn apply_profile_env(launch: &mut Launch, profile: &crate::profile::SessionProfile) {
+    for key in &profile.env_remove {
+        launch.env.remove(key);
+    }
+    for (key, value) in &profile.env_set {
+        launch.env.insert(key.clone(), value.clone());
+    }
+}
+
 pub fn launch(
     session: &Session,
     account: Option<&Account>,
     base_env: &HashMap<String, String>,
 ) -> Launch {
+    launch_with(session, account, base_env, None)
+}
+
+/// [`launch`] under a session profile (M22, the v2 engine with "profiles" on): its settings, flags
+/// and environment. With none, the launch is today's, byte for byte.
+pub fn launch_with(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+) -> Launch {
+    let restricted = profile.is_some_and(|p| p.origin != crate::profile::SessionOrigin::Person);
     let mut env = base_env.clone();
     env.insert("GLASSCODE_SESSION_ID".into(), session.id.clone());
     // Note: the fork injects no vendored CLI onto PATH — sessions run with the user's own PATH only.
@@ -410,12 +470,16 @@ pub fn launch(
             }
             // The mode it was started with; later the person changes it there (Shift-Tab), so a
             // resumed conversation starts in Claude's own default again.
-            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists) {
+            // A session the manager drives never starts in bypass (its settings disable it too).
+            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists).filter(|m| !(restricted && *m == "bypassPermissions")) {
                 args.push("--permission-mode".into());
                 args.push(mode.into());
             }
+            if let Some(profile) = profile {
+                args.extend(profile.claude_args.iter().cloned());
+            }
             args.push("--settings".into());
-            args.push(claude_settings_arg(&session.id));
+            args.push(claude_settings_arg(&session.id, profile));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -438,13 +502,24 @@ pub fn launch(
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
             // prompt is easy to miss in chat view.
-            ensure_codex_trusts(&codex_home, &session.worktree);
+            // Not for automation and quarantine sessions (trust-19): what a repository carries for
+            // Codex gets its prompt there.
+            if profile.is_none_or(|p| p.pretrust) {
+                ensure_codex_trusts(&codex_home, &session.worktree);
+            }
             args.extend(cli_args(AgentKind::Codex, Some(&codex_home)));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
                 args.push("--model".into());
                 args.push(model.to_string());
             }
-            args.extend(codex_mode_args(session.mode.as_deref()));
+            // The person's mode as before; a session the manager drives runs in its profile's
+            // permission profile instead, never with danger-full-access or the bypass.
+            if !restricted {
+                args.extend(codex_mode_args(session.mode.as_deref()));
+            }
+            if let Some(profile) = profile {
+                args.extend(profile.codex_args.iter().cloned());
+            }
             match &session.agent_session_id {
                 Some(id) => {
                     args.push("resume".into());
@@ -485,6 +560,17 @@ fn codex_headless_args(prompt: &str) -> Vec<String> {
 /// read-only work: the agent may read files and run `gh`/`git`, and is given no session,
 /// hooks or browser. `config_dir` is the account's login folder, so it runs as the right
 /// account, exactly as a normal session does. The run is bounded to five minutes.
+/// The arguments of a headless run (after the program's own first words).
+pub fn headless_args(agent: AgentKind, prompt: &str) -> Vec<String> {
+    match agent {
+        // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's diff,
+        // nothing that writes. Tools not listed are denied, never prompted.
+        AgentKind::Claude => ["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"].map(String::from).to_vec(),
+        AgentKind::Codex => codex_headless_args(prompt),
+        AgentKind::Shell => Vec::new(),
+    }
+}
+
 pub fn headless(
     agent: AgentKind,
     config_dir: Option<&Path>,
@@ -502,9 +588,7 @@ pub fn headless(
             if let Some(dir) = config_dir {
                 cmd.env("CLAUDE_CONFIG_DIR", dir);
             }
-            // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's
-            // diff, nothing that writes. Tools not listed are denied, never prompted.
-            cmd.args(["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"]);
+            cmd.args(headless_args(AgentKind::Claude, prompt));
             cmd
         }
         AgentKind::Codex => {
@@ -515,7 +599,7 @@ pub fn headless(
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
             }
-            cmd.args(codex_headless_args(prompt));
+            cmd.args(headless_args(AgentKind::Codex, prompt));
             cmd
         }
         AgentKind::Shell => anyhow::bail!("no headless run for a shell"),

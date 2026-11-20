@@ -566,6 +566,41 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
+- **Session profiles** (`glasscode_core::profile`, M22) apply with the v2 engine and the
+  "profiles" switch on; otherwise a session launches as before. A session the person started
+  runs under the person profile. Claude runs in its sandbox with the credentials and Glasscode's
+  own files denied (sandbox `denyRead` and `permissions.deny` with `//` paths), and `gh` runs
+  outside the sandbox. Codex runs as today.
+  - **Automation.** A session that a playbook, the manager or another session started, or sent
+    text to (`authority/origins.json`, marked before its terminal starts) runs under it:
+    - the sandbox cannot be left;
+    - bypass is disabled;
+    - cross-session messages are refused;
+    - claude.ai connectors are off, with `--strict-mcp-config`;
+    - WebFetch and WebSearch are denied;
+    - the other worktrees are denied one by one;
+    - a `PreToolUse` gate hook (`glasscode hook gate`) refuses `gh pr merge`, force or
+      default-branch pushes, reads of credentials and of Glasscode's files, peer messages, other
+      agents and outside MCP tools;
+    - Codex gets the narrowed permission profile of O16 (its own git metadata only), no
+      pre-trust, and the network off.
+  - **Quarantine** is automation with the forge as the only network.
+  - **Every origin** gets:
+    - a `PermissionRequest` hook (`glasscode hook permission`) that answers from the approved
+      allow-commands, with allow, deny or nothing;
+    - `disableAllHooks: false`;
+    - absolute hook commands, with the events file as an argument;
+    - Claude's auto-memory redirected to the project's agent notes, after a one-time copy;
+    - Codex's memories off in Careful and local-only projects;
+    - no GitHub token in the environment.
+  - **Other parts.**
+    - The hooks' decisions go to the session's spool, and so to the journal.
+    - The app's own git calls pass `-c core.hooksPath=/dev/null -c core.fsmonitor= -c
+      core.sshCommand=ssh` (`sys::use_safe_git`).
+    - A session the person started, which the manager then types into, keeps its person
+      profile until it starts again, so that send asks.
+    - `versions::argument_contract` runs every argument list against a candidate CLI.
+    - glasscoded launches with the same profiles.
 - **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
   data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
   hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.

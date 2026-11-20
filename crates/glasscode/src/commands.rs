@@ -559,6 +559,9 @@ impl Workspace {
                         ws.control.first_words.insert(id.clone(), origin);
                     }
                     ws.state.sessions.push(session.clone());
+                    // Who started it decides its profile from its first start (M22): before the
+                    // terminal starts, never after the reply.
+                    ws.control_mark_driven(&r.caller, std::slice::from_ref(&id));
                     glasscode_core::activity::record_session();
                     if spec.open {
                         ws.center = crate::center::Center::Session;
