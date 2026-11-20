@@ -2265,6 +2265,7 @@ mod tests {
             fresh_main_off,
             new_on_server,
             glasscode_relay_off,
+            today_ask,
         } = prefs;
         let Appearance {
             theme,
@@ -2439,6 +2440,10 @@ mod tests {
                     glasscode_relay_off,
                     "nothing reads it since the hosted relay was removed, so a switch would do nothing",
                 ),
+            ),
+            (
+                "Prefs.today_ask",
+                not(today_ask, "the Today box's Session | Ask control remembers what Enter does; choosing there changes it"),
             ),
             ("Appearance.theme", on(theme, &[CardId::Theme])),
             ("Appearance.accent", on(accent, &[CardId::Accent])),

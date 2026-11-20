@@ -269,6 +269,10 @@ pub const INVENTORY: &[Capability] = &[
     op("Today", "the board", "render_today", "board.list"),
     op("Today", "a task's card", "today_open", "board.show"),
     op("Today", "the start box: a task", "today_send", "board.add"),
+    person("Today", "Session or Ask: what Enter does in the start box", "chat_set_today_mode", "Only you choose what Enter does in the Today box.", Place::View(View::Today)),
+    op("Today", "ask the manager from the start box", "today_enter", "manager.ask"),
+    op("Today", "open the full conversation", "show_manager", "manager.show"),
+    local("Today", "hide the answer under the start box", "today_start_box"),
     op("Today", "tick a task off", "today_apply", "board.done"),
     op("Today", "untick a task", "today_apply", "board.undo"),
     op("Today", "snooze", "today_apply", "board.snooze"),
@@ -434,6 +438,10 @@ pub const INVENTORY: &[Capability] = &[
     // ----- the manager
     op("Manager", "the manager's page", "show_manager", "manager.show"),
     op("Manager", "ask the manager", "manager_ask_as", "manager.ask"),
+    // The v2 chat (M52.1): one thread, on the Manager page and under the Today box.
+    op("Manager", "a chip in the chat that opens a session or a pull request", "chat_open", "ui.open"),
+    person("Manager", "Stop the answer being written", "chat_stop", "Only you can stop my answer; Esc does it too.", Place::View(View::Manager)),
+    person("Manager", "remove a queued message", "render_chat_thread", "Only you can take back a message you queued.", Place::View(View::Manager)),
     op("Manager", "what the manager says", "manager_voice_speak", "manager.say"),
     op("Manager", "the walk through today's update", "render_manager", "manager.tour"),
     op("Manager", "what it remembers", "render_manager", "manager.memory"),
