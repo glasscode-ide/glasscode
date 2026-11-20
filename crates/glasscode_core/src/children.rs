@@ -23,6 +23,10 @@ pub struct Child {
     /// When its summary went back to the parent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reported_ms: Option<u64>,
+    /// Its summary, made when its turn ended, until it is typed into the parent (the turn's id and
+    /// the text): kept here, so a parent that is closed, or a quit, loses nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<(String, String)>,
 }
 
 /// `manager/children.json`. Damaged, it starts empty: a child's summary is then not sent back,
@@ -67,10 +71,28 @@ impl Children {
         match self.children.iter_mut().find(|c| c.child == session && c.reported_ms.is_none()) {
             Some(child) => {
                 child.reported_ms = Some(at_ms);
+                child.pending = None;
                 true
             }
             None => false,
         }
+    }
+
+    /// The child ended a turn: its summary waits to go back (the newest turn's, when there are
+    /// several before it goes).
+    pub fn summary(&mut self, session: &str, turn: &str, text: &str) -> bool {
+        match self.children.iter_mut().find(|c| c.child == session && c.reported_ms.is_none()) {
+            Some(child) => {
+                child.pending = Some((turn.to_string(), text.to_string()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The summaries that wait to go back.
+    pub fn due(&self) -> Vec<&Child> {
+        self.children.iter().filter(|c| c.reported_ms.is_none() && c.pending.is_some()).collect()
     }
 }
 
@@ -113,9 +135,14 @@ mod tests {
     #[test]
     fn a_child_reports_back_once() {
         let mut children = Children::default();
-        children.add(Child { child: "c1".into(), parent: "p1".into(), task: "Find where login fails.\nMore.".into(), started_ms: 1, reported_ms: None });
+        children.add(Child { child: "c1".into(), parent: "p1".into(), task: "Find where login fails.\nMore.".into(), started_ms: 1, reported_ms: None, pending: None });
         assert_eq!(children.waiting("c1").map(|c| c.parent.as_str()), Some("p1"));
+        // The summary waits (across a quit: it is in the file) until it went back.
+        assert!(children.summary("c1", "t1", "Found it.") && children.due().len() == 1);
+        let again: Children = serde_json::from_str(&serde_json::to_string(&children).unwrap()).unwrap();
+        assert_eq!(again.due()[0].pending.as_ref().map(|(t, _)| t.as_str()), Some("t1"));
         assert!(children.reported("c1", 5));
+        assert!(children.due().is_empty() && !children.summary("c1", "t2", "more"));
         assert!(children.waiting("c1").is_none() && !children.reported("c1", 6));
         let report = crate::turns::TurnReport {
             v: 1,

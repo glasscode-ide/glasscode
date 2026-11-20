@@ -34,7 +34,7 @@ pub const BURST: usize = 3;
 pub const CAP_PER_HOUR: usize = 12;
 
 /// One thing to tell the person.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Notice {
     /// What it is about: `session:<id>`, `approval:<n>`, `pr:<repo>#<n>`, `ticket:<id>`.
     pub matter: String,
@@ -110,7 +110,7 @@ pub enum Hold {
 }
 
 /// Where a matter is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Told,
     Seen,
@@ -119,7 +119,7 @@ pub enum State {
 }
 
 /// One matter, as last told.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Matter {
     pub key: String,
     pub state: State,
@@ -134,12 +134,47 @@ pub struct Matter {
     pub shown: bool,
 }
 
-/// The matters, the popups of the last hour, and what the quiet hours hold.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The matters, the popups of the last hour, and what the quiet hours hold. It is kept in
+/// `manager/delivery.json` (`DeliveryFile`), so a restart forgets no snooze, no matter already told
+/// and nothing the quiet hours hold for the digest.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Delivery {
     matters: BTreeMap<String, Matter>,
     popups: VecDeque<u64>,
     held: Vec<Notice>,
+}
+
+/// `manager/delivery.json`: [`Delivery`] between runs. Damaged, it starts empty: at worst a notice
+/// is said again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DeliveryFile {
+    pub delivery: Delivery,
+}
+
+impl crate::store::Store for DeliveryFile {
+    const NAME: &'static str = "manager/delivery";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::manager::store::dir().join("delivery.json")
+    }
+}
+
+/// Matters kept that long after they were last told; older ones are history.
+const KEEP_MS: u64 = 7 * 24 * 3_600_000;
+
+impl Delivery {
+    /// What is worth keeping across a restart: matters of the last week (and every snooze still
+    /// running), the popups of the last hour, and what the quiet hours hold.
+    pub fn kept(&self, now_ms: u64) -> Delivery {
+        let mut kept = self.clone();
+        kept.matters.retain(|_, m| now_ms.saturating_sub(m.told_ms) < KEEP_MS || matches!(m.state, State::Snoozed { until_ms } if until_ms > now_ms));
+        kept.popups.retain(|at| now_ms.saturating_sub(*at) < 3_600_000);
+        kept
+    }
 }
 
 impl Delivery {
@@ -294,6 +329,23 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What was told survives a restart (the file), bar what is history: a snooze still holds, the
+    /// quiet hours' notices still wait for the digest, a week-old matter is gone.
+    #[test]
+    fn what_was_told_is_kept_across_a_restart() {
+        let rules = Rules { quiet: Some((22 * 60, 7 * 60)), silent: false };
+        let mut d = Delivery::default();
+        d.offer(notice("session:s1#needs", "asks", Severity::Warn), away(), &Rules::default(), NOW, NOON);
+        d.snooze_all("session:s1#", NOW + 3_600_000);
+        d.offer(notice("session:s2#done", "done", Severity::Notice), away(), &rules, NOW, 23 * 60);
+        d.offer(notice("session:old#done", "long ago", Severity::Notice), away(), &Rules::default(), NOW - 8 * 24 * 3_600_000, NOON);
+        let file = DeliveryFile { delivery: d.kept(NOW + 60_000) };
+        let mut again = serde_json::from_str::<DeliveryFile>(&serde_json::to_string(&file).unwrap()).unwrap().delivery;
+        assert_eq!(again.offer(notice("session:s1#needs", "asks again", Severity::Warn), away(), &Rules::default(), NOW + 120_000, NOON), Decision::Line(Hold::Snoozed));
+        assert!(again.digest(&rules, NOW + 8 * 3_600_000, 8 * 60).is_some(), "the quiet hours' notice still waits");
+        assert!(!again.matters.contains_key("session:old#done"));
+    }
 
     const NOW: u64 = 1_800_000_000_000;
     const NOON: u16 = 12 * 60;

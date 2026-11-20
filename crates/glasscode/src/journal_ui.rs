@@ -184,56 +184,102 @@ impl Workspace {
         }
     }
 
-    /// v2 (M61): a child session ended its turn: its summary goes back to its parent, once,
-    /// through the parent's delivery queue.
+    /// v2 (M61): a child session ended its turn: its summary is kept with the child
+    /// (`manager/children.json`) until it went back to the parent ([`Workspace::children_tick`]),
+    /// so a parent that is closed, or a quit, loses nothing.
     fn children_turn_ended(&mut self, report: turns::TurnReport, cx: &mut Context<Self>) {
         // Its summary, once it finished or failed: a turn cut off (a sleep, a quit, an interrupt,
         // a pause) is not its answer yet.
         if !self.control.engine_v2 || !matches!(report.end, turns::TurnEnd::Completed | turns::TurnEnd::Failed(_)) {
             return;
         }
-        let child = report.session.clone();
+        let child_title = self.state.session(&report.session).map(|s| self.session_title(s)).unwrap_or_else(|| report.session.clone());
+        cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            let Some(entry) = glasscode_core::children::Children::load().ok().and_then(|file| file.waiting(&report.session).cloned()) else { return };
+            let text = glasscode_core::children::summary_message(&child_title, &entry.task, &report);
+            if let Err(err) = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.summary(&report.session, &report.turn, &text)) {
+                log::warn!("children: the summary of {} could not be kept ({err})", report.session);
+            }
+        })
+        .detach();
+    }
+
+    /// v2 (M61), now and then: the children's summaries that wait go to their parents through the
+    /// delivery queue, once each (the effect ledger keeps it to once per child turn and run); one
+    /// that went is marked, and one whose parent is gone is let go.
+    pub(crate) fn children_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.children_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30)) {
+            return;
+        }
+        self.children_at = Some(std::time::Instant::now());
+        let launch = self.control.launch.clone();
+        let key_of = move |child: &str, turn: &str, parent: &str| glasscode_core::effects::effect_key("child", &format!("{child}@{turn}@{launch}"), "session.send", parent);
+        let key_task = key_of.clone();
         let task = cx.background_spawn(async move {
             use glasscode_core::store::Store as _;
-            glasscode_core::children::Children::load().ok().and_then(|file| file.waiting(&child).cloned())
+            let file = glasscode_core::children::Children::load().unwrap_or_default();
+            let ledger = glasscode_core::effects::load().ok();
+            let mut went = Vec::new();
+            let mut waiting = Vec::new();
+            for child in file.due() {
+                let Some((turn, text)) = child.pending.clone() else { continue };
+                let key = key_task(&child.child, &turn, &child.parent);
+                let state = ledger.as_ref().and_then(|l| l.records.get(&key)).map(|r| r.state.clone());
+                match state {
+                    Some(glasscode_core::effects::EffectState::Done(_)) => went.push(child.child.clone()),
+                    _ => waiting.push((child.clone(), turn, text)),
+                }
+            }
+            if !went.is_empty() {
+                let now = glasscode_core::clock::now_ms();
+                let _ = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| {
+                    for child in &went {
+                        file.reported(child, now);
+                    }
+                });
+            }
+            waiting
         });
         cx.spawn(async move |this, cx| {
-            let Some(entry) = task.await else { return };
+            let waiting = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let now = glasscode_core::clock::now_ms();
-                let done = entry.child.clone();
-                let noted = move || {
-                    std::thread::spawn(move || {
-                        let _ = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.reported(&done, now));
-                    });
-                };
-                // A parent that is gone hears nothing; the child is done all the same.
-                if ws.state.session(&entry.parent).is_none() {
-                    return noted();
+                for (child, turn, text) in waiting {
+                    // A parent that is gone hears nothing; its child is done all the same.
+                    if ws.state.session(&child.parent).is_none() {
+                        let gone = child.child.clone();
+                        std::thread::spawn(move || {
+                            let _ = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.reported(&gone, glasscode_core::clock::now_ms()));
+                        });
+                        continue;
+                    }
+                    // It waits for its parent to be open (the queue types only into a running one).
+                    if !ws.terminals.contains_key(&child.parent) {
+                        continue;
+                    }
+                    let child_title = ws.state.session(&child.child).map(|s| ws.session_title(s)).unwrap_or_else(|| child.child.clone());
+                    // What the child's turn descended from, passed on (events-13).
+                    let (depth, causes) = glasscode_core::journal::driven(&child.child).map(|d| (d.depth, d.causes)).unwrap_or_default();
+                    let now = glasscode_core::clock::now_ms();
+                    let delivery = glasscode_core::delivery_session::Delivery {
+                        note: Some(format!("(Sent by Glasscode: what the child session “{child_title}” said.)")),
+                        depth,
+                        causes,
+                        ..glasscode_core::delivery_session::Delivery::new(&child.parent, &text, glasscode_core::words::InjectKind::SessionSend, now)
+                    };
+                    let key = key_of(&child.child, &turn, &child.parent);
+                    let intent = glasscode_core::effects::Intent {
+                        origin: "child".into(),
+                        subject: format!("{}@{turn}", child.child),
+                        target: child.parent.clone(),
+                        caller: format!("the child session “{child_title}”"),
+                        reason: glasscode_core::words::scrub(&child.task.chars().take(80).collect::<String>()),
+                        session: Some(child.parent.clone()),
+                        launch: ws.control.launch.clone(),
+                        ..glasscode_core::effects::Intent::new(key, "session.send", glasscode_core::ops::Retry::Verifiable)
+                    };
+                    ws.queue_delivery(delivery, Some(intent), cx);
                 }
-                let child_title = ws.state.session(&entry.child).map(|s| ws.session_title(s)).unwrap_or_else(|| entry.child.clone());
-                let text = glasscode_core::children::summary_message(&child_title, &entry.task, &report);
-                // What the child's turn descended from, passed on (events-13).
-                let (depth, causes) = glasscode_core::journal::driven(&entry.child).map(|d| (d.depth, d.causes)).unwrap_or_default();
-                let delivery = glasscode_core::delivery_session::Delivery {
-                    note: Some(format!("(Sent by Glasscode: what the child session “{child_title}” said.)")),
-                    depth,
-                    causes,
-                    ..glasscode_core::delivery_session::Delivery::new(&entry.parent, &text, glasscode_core::words::InjectKind::SessionSend, now)
-                };
-                let subject = format!("{}@{}", entry.child, report.turn);
-                let intent = glasscode_core::effects::Intent {
-                    origin: "child".into(),
-                    subject: subject.clone(),
-                    target: entry.parent.clone(),
-                    caller: format!("the child session “{child_title}”"),
-                    reason: glasscode_core::words::scrub(&entry.task.chars().take(80).collect::<String>()),
-                    session: Some(entry.parent.clone()),
-                    launch: ws.control.launch.clone(),
-                    ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("child", &subject, "session.send", &entry.parent), "session.send", glasscode_core::ops::Retry::Verifiable)
-                };
-                ws.queue_delivery(delivery, Some(intent), cx);
-                noted();
             });
         })
         .detach();
