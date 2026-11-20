@@ -6,7 +6,8 @@
 //!   claimed under the schedule's id and the occurrence's instant, and its op runs through the gate
 //!   as the manager's wake. After a start or a wake they wait a minute (the reconciler, the cut turns
 //!   and the sessions go first), and late runs go one a minute. Only the home runs them: the Mac is
-//!   home while no server is paired (M58 brings the lease).
+//!   home while no server is paired, or while it holds the lease (M58, `acts_as_home`); its claims
+//!   carry the lease's generation.
 //! - **Sleep.** While a turn of an automation session runs, the app holds an idle-sleep assertion
 //!   (owner decision O6, on by default). It never blocks lid-close sleep. A wake is seen as a gap
 //!   between the wall clock and the monotonic one.
@@ -61,6 +62,8 @@ pub struct Lifetime {
     restart_now: bool,
     /// v1's data was moved into the v2 stores in this run (or it was done before) (M44).
     migrated: bool,
+    /// When the migration was last looked at (it waits for this Mac to be home).
+    migrate_at: Option<Instant>,
 }
 
 impl Workspace {
@@ -92,17 +95,20 @@ impl Workspace {
         if !self.control.engine_v2 {
             return;
         }
-        // M44: v1's data.json moves into the v2 stores once, on the home, off the main thread.
-        if !self.lifetime.migrated {
-            self.lifetime.migrated = true;
-            let home = self.server.config.is_none();
-            cx.background_spawn(async move {
-                match glasscode_core::manager::migrate_v2::run(home) {
-                    Ok(report) => log::info!("manager: v1's data is in the v2 stores ({report:?})"),
-                    Err(why) => log::info!("manager: v1's data was not moved: {why}"),
-                }
-            })
-            .detach();
+        // M44: v1's data.json moves into the v2 stores, on the home, off the main thread: once a
+        // run, and again a minute later when this Mac was not home yet (it may gain the lease).
+        if !self.lifetime.migrated && self.lifetime.migrate_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+            self.lifetime.migrate_at = Some(Instant::now());
+            if self.acts_as_home() {
+                self.lifetime.migrated = true;
+                cx.background_spawn(async move {
+                    match glasscode_core::manager::migrate_v2::run(true) {
+                        Ok(report) => log::info!("manager: v1's data is in the v2 stores ({report:?})"),
+                        Err(why) => log::info!("manager: v1's data was not moved: {why}"),
+                    }
+                })
+                .detach();
+            }
         }
         // M42: what the quiet hours held, as one notification when they end.
         self.notify_digest_tick(cx);
@@ -218,7 +224,7 @@ impl Workspace {
         let last_late = life.last_late_ms;
         // Only the home runs schedules (M58 step 9): this Mac while no server is paired, or while it
         // holds the lease; the occurrence keys keep one missed across a switch to one run.
-        let home = self.server.config.is_none() || self.home.generation().is_some();
+        let home = self.acts_as_home();
         let now = glasscode_core::clock::now_ms();
         let task = cx.background_spawn(async move { schedule::round(now, home, clear, since_wake, last_late) });
         cx.spawn(async move |this, cx| {
@@ -293,9 +299,11 @@ impl Workspace {
                 ..Intent::new(key, op.name(), op.spec.retry)
             };
             let (id, occurrence) = (schedule.id.clone(), due.occurrence_ms);
+            // At the lease's generation: a home that moved on fences it (M58).
+            let generation = self.home_generation();
             let claim = cx.background_spawn(async move {
                 let home = glasscode_core::paths::MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
-                effects::claim(&intent, &home)
+                effects::claim_at(&intent, &home, generation)
             });
             let caller = schedule_caller(&schedule);
             cx.spawn(async move |this, cx| {

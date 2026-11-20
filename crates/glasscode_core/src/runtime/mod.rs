@@ -19,6 +19,7 @@ pub mod queue;
 pub mod situation;
 pub mod study;
 pub mod wake;
+pub mod worker;
 pub mod wrap;
 
 use std::time::Duration;
