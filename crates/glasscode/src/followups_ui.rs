@@ -81,23 +81,6 @@ impl Workspace {
         std::borrow::Cow::Owned(data)
     }
 
-    /// v1's chat rules ("what am I waiting on?", "done with #1111") on the follow-ups where the
-    /// engine keeps them: at v2 the ledger's are lent to the harness for the call, and what the
-    /// call changed goes back to the ledger (v1's copy is left as it was).
-    pub(crate) fn with_follow_ups_lent<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
-        if !self.control.engine_v2 {
-            return call(self);
-        }
-        let lent = self.follow_ups().to_vec();
-        let v1 = std::mem::replace(&mut self.manager.harness.data.followups, lent.clone());
-        let out = call(self);
-        let back = std::mem::replace(&mut self.manager.harness.data.followups, v1);
-        if back != lent {
-            self.follow_ups_edit(|list| *list = back);
-        }
-        out
-    }
-
     /// The round, from the workspace's tick.
     pub fn followups_tick(&mut self, cx: &mut Context<Self>) {
         if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.work_ledger().is_none() {

@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
-use glasscode_core::manager::{FollowKind, FollowState, FollowUp, Home, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
+use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
 use glasscode_core::model::now;
 
 use crate::manager_state::{Mode, Stage};
@@ -794,11 +794,8 @@ impl Workspace {
         let m = &self.manager;
         let all = self.state.projects.len();
         let managed = self.state.projects.iter().filter(|p| settings.manages(&p.id)).count();
-        let home = match settings.home {
-            Home::Server if self.manager_on_server() => "runs on the server",
-            Home::Server => "runs on this Mac until the server answers",
-            Home::Mac => "runs on this Mac",
-        };
+        // Where it acts: the home's lease says (D5, M57).
+        let home = if self.acts_as_home() { "runs on this Mac" } else { "runs on the server" };
         let state = state_text(self.manager_presence(), m.mode, settings.listen, &settings.name);
         let mode = |id: &'static str, mode: Mode, label: &'static str| {
             ui::segment(id, m.mode == mode, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {

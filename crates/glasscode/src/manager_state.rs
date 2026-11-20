@@ -3,7 +3,7 @@
 //!
 //! SHARED FILE. `ManagerUi` is used by `manager_ui.rs` (the page and the bubble),
 //! `manager_tick.rs` (the rounds, carrying out what it decides, walks through the app),
-//! `manager_cmd.rs` (`glasscode manager …`), `manager_home.rs` (the copy on the server) and
+//! `manager_cmd.rs` (`glasscode manager …`), `manager_home.rs` (the server test) and
 //! `manager_settings.rs`. Add fields at the end of the struct (with a value in `new`); do not
 //! rename or remove what is here.
 
@@ -12,8 +12,7 @@ use std::time::Instant;
 use gpui::Entity;
 use glasscode_core::manager::gh::GivenReview;
 use glasscode_core::manager::harness::Harness;
-use glasscode_core::manager::sync::{SyncReply, TestLine};
-use glasscode_core::manager::{InMessage, Scene, TourStop};
+use glasscode_core::manager::{InMessage, Scene, TestLine, TourStop};
 
 /// How the person talks to it on its page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,10 +65,6 @@ pub enum Done {
     Sent { id: String, result: Result<(), String> },
     /// The person's GitHub login.
     Me(Option<String>),
-    /// A sync with the server's copy.
-    Server(Result<SyncReply, String>),
-    /// The server test in Settings.
-    Test(Vec<TestLine>),
 }
 
 pub struct ManagerUi {
@@ -98,12 +93,8 @@ pub struct ManagerUi {
     pub last_round: Option<Instant>,
     pub last_reviews: Option<Instant>,
     pub last_inbox: Option<Instant>,
-    pub last_sync: Option<Instant>,
     pub reviews_running: bool,
     pub inbox_running: bool,
-    pub sync_running: bool,
-    /// The server copy's last round (unix seconds), from the last sync.
-    pub server_heartbeat: u64,
     /// The server test in Settings: running, and its lines.
     pub testing: bool,
     pub test: Option<Vec<TestLine>>,
@@ -111,13 +102,8 @@ pub struct ManagerUi {
     pub voice: crate::manager_voice::VoiceState,
     /// What its page and Settings › Manager keep between frames (`manager_ui.rs`).
     pub page: crate::manager_ui::PageUi,
-    /// Finished jobs that belong to the server's copy (`Done::Server`, `Done::Test`):
-    /// `manager_tick` puts them here, `manager_home_tick` takes them out.
-    pub home_inbox: Vec<Done>,
     /// What the rounds keep between ticks (`manager_tick.rs`).
     pub tick: crate::manager_tick::TickUi,
-    /// What the sync with the server's copy keeps between rounds (`manager_home.rs`).
-    pub home: crate::manager_home::HomeUi,
 }
 
 impl ManagerUi {
@@ -141,18 +127,13 @@ impl ManagerUi {
             last_round: None,
             last_reviews: None,
             last_inbox: None,
-            last_sync: None,
             reviews_running: false,
             inbox_running: false,
-            sync_running: false,
-            server_heartbeat: 0,
             testing: false,
             test: None,
             voice: crate::manager_voice::VoiceState::default(),
             page: crate::manager_ui::PageUi::default(),
-            home_inbox: Vec::new(),
             tick: crate::manager_tick::TickUi::default(),
-            home: crate::manager_home::HomeUi::default(),
         }
     }
 }
