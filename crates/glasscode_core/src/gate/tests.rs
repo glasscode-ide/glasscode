@@ -907,6 +907,26 @@ fn browser_eval_asks_on_signed_in_site() {
     assert_eq!(rule(&Caller::Ui, &eval(true), &Targets::default(), &set), Rule::Allow);
 }
 
+/// M23: a session the person does not drive browses only its project's sites, there without a
+/// card (its browser has no sign-ins), elsewhere never; a site it is signed in on still asks.
+#[test]
+fn automation_browses_only_the_projects_sites() {
+    let mut set = set();
+    set.policy.projects.get_mut(&autopilot()).unwrap().browser_hosts = vec!["docs.rs".into()];
+    let act = |url: &str, signed_in: bool| op(crate::ops::find("browser.act").unwrap(), json!({ "url": url, "signed_in": signed_in }));
+    let auto = session("s-auto");
+    assert_eq!(rule(&auto, &act("https://docs.rs/serde", false), &Targets::default(), &set), Rule::Allow);
+    assert_eq!(rule(&auto, &act("https://evil.example/", false), &Targets::default(), &set), Rule::Never);
+    assert_eq!(rule(&auto, &act("https://docs.rs/serde", true), &Targets::default(), &set), Rule::Ask);
+    // A project that names no site: nothing opens for such a session.
+    assert_eq!(rule(&session("s-work-auto"), &act("https://docs.rs/", false), &Targets::default(), &set), Rule::Never);
+    // The person's own session is not kept to the list.
+    assert_eq!(rule(&session("s-side"), &act("https://evil.example/", false), &Targets::default(), &set), Rule::Allow);
+    // Careful takes the list away with the other permissions.
+    assert!(set.policy.projects[&autopilot()].at_most_careful().browser_hosts.is_empty());
+    assert!(policy_header(&autopilot(), &set.policy.projects[&autopilot()]).contains("may open only these sites, in a browser with no sign-ins: docs.rs"));
+}
+
 /// M57: pending actions sync both ways and carry no authority. One asked on the server shows on the
 /// Mac and goes only forward; the server takes the person's answer from the Mac; the Mac never
 /// takes an answer to its own from the server, nor an action the server says the Mac asked.

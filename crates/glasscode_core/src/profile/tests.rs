@@ -265,7 +265,7 @@ fn memory_is_redirected() {
 
 #[test]
 fn the_gate_refuses_what_a_session_never_does() {
-    let ctx = GateCtx { origin: Some(SessionOrigin::Automation), branch: "feat/a".into(), default_branch: "main".into(), worktree: paths::root().join("worktrees").join("app").join("feat-a") };
+    let ctx = GateCtx { origin: Some(SessionOrigin::Automation), branch: "feat/a".into(), default_branch: "main".into(), worktree: paths::root().join("worktrees").join("app").join("feat-a"), browser: false };
     let bash = |c: &str| gate_tool(&ctx, "Bash", &json!({ "command": c }));
     for refused in ["gh pr merge 1 --admin", "cd x && gh pr merge 1", "git push --force origin feat/a", "git push -f", "git push origin +feat/a", "git push origin main", "git push origin HEAD:main", "git push origin --delete feat/a", "cat ~/.ssh/id_ed25519", "head -c1 $HOME/.aws/credentials", "claude -p hi", "sudo gh pr merge 2", "gh pr ready 3", "gh pr create --fill"] {
         assert!(bash(refused).is_err(), "{refused}");
@@ -413,6 +413,17 @@ fn automation_session_has_no_browser() {
     // The gate refuses the browser's tools to them too, should a server be there anyway.
     let ctx = GateCtx { origin: Some(SessionOrigin::Automation), ..GateCtx::default() };
     assert!(gate_tool(&ctx, "mcp__glasscode-browser__eval", &json!({ "expression": "document.cookie" })).is_err());
+    // A project that names its sites (M23): a throwaway browser kept to them, which the gate hook
+    // lets through; the person's own sessions keep theirs.
+    let sites = ProjectPolicy { browser_hosts: vec!["docs.rs".into()], ..ProjectPolicy::default() };
+    let p = profile(SessionOrigin::Automation, &sites);
+    assert_eq!(p.browser_hosts, ["docs.rs"]);
+    let gate = p.claude_settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+    assert!(gate.contains("--browser"), "{gate}");
+    assert!(profile(SessionOrigin::Person, &sites).browser_hosts.is_empty());
+    let with = GateCtx { browser: true, ..ctx };
+    assert!(gate_tool(&with, "mcp__glasscode-browser__open", &json!({ "url": "https://docs.rs" })).is_ok());
+    assert!(gate_tool(&with, "mcp__other__run", &json!({})).is_err());
 }
 
 /// trust-m2, alt-m1: the review run's Codex flags are read-only with no network and a schema, and
