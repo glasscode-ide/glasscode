@@ -235,7 +235,7 @@ pub fn recall(memory: &Memory, topic: Option<&str>) -> String {
     };
     match topic {
         Some(topic) => {
-            let scope = crate::memstore::search::Scope { project: None, employer: None, work: None, history: false };
+            let scope = crate::memstore::search::Scope { project: None, employer: None, work: None, history: false, hidden: Vec::new() };
             let hits = crate::memstore::search::search(&snap, topic, &scope, 5).unwrap_or_default();
             let texts: Vec<String> = hits.iter().flat_map(|hit| hit.entries.iter().map(|e| e.text.clone())).take(5).collect();
             if texts.is_empty() { format!("I remember nothing about {topic}.") } else { format!("About {topic} I remember: {}", read_said(&texts, 5)) }
