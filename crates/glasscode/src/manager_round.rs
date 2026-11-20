@@ -116,6 +116,11 @@ impl Workspace {
         }
     }
 
+    /// The last daily brief made (`manager/brief.json`), once read.
+    pub(crate) fn v2_last_brief(&self) -> Option<&glasscode_core::manager::Brief> {
+        self.round.brief.as_ref().and_then(|file| file.last.as_ref())
+    }
+
     /// What the brief reads, from v2's own stores: the outbox, the reviews that wait to be told
     /// (the native review-tell), when sessions finished (`manager/brief.json`, from their turn
     /// reports), and the follow-ups (the work ledger's, [`Workspace::follow_ups`]).
@@ -202,8 +207,7 @@ impl Workspace {
         .detach();
     }
 
-    /// v2's outbox changed: kept, off the main thread. `data.json`'s outbox stays v1's as v1 left
-    /// it (nothing at v2 sends from it, `Owned::for_harness`).
+    /// v2's outbox changed: kept, off the main thread.
     pub(crate) fn v2_outbox_changed(&mut self) {
         let Some(outbox) = self.round.outbox.clone() else { return };
         std::thread::spawn(move || {

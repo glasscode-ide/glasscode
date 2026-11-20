@@ -78,10 +78,6 @@ impl Workspace {
         ops::find_session(word, &self.parse_ctx(caller)).map_err(|e| error_reply(&e))
     }
 
-    /// A project by its id, name, folder or the start of its name, for the app itself.
-    pub fn find_project(&self, word: &str) -> Result<String, Reply> {
-        self.find_project_as(&Caller::you(), word)
-    }
 
     /// A project the caller names (`ops::find_project`).
     pub(crate) fn find_project_as(&self, caller: &Caller, word: &str) -> Result<String, Reply> {

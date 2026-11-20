@@ -3,11 +3,12 @@
 //! session when its pull request was reviewed, drafts short messages to teammates in the
 //! person's name, keeps a memory, and answers when the person talks or types to it.
 //!
-//! This module is the part with no UI: the types everything shares (here), the data it keeps
-//! (`store`), its memory (`memory`), review follow-ups (`followups`, `gh`), the daily brief and
-//! the walk through the app (`brief`), the rules that turn what changed into what to do
-//! (`harness`), messages to teammates (`messages`, `messenger`), pictures it explains with
-//! (`scene`) and its voice (`voice`). Its thinking is the brain runtime's (`crate::runtime`, M50).
+//! This module is the part with no UI: the types everything shares (here), review follow-ups
+//! (`followups`, `gh`), the review feed (`review_feed`), the daily brief and the walk through the
+//! app (`brief`), who does which rule (`handover`), messages to teammates and from them
+//! (`messages`, `messenger`, `inbox`), pictures it explains with (`scene`), its voice (`voice`),
+//! and the move from v1's `data.json` (`migrate_v2`). Its thinking is the brain runtime's
+//! (`crate::runtime`, M50), its memory `crate::memstore`'s.
 //!
 //! Rules that hold everywhere:
 //! - Off until the person switches it on (`Settings::enabled`).
@@ -21,16 +22,13 @@ pub mod gh;
 pub mod handover;
 pub mod inbox;
 pub mod review_feed;
-pub mod harness;
-pub mod memory;
 pub mod messages;
 pub mod migrate_v2;
 pub mod messenger;
 pub mod scene;
-pub mod store;
 pub mod voice;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -339,7 +337,7 @@ pub struct TourStop {
     pub say: String,
 }
 
-/// Something the manager decided to do. The harness returns these; the app or the server
+/// Something the manager decided to do. The built-ins and the rounds return these; the app or the server
 /// carries them out (and may refuse: `SendPolicy`, Settings › Automation).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
@@ -656,30 +654,6 @@ pub fn store_dir() -> std::path::PathBuf {
 }
 
 // ----- everything it keeps ----------------------------------------------------------------------
-
-/// The manager's own data: `~/.glasscode/manager/data.json` on the home. Every list merges item
-/// by item, newest `updated` wins (`store::merge`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Data {
-    pub followups: Vec<FollowUp>,
-    pub outbox: Vec<OutMessage>,
-    pub inbox: Vec<InMessage>,
-    pub notes: Vec<Note>,
-    /// The conversation with the person (the last few hundred lines).
-    pub chat: Vec<ChatLine>,
-    pub brief: Option<Brief>,
-    pub checks: Vec<Check>,
-    /// Things already told, so nothing is said twice: key → what was seen.
-    pub seen: BTreeMap<String, String>,
-    /// When the copy that runs the manager last did a round.
-    pub heartbeat: u64,
-    /// When v2's manager took over from this harness (`Harness::take_over`); cleared when v1
-    /// runs again (and dropped by a build that does not know it), so the next take-over starts
-    /// from `seen` again.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub v2_since: Option<u64>,
-}
 
 #[cfg(test)]
 mod tests {

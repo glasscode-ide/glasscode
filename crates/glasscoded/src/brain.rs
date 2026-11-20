@@ -561,8 +561,14 @@ mod tests {
     fn the_wake_lane_runs_here_only_when_the_server_is_home_and_the_mac_said_so() {
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
         let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
-        assert!(wanted(&shared).is_err());
+        // The server is home (no record yet), but the Mac has not sent its approved authority.
+        assert_eq!(crate::home::server_generation(), Some(0));
+        assert_eq!(wanted(&shared).err().as_deref(), Some("the Mac's approved authority has not come yet (it comes with the next sync)"));
         keep_from_mac(ManagerFromMac { enabled: true, ..ManagerFromMac::default() });
         assert_eq!(from_mac().map(|m| m.enabled), Some(true));
+        // A Mac holds the lease: the manager's home is the Mac, so the lane does not run here.
+        crate::home::mac_is_home_for_test();
+        assert_eq!(wanted(&shared).err().as_deref(), Some("the manager's home is the Mac"));
+        assert!(test_lines(&shared).iter().any(|l| l.what == "Home" && l.detail.contains("from the Mac now")));
     }
 }

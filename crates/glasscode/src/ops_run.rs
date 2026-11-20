@@ -16,7 +16,7 @@ use glasscode_core::day::{self, Day};
 use glasscode_core::git;
 use glasscode_core::github;
 use glasscode_core::linear;
-use glasscode_core::manager::{Action, Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, scene, voice};
+use glasscode_core::manager::{Action, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, scene, voice};
 use glasscode_core::model::{AgentKind, new_id, now};
 use glasscode_core::ops::{self, ErrorCode, Op, OpError, ParseCtx, SessionView, World};
 use glasscode_core::sys;
@@ -138,6 +138,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.message.draft", message_draft),
     ("manager.message.approve", message_approve),
     ("manager.message.reject", message_reject),
+    // v1's checks are schedules (M44): their words parse to `schedule.*` (`V2_WORDS`), and a typed
+    // call by v1's name runs the schedule's handler (the same arguments).
     ("manager.check.list", check_list),
     ("manager.check.add", check_add),
     ("manager.check.remove", check_remove),
@@ -3197,56 +3199,25 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     })
 }
 
-fn check_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
-    let settings = ws.manager_on()?;
-    let checks = &ws.manager.harness.data.checks;
-    let text = if checks.is_empty() { format!("{} checks nothing on a schedule.", settings.name) } else { checks.iter().map(check_line).collect::<Vec<_>>().join("\n") };
-    answer(Reply::ok(text, to_json(checks)))
+
+
+
+
+
+/// v1's `manager check list`, typed by its v1 name: the schedules' list.
+fn check_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_list(ws, caller, op)
 }
 
-fn check_add(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
-    const USAGE: &str = "manager check list | add \"<what>\" --every <minutes> (or --in <minutes>, once) | remove <id>";
-    let settings = ws.manager_on()?;
-    let name = settings.name;
-    let what = arg(op, "what").trim().to_string();
-    let (once, word) = match (op.text("every"), op.text("in")) {
-        (Some(every), None) => (false, every),
-        (None, Some(after)) => (true, after),
-        _ => return Err(usage(USAGE)),
-    };
-    let Some(mins) = minutes(word) else { return Err(usage(format!("“{word}” is not a time: a number of minutes, or 30m, 2h, 1d."))) };
-    // Each check is a question to the agent: not more often than every five minutes.
-    if !once && mins < 5 {
-        return Err(usage("A check runs every 5 minutes at the most."));
-    }
-    if ws.manager.harness.data.checks.len() >= 50 {
-        return Err(failed(format!("{name} has 50 checks already. Remove one first (`glasscode manager check list`).")));
-    }
-    let when = if once { format!("once, in {}", every(mins * 60).trim_start_matches("every ")) } else { every(mins * 60) };
-    plan(Kind::Board, format!("have {name} check “{}” {when}", clip(&what, 80)), move |ws, r, _, cx| {
-        // `last` is now: the first look is one interval from here.
-        let added = Check { id: new_id(), what: what.clone(), every_secs: mins * 60, last: now(), once };
-        let data = to_json(&added);
-        ws.manager.harness.data.checks.push(added);
-        ws.manager.harness.dirty = true;
-        cx.notify();
-        ws.reply(r, Reply::ok(format!("{} checks {when}: {what}", ws.state.manager.name), data));
-    })
+/// v1's `manager check add`, typed by its v1 name: a schedule, off until the person approves it.
+fn check_add(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_add(ws, caller, op)
 }
 
-fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
-    let settings = ws.manager_on()?;
-    let which = arg(op, "which").trim().to_string();
-    let found = pick(&ws.manager.harness.data.checks, &which, |c| &c.id, |c| c.what.clone(), "check")?.clone();
-    plan(Kind::Board, what(op, &Names { title: found.what.clone(), other: settings.name }, day::today()), move |ws, r, _, cx| {
-        // Dropped for good, so a sync with the server's copy does not bring it back.
-        glasscode_core::manager::store::drop_check(&mut ws.manager.harness.data, &found.id);
-        ws.manager.harness.dirty = true;
-        cx.notify();
-        ws.reply(r, Reply::ok(format!("No longer checked: {}", clip(&found.what, 120)), to_json(&found)));
-    })
+/// v1's `manager check remove`, typed by its v1 name: the schedule goes.
+fn check_remove(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_remove(ws, caller, op)
 }
-
 
 // ----- the words of the manager's ops (were manager_cmd.rs) -------------------------------------
 
@@ -3381,10 +3352,6 @@ pub(crate) fn message_line(m: &OutMessage) -> String {
     format!("{}  [{}] to {}: “{}”{why}{error}", id_start(&m.id), message_state(m), m.to, clip(&m.body, 110))
 }
 
-pub(crate) fn check_line(c: &Check) -> String {
-    let when = if c.once { format!("once, {} after it was added", every(c.every_secs).trim_start_matches("every ")) } else { every(c.every_secs) };
-    format!("{}  {}  · {when}", id_start(&c.id), clip(&c.what, 100))
-}
 
 /// The one thing in a list that `which` names: its id, the start of its id, or words from
 /// its text. `Err` says why not (nothing, or several).
@@ -3479,6 +3446,29 @@ mod tests {
             .collect()
     }
 
+    /// Every source file of the app (`src/`, its folders too), each without its tests: what a scan
+    /// must cover so no call site is left out.
+    fn app_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let code = text.find("#[cfg(test)]\nmod tests").map_or(text.as_str(), |at| &text[..at]).to_string();
+                    let name = path.strip_prefix(concat!(env!("CARGO_MANIFEST_DIR"), "/src/")).unwrap().to_string_lossy().into_owned();
+                    out.push((name, code));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut out);
+        out.sort();
+        assert!(out.len() > 60, "{}", out.len());
+        out
+    }
+
     /// The body of a function of `source`, from `fn name(` to the next item at its own depth.
     fn function<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
@@ -3499,9 +3489,8 @@ mod tests {
     }
 
     /// Every handler is reached through the gate (M21.1): a handler is called in one place only,
-    /// `op_plan`. With the v2 engine its callers decide by `decide()` first (`control_gated`, for
-    /// the command and for `run_op`), and return on a refusal before it; with v1, the plan is
-    /// checked by Settings › Permissions (`control_run`, `control_rule`) before it runs.
+    /// `op_plan`, and its callers decide by `decide()` first (`control_gated`, for the command and
+    /// for `run_op`) and return on a refusal before it.
     #[test]
     fn every_handler_goes_through_decide() {
         let source = &SOURCE[..SOURCE.find("#[cfg(test)]\nmod tests").unwrap()];
@@ -3522,8 +3511,16 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
-        // Only after the gate: an op it let through, and an approved pending action.
+        // Every plan of a handler, in every file of the app, only after the gate: an op it let
+        // through and an approved pending action (`control_ui`, below), and a child's start inside
+        // `session.child`, which the gate decided first (M61). v1's two (`control_plan` and
+        // `run_op`'s, which Settings › Permissions checked) went with M56's rows 1 and 7.
+        let all = app_sources();
+        let sites: Vec<&str> = all.iter().flat_map(|(file, text)| std::iter::repeat_n(file.as_str(), text.matches(".op_plan(").count())).collect();
+        assert_eq!(sites, ["control_ui.rs", "control_ui.rs", "ops_v2.rs"]);
         assert_eq!(calls(".op_plan("), ["control_ui.rs", "control_ui.rs"]);
+        let v2 = &all.iter().find(|(file, _)| file == "ops_v2.rs").unwrap().1;
+        assert!(function(v2, "session_child").contains("ws.op_plan(&caller, &start, None)"), "the child's start is planned inside its gated op");
         // An approved pending action (M21.2) is planned again only after its re-check, which asks
         // the gate again.
         // (`control_decide_pending` hands every answer to `control_decide_pending_as`.)
@@ -3605,6 +3602,11 @@ mod tests {
             // (`session_send_queued`, whose plan is `Kind::Send`).
             let reads = body.contains("answer(") || body.contains("read_later(");
             let queued = body.contains("session_send_queued(");
+            // v1's checks, typed by v1's name, are the schedules' handlers (their plans are those
+            // ops' own, checked in `ops_v2`).
+            if body.contains("crate::ops_v2::schedule_") {
+                continue;
+            }
             if queued {
                 assert_eq!(spec.kind_v1, Kind::Send, "{op}");
             }
@@ -3648,6 +3650,15 @@ mod tests {
         let workspace = include_str!("workspace.rs");
         let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];
         assert!(run_op[..run_op.find("\n    }\n").unwrap()].contains("self.control_gated("));
+        // The person is asked only from the gate's way, after the check (above); v1's `control_run`
+        // asked without the check and went with M56. A child's start (M61) runs its check before
+        // it runs.
+        let all = app_sources();
+        let asks: Vec<String> = all.iter().flat_map(|(file, text)| text.match_indices(".control_ask(").map(move |(at, _)| format!("{file}:{}", text[..at].rfind("fn ").map(|f| text[f + 3..].split('(').next().unwrap_or_default()).unwrap_or_default()))).collect();
+        assert_eq!(asks, ["control_ui.rs:control_gated_as"], "the one place the person is asked");
+        let v2 = &all.iter().find(|(file, _)| file == "ops_v2.rs").unwrap().1;
+        let child = function(v2, "session_child");
+        assert!(child.find("ws.after_check(").unwrap() < child.find("(plan.run)(").unwrap(), "the child's check, then its run");
     }
 
     /// No handler runs git or gh on the main thread, or reads a file there (ops-9): the blocking
@@ -3916,11 +3927,8 @@ mod tests {
 
     #[test]
     fn picking_by_id_start_or_words() {
-        let checks = vec![
-            Check { id: "aaaa1111-x".into(), what: "see whether 1111 was merged".into(), ..Check::default() },
-            Check { id: "bbbb2222-x".into(), what: "see whether the deploy went out".into(), ..Check::default() },
-        ];
-        let by = |which: &str| pick(&checks, which, |c| &c.id, |c| c.what.clone(), "check").map(|c| c.id.clone());
+        let items = [("aaaa1111-x", "see whether 1111 was merged"), ("bbbb2222-x", "see whether the deploy went out")];
+        let by = |which: &str| pick(&items, which, |c| c.0, |c| c.1.to_string(), "item").map(|c| c.0.to_string());
         assert_eq!(by("aaaa1111-x").ok().as_deref(), Some("aaaa1111-x"));
         assert_eq!(by("bbbb").ok().as_deref(), Some("bbbb2222-x"));
         assert_eq!(by("deploy").ok().as_deref(), Some("bbbb2222-x"));
@@ -3935,7 +3943,5 @@ mod tests {
         assert_eq!(message_state(&OutMessage { tier: Tier::Never, ..OutMessage::default() }), "never sent");
         let follow = FollowUp { id: "f1f1f1f1-x".into(), repo: "acme/shop".into(), number: 12, title: "Retry queue".into(), person: "Mira".into(), ..FollowUp::default() };
         assert_eq!(follow_up_line(&follow), "f1f1f1f1  [open] acme/shop#12 “Retry queue”  · Mira");
-        let once = Check { id: "c1c1c1c1-x".into(), what: "look at the deploy".into(), every_secs: 1800, once: true, ..Check::default() };
-        assert_eq!(check_line(&once), "c1c1c1c1  look at the deploy  · once, 30 minutes after it was added");
     }
 }

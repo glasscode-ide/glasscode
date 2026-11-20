@@ -56,8 +56,7 @@ impl Workspace {
         self.work_ledger().map(|ledger| ledger.follow_ups.as_slice()).unwrap_or_default()
     }
 
-    /// Change the follow-ups where the engine keeps them; the store is written by its own
-    /// writer (the journal tick at v2, the harness's save at v1).
+    /// Change the follow-ups in the work ledger; the journal tick writes the store.
     pub(crate) fn follow_ups_edit<R>(&mut self, edit: impl FnOnce(&mut Vec<FollowUp>) -> R) -> Option<R> {
         self.work_ledger_edit(|ledger| edit(&mut ledger.follow_ups))
     }
@@ -92,7 +91,7 @@ impl Workspace {
                 return;
             }
         }
-        if self.manager_owned_v2().follow_ups != Owner::V2 {
+        if self.manager_owned().follow_ups != Owner::V2 {
             return;
         }
         if self.followups.at.is_none_or(|at| at.elapsed() >= ROUND_EVERY) {

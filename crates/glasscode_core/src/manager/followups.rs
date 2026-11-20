@@ -1,9 +1,8 @@
 //! Review follow-ups: what the person asked of a teammate in a review, kept until it is done;
 //! and reviews teammates left on the person's own pull requests.
 //!
-//! The rules run on a [`Book`]: the follow-ups and what was told of them. v1 keeps them in its
-//! `Data` (`followups`, `seen`); v2 in the work ledger (`WorkLedger::follow_ups`, `follow_seen`,
-//! M56.2), and [`round`] and [`given`] are v2's whole round.
+//! The rules run on a [`Book`]: the follow-ups and what was told of them, kept in the work ledger
+//! (`WorkLedger::follow_ups`, `follow_seen`, M56.2); [`round`] and [`given`] are the whole round.
 //!
 //! What was already told is kept in the book's `seen` (keys are never removed, values change):
 //! - `pr|<repo>#<n>` → when the manager first saw this pull request in a session,
@@ -15,19 +14,12 @@
 use std::collections::BTreeMap;
 
 use super::gh::GivenReview;
-use super::{Action, Data, Event, FollowKind, FollowState, FollowUp, PanelTab, Person, PrInfo, SessionInfo, Settings, Show, Snapshot, brief};
+use super::{Action, Event, FollowKind, FollowState, FollowUp, PanelTab, Person, PrInfo, SessionInfo, Settings, Show, Snapshot, brief};
 
 /// The follow-ups and the keys of what was told of them, wherever they are kept.
 pub struct Book<'a> {
     pub followups: &'a mut Vec<FollowUp>,
     pub seen: &'a mut BTreeMap<String, String>,
-}
-
-impl<'a> Book<'a> {
-    /// v1's: in its `Data`.
-    pub fn of_data(data: &'a mut Data) -> Book<'a> {
-        Book { followups: &mut data.followups, seen: &mut data.seen }
-    }
 }
 
 /// A follow-up nobody touched for this long is worth a nudge.
@@ -200,16 +192,12 @@ pub fn from_reviews(book: &mut Book, settings: &Settings, reviews: &[GivenReview
     events
 }
 
-/// Compare two rounds: a new review on the pull request of one of the person's sessions
-/// (`Event::PrReviewed`, and a `ReviewReceived` follow-up), CI that started failing. `prev` is
-/// None on the first round (nothing is reported then, only recorded).
-pub fn from_snapshot(data: &mut Data, prev: Option<&Snapshot>, snap: &Snapshot, now: u64) -> Vec<Event> {
-    snapshot_on(&mut Book::of_data(data), prev, snap, now, true)
-}
 
-/// [`from_snapshot`] on a book. `follow`: also keep the follow-ups on reviews received in step;
-/// without it only the reviews' news is read (v2's harness, whose follow-ups are the ledger's).
-pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, now: u64, follow: bool) -> Vec<Event> {
+/// Compare two rounds on a book: a new review on the pull request of one of the person's sessions
+/// (`Event::PrReviewed`, and a `ReviewReceived` follow-up), CI that started failing. `prev` is None
+/// on the first round (nothing is reported then, only recorded). The follow-ups on reviews
+/// received are kept in step.
+pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, now: u64) -> Vec<Event> {
     let mut events = Vec::new();
     let me = snap.me.as_deref().unwrap_or_default().trim().to_lowercase();
     // Until the person's own login is known, their own reviews cannot be told from a
@@ -219,7 +207,7 @@ pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, no
         if let Some((repo, number)) = &session.review_of {
             // A review session: the follow-up on that review belongs to it.
             let id = given_id(repo, *number);
-            if let Some(f) = book.followups.iter_mut().find(|f| follow && f.id == id && f.session.as_deref() != Some(session.id.as_str())) {
+            if let Some(f) = book.followups.iter_mut().find(|f| f.id == id && f.session.as_deref() != Some(session.id.as_str())) {
                 f.session = Some(session.id.clone());
             }
             continue;
@@ -232,7 +220,7 @@ pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, no
         // session. Nothing is recorded, and what was followed before its author was known
         // is let go.
         if !is_own(pr, &me) {
-            for f in book.followups.iter_mut().filter(|f| follow && f.kind == FollowKind::ReviewReceived && f.is_open() && f.number == pr.number && f.repo == pr.repo) {
+            for f in book.followups.iter_mut().filter(|f| f.kind == FollowKind::ReviewReceived && f.is_open() && f.number == pr.number && f.repo == pr.repo) {
                 f.state = FollowState::Dropped;
                 f.note = NOTE_NOT_YOURS.to_string();
                 f.updated = now;
@@ -270,7 +258,7 @@ pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, no
             if !known {
                 continue;
             }
-            if follow && !over {
+            if !over {
                 note_review(book, session, pr, login, &state, now);
             }
             if tell_reviews && is_real_review(&state) {
@@ -295,9 +283,7 @@ pub fn snapshot_on(book: &mut Book, prev: Option<&Snapshot>, snap: &Snapshot, no
             _ => {}
         }
 
-        if follow {
-            settle_received(book, pr, over, now);
-        }
+        settle_received(book, pr, over, now);
     }
     events
 }
@@ -640,7 +626,7 @@ fn act(book: &Book, settings: &Settings, snap: Option<&Snapshot>, events: &[Even
 /// round of a run (`prev`), a nudge for the quiet ones. The reviews' own news (`PrReviewed`) is
 /// the review feed's, and failing CI the CI fix's: neither is answered here.
 pub fn round(book: &mut Book, settings: &Settings, prev: Option<&Snapshot>, snap: &Snapshot, now: u64) -> Vec<Action> {
-    snapshot_on(book, prev, snap, now, true);
+    snapshot_on(book, prev, snap, now);
     fill_people(book.followups, settings);
     if prev.is_none() {
         return Vec::new();
@@ -887,7 +873,7 @@ mod tests {
         let mut failing = pr(12, &[("alex", "CHANGES_REQUESTED"), ("mira", "APPROVED")]);
         failing.ci = "failing".into();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(failing))]);
-        assert!(snapshot_on(&mut data.book(), None, &s1, 1000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), None, &s1, 1000).is_empty());
         // What is there is known: a follow-up for the changes asked for, none for the approval.
         assert_eq!(data.follow_ups.len(), 1);
         assert_eq!(data.follow_ups[0].id, "rv-acme/app#12@alex");
@@ -895,34 +881,34 @@ mod tests {
         assert_eq!(data.follow_ups[0].session.as_deref(), Some("s1"));
         // The same on a later round is still old news.
         let s2 = snap(2000, s1.sessions.clone());
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).is_empty());
     }
 
     #[test]
     fn a_new_review_is_told_once() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "PENDING")])))]);
-        assert!(snapshot_on(&mut data.book(), None, &s1, 1000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), None, &s1, 1000).is_empty());
         let s2 = snap(2000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]);
-        let events = snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true);
+        let events = snapshot_on(&mut data.book(), Some(&s1), &s2, 2000);
         assert_eq!(events, vec![Event::PrReviewed { session: "s1".into(), repo: "acme/app".into(), number: 12, reviewer: "alex".into(), state: "CHANGES_REQUESTED".into() }]);
         assert_eq!(data.follow_ups.len(), 1);
         assert_eq!(data.follow_ups[0].state, FollowState::Open);
         assert_eq!(data.follow_ups[0].note, NOTE_CHANGES);
         // Not again on the next round, and not after a restart (no previous round, same data).
-        assert!(snapshot_on(&mut data.book(), Some(&s2), &snap(3000, s2.sessions.clone()), 3000, true).is_empty());
-        assert!(snapshot_on(&mut data.book(), None, &snap(4000, s2.sessions.clone()), 4000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s2), &snap(3000, s2.sessions.clone()), 3000).is_empty());
+        assert!(snapshot_on(&mut data.book(), None, &snap(4000, s2.sessions.clone()), 4000).is_empty());
 
         // Review asked again, then changes asked for a second time: that is a new review.
         let s3 = snap(5000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "PENDING")])))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 5000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 5000).is_empty());
         assert_eq!(data.follow_ups[0].note, NOTE_AGAIN);
         let s4 = snap(6000, s2.sessions.clone());
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 6000, true).len(), 1);
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 6000).len(), 1);
 
         // Approved: told, and the follow-up is done.
         let s5 = snap(7000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "APPROVED")])))]);
-        let events = snapshot_on(&mut data.book(), Some(&s4), &s5, 7000, true);
+        let events = snapshot_on(&mut data.book(), Some(&s4), &s5, 7000);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], Event::PrReviewed { state, .. } if state == "APPROVED"));
         assert_eq!(data.follow_ups[0].state, FollowState::Done);
@@ -932,11 +918,11 @@ mod tests {
     fn my_own_reviews_bots_and_review_sessions_are_not_news() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[]))), session("s2", SessionState::Idle, Some(pr(40, &[])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         let mut reviewing = session("s2", SessionState::Idle, Some(pr(40, &[("alex", "CHANGES_REQUESTED")])));
         reviewing.review_of = Some(("acme/app".into(), 40));
         let s2 = snap(2000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("Robin", "COMMENTED"), ("review-helper[bot]", "CHANGES_REQUESTED"), ("copilot-pull-request-reviewer", "COMMENTED")]))), reviewing]);
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).is_empty());
         assert!(data.follow_ups.is_empty());
     }
 
@@ -945,18 +931,18 @@ mod tests {
         let mut data = Data::default();
         let mut s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[])))]);
         s1.me = None;
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         // It could be the person's own comment: nobody is told, nothing is followed.
         let mut s2 = snap(2000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("robin", "COMMENTED"), ("alex", "CHANGES_REQUESTED")])))]);
         s2.me = None;
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).is_empty());
         assert!(data.follow_ups.is_empty());
         // Once the login is known, what was there is not brought up as news.
         let s3 = snap(3000, s2.sessions.clone());
-        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 3000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 3000).is_empty());
         // And a new review is told as usual.
         let s4 = snap(4000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("robin", "COMMENTED"), ("alex", "CHANGES_REQUESTED"), ("mira", "COMMENTED")])))]);
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 4000, true).len(), 1);
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 4000).len(), 1);
     }
 
     #[test]
@@ -969,9 +955,9 @@ mod tests {
             vec![session("s1", SessionState::Idle, Some(p))]
         };
         let s1 = snap(1000, theirs(&[("alex", "PENDING")], "passing"));
-        assert!(snapshot_on(&mut data.book(), None, &s1, 1000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), None, &s1, 1000).is_empty());
         let s2 = snap(2000, theirs(&[("alex", "CHANGES_REQUESTED"), ("mira", "COMMENTED")], "failing"));
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).is_empty());
         // Nothing was recorded either: no follow-up, nothing in `seen`.
         assert!(data.follow_ups.is_empty());
         assert!(data.follow_seen.is_empty(), "{:?}", data.follow_seen);
@@ -985,15 +971,15 @@ mod tests {
         for author in ["ROBIN", ""] {
             let mut data = Data::default();
             let s1 = snap(1000, mine(author, &[("alex", "PENDING")]));
-            snapshot_on(&mut data.book(), None, &s1, 1000, true);
+            snapshot_on(&mut data.book(), None, &s1, 1000);
             let s2 = snap(2000, mine(author, &[("alex", "CHANGES_REQUESTED")]));
-            assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).len(), 1, "author {author:?}");
+            assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).len(), 1, "author {author:?}");
         }
         // While the person's login is not known, a pull request with an author is not taken for theirs.
         let mut data = Data::default();
         let mut s1 = snap(1000, mine("robin", &[("alex", "CHANGES_REQUESTED")]));
         s1.me = None;
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         assert!(data.follow_seen.is_empty() && data.follow_ups.is_empty());
     }
 
@@ -1002,13 +988,13 @@ mod tests {
         let mut data = Data::default();
         // First the pull request has no author yet, and a request for changes is followed.
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         assert_eq!(open(&data.follow_ups).len(), 1);
         // Then it turns out a teammate opened it.
         let mut theirs = pr(12, &[("alex", "CHANGES_REQUESTED"), ("mira", "COMMENTED")]);
         theirs.author = "sam-dev".into();
         let s2 = snap(2000, vec![session("s1", SessionState::Idle, Some(theirs))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).is_empty());
         assert!(open(&data.follow_ups).is_empty());
         assert_eq!((data.follow_ups[0].state, data.follow_ups[0].note.as_str()), (FollowState::Dropped, NOTE_NOT_YOURS));
     }
@@ -1018,27 +1004,27 @@ mod tests {
         let mut data = Data::default();
         // The first round has the session, but its pull request is not found yet.
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, None)]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         // Then the pull request, without its reviewers: the app reads those later.
         let s2 = snap(1010, vec![session("s1", SessionState::Idle, Some(pr(12, &[])))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 1010, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &s2, 1010).is_empty());
         // Minutes later the reviews that were there all along arrive: not news.
         let s3 = snap(1200, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED"), ("mira", "COMMENTED")])))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 1200, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 1200).is_empty());
         assert_eq!(open(&data.follow_ups).len(), 1, "but the request for changes is followed");
         // From then on, a review is.
         let s4 = snap(1260, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED"), ("mira", "APPROVED")])))]);
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 1260, true).len(), 1);
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s3), &s4, 1260).len(), 1);
     }
 
     #[test]
     fn the_first_review_on_a_pull_request_nobody_was_asked_to_review_is_told() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         // Known for long enough that "no reviewers" means there were none.
         let s2 = snap(1000 + REVIEWS_SETTLE_SECS, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "COMMENTED")])))]);
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 1000 + REVIEWS_SETTLE_SECS, true).len(), 1);
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 1000 + REVIEWS_SETTLE_SECS).len(), 1);
     }
 
     #[test]
@@ -1050,39 +1036,39 @@ mod tests {
             vec![session("s1", SessionState::Working, Some(p))]
         };
         let s1 = snap(1000, ci("passing"));
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         let failed = Event::CiFailed { session: "s1".into(), repo: "acme/app".into(), number: 12 };
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &snap(2000, ci("failing")), 2000, true), vec![failed.clone()]);
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2100, ci("failing")), 2100, true).is_empty());
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &snap(2000, ci("failing")), 2000), vec![failed.clone()]);
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2100, ci("failing")), 2100).is_empty());
         // Running again and failing again is the same streak.
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2200, ci("running")), 2200, true).is_empty());
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2300, ci("failing")), 2300, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2200, ci("running")), 2200).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2300, ci("failing")), 2300).is_empty());
         // Passing ends it.
-        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2400, ci("passing")), 2400, true).is_empty());
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &snap(2500, ci("failing")), 2500, true), vec![failed]);
+        assert!(snapshot_on(&mut data.book(), Some(&s1), &snap(2400, ci("passing")), 2400).is_empty());
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &snap(2500, ci("failing")), 2500), vec![failed]);
         // A restart while it fails does not tell it again.
-        assert!(snapshot_on(&mut data.book(), None, &snap(2600, ci("failing")), 2600, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), None, &snap(2600, ci("failing")), 2600).is_empty());
     }
 
     #[test]
     fn reviews_received_close_when_merged_or_resolved() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         let mut commented = pr(12, &[("alex", "COMMENTED"), ("mira", "CHANGES_REQUESTED")]);
         commented.unresolved_threads = 2;
         let s2 = snap(2000, vec![session("s1", SessionState::Idle, Some(commented.clone()))]);
-        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000, true).len(), 2);
+        assert_eq!(snapshot_on(&mut data.book(), Some(&s1), &s2, 2000).len(), 2);
         assert_eq!(open(&data.follow_ups).len(), 2);
         // The comment threads were resolved: only the request for changes is left.
         commented.unresolved_threads = 0;
         let s3 = snap(3000, vec![session("s1", SessionState::Idle, Some(commented.clone()))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 3000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s2), &s3, 3000).is_empty());
         assert_eq!(open(&data.follow_ups).iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["rv-acme/app#12@mira"]);
         // Merged: nothing is left.
         commented.state = "merged".into();
         let s4 = snap(4000, vec![session("s1", SessionState::Idle, Some(commented))]);
-        assert!(snapshot_on(&mut data.book(), Some(&s3), &s4, 4000, true).is_empty());
+        assert!(snapshot_on(&mut data.book(), Some(&s3), &s4, 4000).is_empty());
         assert!(open(&data.follow_ups).is_empty());
         assert_eq!(data.follow_ups.iter().find(|f| f.id == "rv-acme/app#12@mira").map(|f| f.note.as_str()), Some(NOTE_MERGED));
     }
@@ -1093,7 +1079,7 @@ mod tests {
         from_reviews(&mut data.book(), &settings(), &[review(vec![blocker("t1", false)])], 100);
         let mut s = session("rev1", SessionState::Idle, None);
         s.review_of = Some(("acme/app".into(), 1111));
-        snapshot_on(&mut data.book(), None, &snap(200, vec![s]), 200, true);
+        snapshot_on(&mut data.book(), None, &snap(200, vec![s]), 200);
         assert_eq!(data.follow_ups[0].session.as_deref(), Some("rev1"));
         assert_eq!(data.follow_ups[0].updated, 100);
     }
@@ -1102,7 +1088,7 @@ mod tests {
     fn people_get_their_names() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("sam-dev", "CHANGES_REQUESTED")])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         assert_eq!(who(&data.follow_ups[0]), "sam-dev");
         fill_people(&mut data.follow_ups, &settings());
         assert_eq!(who(&data.follow_ups[0]), "Sam");
@@ -1167,12 +1153,12 @@ mod tests {
     fn closing_by_number_closes_everything_on_that_pull_request() {
         let mut data = Data::default();
         let s1 = snap(1000, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED"), ("mira", "CHANGES_REQUESTED")])))]);
-        snapshot_on(&mut data.book(), None, &s1, 1000, true);
+        snapshot_on(&mut data.book(), None, &s1, 1000);
         assert_eq!(open(&data.follow_ups).len(), 2);
         assert!(close(&mut data.follow_ups, "12", false, 2000).is_some());
         assert!(open(&data.follow_ups).is_empty());
         // The reviewers have not changed their mind, so it stays closed.
-        snapshot_on(&mut data.book(), Some(&s1), &snap(3000, s1.sessions.clone()), 3000, true);
+        snapshot_on(&mut data.book(), Some(&s1), &snap(3000, s1.sessions.clone()), 3000);
         assert!(open(&data.follow_ups).is_empty());
     }
 
