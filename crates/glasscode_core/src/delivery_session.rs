@@ -34,6 +34,9 @@ pub const EXPIRY_MS: u64 = 24 * 3_600_000;
 /// How long the app waits for the receipt after the Enter.
 pub const RECEIPT_WAIT_MS: u64 = 15_000;
 
+/// How many times a delivery that was not sent is put back in its queue.
+pub const MAX_TRIES: u32 = 3;
+
 /// One message to type into a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delivery {
@@ -55,6 +58,9 @@ pub struct Delivery {
     pub expires_ms: u64,
     /// Goes before the others (an interrupt).
     pub urgent: bool,
+    /// How many times it was not sent (a question came up before the Enter); it is tried again
+    /// up to [`MAX_TRIES`] times.
+    pub tries: u32,
 }
 
 impl Delivery {
@@ -75,6 +81,7 @@ impl Delivery {
             queued_ms: now_ms,
             expires_ms: now_ms.saturating_add(EXPIRY_MS),
             urgent: false,
+            tries: 0,
         }
     }
 
@@ -268,6 +275,22 @@ impl Queues {
         Step::Send(delivery)
     }
 
+    /// The delivery in flight was not sent: it goes back to the front of its queue, unless it was
+    /// tried [`MAX_TRIES`] times (then it is given back, over).
+    pub fn not_sent(&mut self, session: &str, id: &str) -> Option<Delivery> {
+        let lane = self.lanes.get_mut(session)?;
+        let mut delivery = lane.in_flight.take_if(|d| d.id == id)?;
+        delivery.tries += 1;
+        if delivery.tries >= MAX_TRIES {
+            if lane.waiting.is_empty() {
+                self.lanes.remove(session);
+            }
+            return Some(delivery);
+        }
+        lane.waiting.push_front(delivery);
+        None
+    }
+
     /// The delivery in flight is over; the next may go. Gives it back.
     pub fn finish(&mut self, session: &str, id: &str) -> Option<Delivery> {
         let lane = self.lanes.get_mut(session)?;
@@ -409,6 +432,17 @@ mod tests {
         assert_eq!(queues.expire(5_000), [stale]);
         assert!(matches!(queues.next("s1", &idle()), Step::Send(d) if d.text == "stop"));
         assert_eq!(queues.finish("s1", "not it"), None);
+        // One not sent goes back to the front, until its tries are over.
+        let in_flight = queues.in_flight("s1").unwrap().id.clone();
+        assert_eq!(queues.not_sent("s1", &in_flight), None);
+        for _ in 1..MAX_TRIES {
+            let Step::Send(again) = queues.next("s1", &idle()) else { panic!() };
+            assert_eq!(again.text, "stop");
+            if let Some(over) = queues.not_sent("s1", &again.id) {
+                assert_eq!(over.tries, MAX_TRIES);
+            }
+        }
+        assert!(matches!(queues.next("s1", &idle()), Step::Send(d) if d.text == "fresh"));
     }
 
     #[test]

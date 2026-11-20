@@ -499,6 +499,19 @@ pub fn finish(key: &EffectKey, state: EffectState) -> std::io::Result<()> {
     append(&month_file(now), &Line::Finish { v: SCHEMA, key: *key, attempt: record.attempt, state, ms: now })
 }
 
+/// [`finish`] on a thread of its own, for a caller on the main thread with no executor at hand;
+/// a failure is logged.
+pub fn finish_later(key: EffectKey, state: EffectState) {
+    let started = std::thread::Builder::new().name("glasscode-effects".into()).spawn(move || {
+        if let Err(err) = finish(&key, state) {
+            log::error!("effects: the result of {key} could not be written ({err})");
+        }
+    });
+    if let Err(err) = started {
+        log::error!("effects: the result of {key} could not be written ({err})");
+    }
+}
+
 /// Write an effect that is already settled (M44: v1's "seen" keys become effect keys, so nothing
 /// is said twice after the switch). Nothing is written when its key is there.
 pub fn record_settled(intent: &Intent, home: &MachineId, state: EffectState) -> std::io::Result<bool> {
