@@ -70,7 +70,7 @@ fn claude_hook_settings(v2: Option<&Path>, brief: bool) -> String {
     let hook = if v2.is_some() { serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }]) } else { serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]) };
     let mut settings = serde_json::json!({
         "hooks": {
-            "SessionStart": session_start,
+            "SessionStart": hook,
             "UserPromptSubmit": hook,
             "Stop": hook,
             "Notification": hook,
