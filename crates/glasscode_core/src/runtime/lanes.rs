@@ -276,6 +276,9 @@ mod tests {
         }
         fn notify(&self, _: &str, _: &str, _: &str) {}
         fn brain_checked(&self, _: Lane, _: Option<&str>) {}
+        fn propose(&self, _: &crate::ops::Op, _: &str, _: Lane, _: Option<&str>) -> Result<String, String> {
+            Ok("p1".into())
+        }
     }
 
     fn spec() -> BrainSpec {

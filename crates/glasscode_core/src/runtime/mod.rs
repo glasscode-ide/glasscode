@@ -42,6 +42,9 @@ pub trait Host: Send + Sync {
     /// The brain of `lane` (and `wake`) passed its tool-list check: its MCP server's calls are
     /// served from now on (brain-m5).
     fn brain_checked(&self, lane: Lane, wake: Option<&str>);
+    /// A card for the person: `op` as a wake proposed it, with its reason; the pending action's id
+    /// (a gate "never" refuses it).
+    fn propose(&self, op: &Op, reason: &str, lane: Lane, wake: Option<&str>) -> Result<String, String>;
 }
 
 /// The driver for a brain spec.
@@ -241,6 +244,9 @@ mod tests {
         }
         fn brain_checked(&self, _: Lane, _: Option<&str>) {
             *self.checked.lock().unwrap() += 1;
+        }
+        fn propose(&self, _: &Op, _: &str, _: Lane, _: Option<&str>) -> Result<String, String> {
+            Ok("p1".into())
         }
     }
 
