@@ -839,7 +839,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - It is posted at once only when the author passes `gate::trusted_author` and the repository opted in. Otherwise it is `pr.comment` from auto-review, which waits on a card.
     - `review-prompt.md` counts only once its content is approved in Settings › Automation (`authority/approved/review-prompt.json`).
   - **The browser's MCP server** asks the gate before each tool call (`browser.read`, `browser.act`, `browser.eval`, v2 only), with the page's site and whether the browser holds cookies for it. Acting or running script on a signed-in site asks.
-  - **Sessions the manager drives** get no browser tools.
+  - **Sessions the manager drives** get no browser tools, unless their project's approved policy names sites (`browser_hosts`). Such a session's browser server then works as follows:
+    - its tab opens in a context of its own: no sign-ins and none of the person's cookies, disposed of when the tab goes;
+    - it pauses every request (`Fetch.enable`) and lets through only those to the named hosts and their subdomains (`browser::host_allowed`, `cdp::request_answer`);
+    - the gate allows its reads and acts there without a card, refuses every other site, and still asks on a site it became signed in on;
+    - the gate hook lets its `mcp__glasscode-browser__*` tools through (`--browser`).
+
+    Careful takes the list away, with the other permissions.
   - **The DevTools port** is a random one per launch, read from the profile's `DevToolsActivePort` with its secret path.
   - **The forge wall (D29).** With the v2 engine, the default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
   - **`pr open-draft`** asked by anyone but the person pushes only commits the session's own turn reports list (the journal's `turn.ended`). Brokered push (D13) is not built, because P14 did not pass (O7).
