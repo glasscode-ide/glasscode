@@ -552,7 +552,7 @@ mod tests {
             let mut rest = text.as_str();
             while let Some(at) = rest.find("#[action(namespace = ") {
                 rest = &rest[at + "#[action(namespace = ".len()..];
-                let namespace = &rest[..rest.find(')').unwrap()];
+                let namespace = rest[..rest.find(')').unwrap()].split(',').next().unwrap_or_default().trim();
                 let after = &rest[rest.find("pub struct ").unwrap() + "pub struct ".len()..];
                 let name: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
                 actions += 1;
