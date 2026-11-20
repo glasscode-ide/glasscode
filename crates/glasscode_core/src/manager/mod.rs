@@ -24,6 +24,7 @@ pub mod gh;
 pub mod harness;
 pub mod memory;
 pub mod messages;
+pub mod migrate_v2;
 pub mod messenger;
 pub mod scene;
 pub mod store;

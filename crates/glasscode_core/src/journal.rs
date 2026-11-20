@@ -242,6 +242,14 @@ pub fn enabled() -> bool {
     on
 }
 
+/// Decide again whether this process keeps a journal (the engine switch changed: a server that
+/// takes the Mac's, M57). It reads the disk.
+pub fn decide_again() -> bool {
+    MODE.store(0, Ordering::Relaxed);
+    *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    init()
+}
+
 /// Whether the journal is on, once [`enabled`] decided; None before (no disk read).
 pub fn known_enabled() -> Option<bool> {
     match MODE.load(Ordering::Relaxed) {

@@ -404,6 +404,7 @@ impl Syncer {
             pending,
             work,
             have: self.have.clone(),
+            engine: Some(crate::store::EngineSwitch::current()),
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -443,17 +444,29 @@ impl Syncer {
         outcome.board = reply.board.and_then(|b| serde_json::from_value(b).ok());
         if v2 {
             // Sent: the next sync goes on from here (unless the records waited: then nothing went).
-            if !kept.all {
+            // A kind the server could not take in goes again.
+            let taken = |kind: &str| !kept.all && !reply.not_taken.iter().any(|k| k == kind);
+            if taken("journal") {
                 if let Some(next) = journal_next {
                     self.journal_sent = Some(next.clone());
                     outcome.journal_sent = Some(next);
                 }
+            }
+            if taken("effects") {
                 self.effects_sent_ms = sync_started_ms;
+            }
+            if taken("words") {
                 if let Some(next) = words_next {
                     self.words_sent_ms = next;
                 }
+            }
+            if taken("conversation") {
                 self.conversation_sent = conversation_cursor;
+            }
+            if taken("pending") {
                 self.pending_sent_ms = sync_started_ms;
+            }
+            if taken("work") {
                 if let Some(next) = work_next {
                     self.work_sent = Some(next);
                 }

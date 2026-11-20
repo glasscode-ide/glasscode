@@ -63,4 +63,17 @@ pub(super) const OPS: &[OpSpec] = &[
         options: Options::Ignore,
         ..OpSpec::READ
     },
+    // M33.2 (ops-10), the v2 engine's: a long op that answered "started" stops when asked, and a
+    // request that waits for the person is taken back. Its caller's own, or any for the person; it
+    // changes nothing but that, so it is a read for the gate, and the handler says who may.
+    OpSpec {
+        name: "ops.cancel",
+        cli: &["cancel"],
+        host: OpHost::Window,
+        summary: "stop a long op you started (its id from “started”), or take back your request that waits for the person",
+        args: &[ArgSpec { name: "id", kind: ArgKind::Number, required: true, help: "the id it answered with", at: At::Word(0), missing: "cancel <id>: the id the op answered with.", default: None }],
+        examples: &["cancel <id>"],
+        v2_only: true,
+        ..OpSpec::READ
+    },
 ];
