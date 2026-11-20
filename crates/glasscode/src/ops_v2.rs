@@ -56,6 +56,9 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("settings.get", settings_get),
     ("settings.set", settings_set),
     ("session.report", session_report),
+    ("policy.set", trust_set),
+    ("playbook.set", trust_set),
+    ("schedule.set", trust_set),
 ];
 
 /// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
@@ -81,6 +84,87 @@ fn session_report(_ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             Err(why) => failed(why),
         };
         ws.reply(r, reply);
+    })
+}
+
+/// `policy set`, `playbook set` and `schedule set` (M53): the change's preview, and with
+/// `--confirm` the change. The person's only (the ops are `human_only`); what they write is
+/// approved as it is.
+fn trust_set(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::trust::{self, Change};
+    if !person(caller) {
+        return Err(error(ErrorCode::Denied, "Only you change what the manager may do, in Settings or at your own terminal."));
+    }
+    let change = match op.name() {
+        "policy.set" => {
+            let word = text(op, "project");
+            let project = ws.state.projects.iter().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| error(ErrorCode::NotFound, format!("No project “{word}”. `glasscode project list` lists them.")))?;
+            let key = ws.control.project_keys.get(&project.id).cloned().ok_or_else(|| failed(format!("{} has no project key yet, so its policy cannot change.", project.name)))?;
+            let given = [op.text("level").is_some(), op.text("condition").is_some(), op.number("remove_condition").is_some()].iter().filter(|g| **g).count();
+            if given != 1 {
+                return Err(usage("Say one change: --level, --condition or --remove-condition."));
+            }
+            if let Some(level) = op.text("level") {
+                let level = glasscode_core::gate::Level::parse(level).ok_or_else(|| usage(format!("“{level}” is no level: careful, standard or autopilot.")))?;
+                Change::Level { project: key, level }
+            } else if let Some(condition) = op.text("condition") {
+                Change::AddCondition { project: key, condition: trust::parse_condition(condition).map_err(usage)? }
+            } else {
+                let n = op.number("remove_condition").unwrap_or(0);
+                if n == 0 {
+                    return Err(usage("Conditions count from 1."));
+                }
+                Change::RemoveCondition { project: key, index: n as usize - 1 }
+            }
+        }
+        name => {
+            let id = text(op, if name == "playbook.set" { "playbook" } else { "schedule" }).to_string();
+            let state = text(op, "state").to_lowercase();
+            match (name, state.as_str()) {
+                ("playbook.set", "on" | "off") => Change::Playbook { id, on: state == "on" },
+                ("playbook.set", "approve") => Change::ApprovePlaybook { id },
+                (_, "on" | "off") => Change::Schedule { id, on: state == "on" },
+                (_, "approve") => Change::ApproveSchedule { id },
+                _ => return Err(usage("Say on, off or approve.")),
+            }
+        }
+    };
+    let confirm = op.on("confirm");
+    let policy = {
+        let authority = &ws.control.authority;
+        authority.approved.clone().or_else(|| (!authority.live_differs).then(|| authority.policy.clone())).ok_or_else(|| failed("The approved policy could not be read, so nothing can change until it is repaired."))?
+    };
+    let forge = ws.control_policy_set().forge;
+    plan(Kind::Settings, "change what the manager may do", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            let book = glasscode_core::playbooks::load(&glasscode_core::playbooks::model::journal_schema()).ok();
+            let schedules = glasscode_core::schedule::ScheduleFile::load().ok();
+            let world = trust::World { policy: &policy, book: book.as_ref(), schedules: schedules.as_ref(), forge: &forge };
+            let pending = trust::prepare(change, &world)?;
+            let done = if confirm { Some(trust::apply(&pending, true)?) } else { None };
+            let authority = done.is_some().then(glasscode_core::gate::load);
+            Ok::<_, String>((pending, done, authority))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                let reply = match result {
+                    Ok((pending, done, authority)) => {
+                        let mut text = vec![pending.title.clone()];
+                        text.extend(pending.lines.iter().map(|line| format!("  {line}")));
+                        text.push(done.clone().unwrap_or_else(|| "Nothing changed yet: give the same command with --confirm to make it.".into()));
+                        if let Some(authority) = authority {
+                            ws.control_set_authority(authority, cx);
+                        }
+                        Reply::ok(text.join("\n"), json!({ "change": pending.change, "preview": pending.lines, "changed": done.is_some() }))
+                    }
+                    Err(why) => failed(why),
+                };
+                ws.reply(r, reply);
+            });
+        })
+        .detach();
     })
 }
 

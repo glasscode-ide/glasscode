@@ -143,6 +143,8 @@ pub struct Workspace {
     pub mirror: crate::mirror_ui::MirrorUi,
     /// The journal's part of the app (M14).
     pub journal: crate::journal_ui::JournalUi,
+    /// Settings' trust part: playbooks and schedules as read (M53).
+    pub trust: crate::trust_ui::TrustUi,
     pub browser: crate::browser_ui::BrowserUi,
     pub switch: Option<crate::switch_ui::SwitchForm>,
     /// Moving in (M35): its dialog's state, kept while it is hidden.
@@ -282,6 +284,7 @@ impl Workspace {
             update: crate::update_ui::UpdateUi::new(),
             mirror: crate::mirror_ui::MirrorUi::new(),
             journal: Default::default(),
+            trust: Default::default(),
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
             movein: None,
@@ -1466,6 +1469,7 @@ impl Workspace {
         self.themes_tick(cx);
         self.today_tick(cx);
         self.journal_tick(cx);
+        self.trust_tick(cx);
         self.remember_right_tab();
         let mut dirty = false;
         let mut redraw = false;

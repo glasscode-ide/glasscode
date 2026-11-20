@@ -490,7 +490,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "policy.", "schedule."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -648,6 +648,9 @@ mod tests {
         browser.eval Browser Outward AtMostOnce Window board - - v2
         playbook.check Read Read Idempotent Core read - - v2
         playbook.test Read Read Idempotent Core read - - v2
+        playbook.set Settings LocalWrite Idempotent Core settings - person v2
+        policy.set Settings LocalWrite Idempotent Core settings - person v2
+        schedule.set Settings LocalWrite Idempotent Core settings - person v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

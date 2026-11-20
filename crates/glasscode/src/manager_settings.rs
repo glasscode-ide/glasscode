@@ -656,6 +656,8 @@ impl Workspace {
             })))
             .into_any_element();
         out.push(group("Daily brief", "", vec![row("Daily brief", brief_detail, Some(brief_control))]));
+        // Trust (M53): levels, conditions, playbooks and schedules, with the v2 engine.
+        out.extend(self.trust_settings(cx));
 
         out
     }
