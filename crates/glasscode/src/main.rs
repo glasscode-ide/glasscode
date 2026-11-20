@@ -35,6 +35,7 @@ mod manager_state;
 mod manager_tick;
 mod manager_ui;
 mod manager_voice;
+mod learning_host;
 mod movein_ui;
 mod scenes_ui;
 mod mirror_ui;

@@ -152,6 +152,8 @@ pub struct Workspace {
     pub movein: Option<crate::movein_ui::MoveIn>,
     /// The scheduled export, as last read (M25).
     pub export_schedule: Option<glasscode_core::portability::ExportSchedule>,
+    /// Memory's learning (M62).
+    pub learning: crate::learning_host::Learning,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
@@ -297,6 +299,7 @@ impl Workspace {
             switch: None,
             movein: None,
             export_schedule: None,
+            learning: Default::default(),
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
