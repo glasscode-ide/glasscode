@@ -304,20 +304,18 @@ pub const V2_FEATURES: [&str; 2] = ["brief", "turn_hooks"];
 pub enum AtStart {
     /// Nothing to do: v2 already, or a switch file that does not read (it fails closed: v1).
     Keep,
-    /// v2 now: a new install, or a home whose manager is off.
+    /// v2 now: every home at v1 (M56 removal: v1's manager goes, so a home whose manager is on
+    /// switches too, before its first round).
     Switched,
-    /// The manager is on: Settings › Manager offers "Switch now"; v1 runs until then.
-    Offer,
 }
 
-/// What the start does with the switch (`switch` as it reads, None when it does not): v2 for a
-/// new install and for a home whose manager is off; an offer where v1's manager runs.
-pub fn decide_at_start(switch: Option<&crate::store::EngineSwitch>, new_install: bool, manager_on: bool) -> AtStart {
+/// What the start does with the switch (`switch` as it reads, None when it does not): v2 for
+/// every home still at v1.
+pub fn decide_at_start(switch: Option<&crate::store::EngineSwitch>) -> AtStart {
     match switch {
         None => AtStart::Keep,
         Some(switch) if switch.engine == crate::store::Engine::V2 => AtStart::Keep,
-        Some(_) if new_install || !manager_on => AtStart::Switched,
-        Some(_) => AtStart::Offer,
+        Some(_) => AtStart::Switched,
     }
 }
 
@@ -332,16 +330,17 @@ pub fn write_switch() -> Result<(), String> {
     .map_err(|err| format!("the engine switch could not be written ({err})"))
 }
 
-/// The start's switch (M56 step 1), before anything of this run reads the engine: a new install
-/// (no `state.json` yet) and a home whose manager is off are on v2 from now on. v1's data moves into
-/// the v2 stores at this start's first ticks, as in any v2 home ([`run`], M20.3's notes), because
-/// those stores take writes only in a v2 home. A switch file that does not read stays as it is.
-pub fn switch_at_start(new_install: bool, manager_on: bool) -> AtStart {
+/// The start's switch (M56), before anything of this run reads the engine: every home is on v2
+/// from now on, a new install as one whose v1 manager ran (nothing of v1's runs before this). v1's
+/// data moves into the v2 stores at this start's first ticks, as in any v2 home ([`run`], M20.3's
+/// notes), because those stores take writes only in a v2 home. A switch file that does not read
+/// stays as it is.
+pub fn switch_at_start() -> AtStart {
     let switch = match crate::store::open::<crate::store::EngineSwitch>() {
         Ok(crate::store::Opened { value, found: crate::store::Found::File | crate::store::Found::Missing }) => Some(value),
         _ => None,
     };
-    let at = decide_at_start(switch.as_ref(), new_install, manager_on);
+    let at = decide_at_start(switch.as_ref());
     if at == AtStart::Switched
         && let Err(why) = write_switch()
     {
@@ -446,20 +445,16 @@ mod tests {
         }
     }
 
-    /// M56 step 1: the decision at the start. A new install and a home whose manager is off go
-    /// to v2; one whose manager runs is offered the switch; v2 stays; a switch that does not read
-    /// stays v1 (it fails closed).
+    /// M56: the decision at the start. Every home at v1 goes to v2, also one whose manager runs;
+    /// v2 stays; a switch that does not read stays as it is (it fails closed).
     #[test]
-    fn the_start_switches_new_and_manager_off_homes() {
+    fn the_start_switches_every_home() {
         use crate::store::{Engine, EngineSwitch};
         let v1 = EngineSwitch::default();
         let v2 = EngineSwitch { engine: Engine::V2, ..EngineSwitch::default() };
-        assert_eq!(decide_at_start(Some(&v1), true, false), AtStart::Switched);
-        assert_eq!(decide_at_start(Some(&v1), true, true), AtStart::Switched, "a new install has no v1 manager yet");
-        assert_eq!(decide_at_start(Some(&v1), false, false), AtStart::Switched);
-        assert_eq!(decide_at_start(Some(&v1), false, true), AtStart::Offer);
-        assert_eq!(decide_at_start(Some(&v2), false, true), AtStart::Keep);
-        assert_eq!(decide_at_start(None, true, false), AtStart::Keep);
+        assert_eq!(decide_at_start(Some(&v1)), AtStart::Switched);
+        assert_eq!(decide_at_start(Some(&v2)), AtStart::Keep);
+        assert_eq!(decide_at_start(None), AtStart::Keep);
     }
 
     /// M56 step 1: a v1 home whose manager runs switches with "Switch now". The engine is v2 with
@@ -479,8 +474,6 @@ mod tests {
         data.notes.push(crate::manager::Note { id: "n1".into(), text: "The release train leaves on Thursdays.".into(), source: "you".into(), created: 1_763_000_000, updated: 1_763_000_000, ..Default::default() });
         super::super::store::save(&data).unwrap();
         EngineSwitch { engine: Engine::V1, switches: BTreeMap::from([("profiles".to_string(), false)]) }.save().unwrap();
-        assert_eq!(switch_at_start(false, true), AtStart::Offer, "v1's manager runs: it is offered");
-        assert_eq!(EngineSwitch::current().engine, Engine::V1);
         // All or nothing: a data.json that does not read switches nothing.
         let good = std::fs::read(super::super::store::file()).unwrap();
         std::fs::write(super::super::store::file(), "{ not json").unwrap();
@@ -502,13 +495,13 @@ mod tests {
         // The told reviews are settled: nothing is said twice.
         assert!(effects::find(&seen_key("tell|s2|acme/app#11|alex")).unwrap().is_some());
         // The next start keeps v2.
-        assert_eq!(switch_at_start(false, true), AtStart::Keep);
+        assert_eq!(switch_at_start(), AtStart::Keep);
         // A new home switches at its first start (here: the switch file goes, as in a new home).
         for file in std::fs::read_dir(crate::paths::authority_dir()).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("engine.json"))) {
             std::fs::remove_file(file).unwrap();
         }
         assert_eq!(EngineSwitch::current().engine, Engine::V1);
-        assert_eq!(switch_at_start(true, false), AtStart::Switched);
+        assert_eq!(switch_at_start(), AtStart::Switched);
         let fresh = EngineSwitch::current();
         assert_eq!((fresh.engine, fresh.is_on("brief"), fresh.is_on("turn_hooks")), (Engine::V2, true, true));
         assert!(!fresh.is_on("profiles"), "profiles waits for the owner's live run");
