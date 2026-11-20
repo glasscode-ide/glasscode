@@ -509,3 +509,35 @@ fn a_conversation_moves_as_the_mirrors_missing_tail() {
     // A path out of the account is refused.
     assert!(client.call::<Value>("mirror.conversation_into", json!({ "session_id": id, "account_id": account["id"], "rel": "../x", "from": worktree, "to": to })).is_err());
 }
+
+/// The manager's home (M58): the server is home until the Mac claims it; the Mac renews at its
+/// generation; an older generation is refused; a release hands home back at once.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_manager_home_moves_by_claim_and_release() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json*; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_id = client.hello.machine.clone().unwrap();
+    let mac = MachineId::this().unwrap();
+    let record: glasscode_core::home::HomeRecord = client.call("home.get", json!({})).unwrap();
+    assert_eq!((record.home.clone(), record.generation), (server_id.clone(), 0));
+    let granted: glasscode_core::home::HomeRecord = client.call("home.claim", json!({})).unwrap();
+    assert_eq!((granted.home.clone(), granted.generation), (mac.clone(), 1));
+    let renewed: Value = client.call("home.renew", json!({ "generation": 1 })).unwrap();
+    assert_eq!(renewed["ok"], true);
+    let stale: Value = client.call("home.renew", json!({ "generation": 0 })).unwrap();
+    assert_eq!(stale["ok"], false, "an older generation is refused");
+    let released: Value = client.call("home.release", json!({ "generation": 1 })).unwrap();
+    assert_eq!(released["ok"], true);
+    let record: glasscode_core::home::HomeRecord = client.call("home.get", json!({})).unwrap();
+    assert_eq!((record.home, record.generation), (server_id, 2), "the server is home at once");
+}
