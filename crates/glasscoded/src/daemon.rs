@@ -228,8 +228,17 @@ impl Daemon {
         let now = glasscode_core::clock::now_ms();
         let changes = self.journal.turns.entry(id.to_string()).or_default().feed(now, &signal);
         for change in changes {
-            let Some(session) = self.state.session(id).cloned() else { continue };
             let key = self.key_of(id);
+            let Some(session) = self.state.session(id).cloned() else {
+                // Its session is gone: the turn still gets its report, from what its end said.
+                if let Change::Closed(closed) = change {
+                    let gathered = turns::Gathered { partial: true, ..turns::Gathered::default() };
+                    let mut event = turns::ended_event(key.as_ref(), &turns::report(id, &closed, &gathered));
+                    event.source = Source::Daemon;
+                    journal::append(event);
+                }
+                continue;
+            };
             match change {
                 Change::Opened(turn) => {
                     let offset = turns::transcript_len(session.transcript_path.as_ref());
