@@ -755,7 +755,8 @@ mod tests {
         env.insert("GLASSCODE_TEST_CLI_HELP".into(), scripts_dir().join("..").join("cli-help").to_string_lossy().into_owned());
         let spec = BrainSpec {
             program: scripts_dir().join("claude"),
-            cwd: dir.path().join("work"),
+            // The only folder a brain runs in (exec-24, `driver::brain_folder`): the test home's.
+            cwd: crate::paths::manager_work_dir(),
             run_dir: dir.path().join("run"),
             env: env.into_iter().collect(),
             ..super::tests::spec()
