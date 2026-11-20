@@ -472,6 +472,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   8. **Forgetting a secret.** The repository is rebuilt from its current tree into a fresh history, so the secret leaves git. The old history is deleted, and the person is told that history before that point is gone (mem-13).
   9. **The work file** `work/<WorkKey::file_name()>.md` (M11) starts with its exact work id, kind and project. A reader checks that id before it uses the file, because the name carries only 24 bits of hash (exec-12).
   10. **Ages.** A status that changes with age (`mentioned`, `learned`, `let-go`) counts active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used, so a time-zone change or a clock jump moves no status (crit-9, mem-20).
+  11. **A project's key is bound only to a folder that exists.** Before the key of a project's folder is bound or first used, check that the folder exists and is mounted. `identity::facts` of a missing folder gives plain facts, not an error, and binding them would give the project a key made from its path (from M11).
 - **Tests:**
   - `entry_round_trip`;
   - `direct_edit_is_not_in_the_brief` (a file written directly, and a commit made with plain `git`, are both pending);
@@ -1270,7 +1271,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
      Rules for every synced record (from M11):
      - **Stamps (crit-9).** Records merge by `identity::Hlc` stamp, never by wall time, and a forget tombstone beats any stamp. A record stamped more than `identity::MAX_AHEAD_MS` ahead of the receiver's clock is quarantined, not merged, and shown in Activity.
-     - **A clock that went back by more than an hour (crit-9).** A machine whose own last stamp is more than `identity::MAX_AHEAD_MS` ahead of its clock (`Hlc::too_far_ahead`) shows "this Mac's clock went back; its changes wait until <time>". The state ends when the clock passes the last stamp, or when the person chooses "use the server's copy".
+     - **A clock that went back by more than an hour (crit-9).** A machine whose own last stamp is more than `identity::MAX_AHEAD_MS` ahead of its clock (`Hlc::too_far_ahead`) shows "this Mac's clock went back; its changes wait until <time>". The state ends when the clock passes the last stamp, or when the person chooses "use the server's copy". That choice also resets this machine's persisted `Hlc` `last` to the server's latest stamp: otherwise its next write is still too far ahead.
      - **Machines (crit-10).** Every sync request, session record and effect claim carries the sender's `MachineId`. glasscoded keeps its state per machine id, and addresses each queued action to the machine that owns the target session. A second Mac is an observer: it reads, shows and answers approvals, and acts only on its own sessions.
   4. **Authority stays one way.** Approved snapshots go from the Mac to the server. Policy changes happen only in the Mac app.
   5. **Home choices** in Settings: Automatic, Always on the server, Always this Mac. Under "Always on the server" the Mac is a client: it shows the same conversation, runs Window ops, and runs its own sessions.
