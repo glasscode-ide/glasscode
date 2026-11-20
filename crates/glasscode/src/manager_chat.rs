@@ -27,7 +27,6 @@ use glasscode_core::runtime::{BrainSpec, Host, Ledger, Outcome, TurnEnd, Update}
 use glasscode_core::store::Store as _;
 use glasscode_core::words::WordsId;
 
-use crate::manager_tick::OnAnswer;
 use crate::theme;
 use crate::workspace::Workspace;
 
@@ -152,6 +151,10 @@ const WATCH: Duration = Duration::from_secs(2);
 fn changed_at() -> Option<SystemTime> {
     std::fs::read_dir(glasscode_core::conversation::dir()).ok()?.filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok()).max()
 }
+
+
+/// Called with the manager's answer to a question, or why there is none.
+pub type OnAnswer = Box<dyn FnOnce(&mut Workspace, Result<String, String>, &mut Context<Workspace>)>;
 
 impl Workspace {
     /// Start the conversation's writer and watcher (with the v2 engine), once.
@@ -2066,6 +2069,48 @@ impl Workspace {
                     None => crate::center::open_url(&format!("https://github.com/{repo}/pull/{number}"), cx),
                 }
             }
+        }
+    }
+}
+
+// ----- asking it (the voice, the Try phrases, `manager ask`) ----------------------------------------
+
+impl Workspace {
+    /// The person said or typed something to it: the chat lane answers (M52.1).
+    pub fn manager_ask(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
+        self.mtick_ask(text, voice, None, cx);
+    }
+
+    /// A question with whose words it is (M52.1, the v2 chat): `words`, the person's record from
+    /// the box they typed in; `asker`, who asked when it was not the person (a command), and
+    /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
+    /// waits for it.
+    pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
+            return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
+        }
+        self.mtick_ask(text, voice, on_answer, cx);
+    }
+
+    /// A question to the chat. Said, or put in the box by the app (a Try phrase): its words are
+    /// recorded as such (D1). One that cannot be asked is answered with why.
+    fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
+            let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
+            let words = glasscode_core::words::record(origin, &text, None, None);
+            return self.chat_ask(text, Some(words), None, voice, on_answer, cx);
+        }
+        let why = if !self.state.manager.enabled {
+            "The manager is switched off. Settings › Manager switches it on."
+        } else if text.is_empty() {
+            "There was nothing to answer."
+        } else {
+            // Only a home whose engine switch could not be written is still at v1 (M56).
+            "The manager runs with Manager v2 only. Settings › Manager switches to it."
+        };
+        if let Some(on_answer) = on_answer {
+            on_answer(self, Err(why.to_string()), cx);
         }
     }
 }

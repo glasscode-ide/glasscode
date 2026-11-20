@@ -137,7 +137,7 @@ click outside or Esc closes one, and the click does not reach what is below.
 | Syntax colours | `file_view.rs`, `editor.rs`, `theme.rs` (code colours) | U21 |
 | Project settings, the setup question | `project_setup.rs`, `settings_ui.rs` | U22 |
 | Programs outside Glasscode (folders, files, editors), started from a task | `center.rs` (`start_outside`, `open_url`) | U17, U23 |
-| The manager: page, sidebar row, bubble, Settings › Manager, its rounds | `manager_ui.rs`, `manager_settings.rs`, `manager_tick.rs`, `manager_home.rs`, `manager_voice.rs`, `scenes_ui.rs` | from `main` |
+| The manager: page, sidebar row, bubble, Settings › Manager, its round, its view (says, points, walks) | `manager_ui.rs`, `manager_settings.rs`, `manager_round.rs`, `manager_view.rs`, `manager_tick.rs` (v1's round, until M56's final removal), `manager_voice.rs`, `scenes_ui.rs` | from `main` |
 
 ### Core modules of the redesign
 
