@@ -354,7 +354,6 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Only the app's window is the person to memory; a session reaches only its own session and project; a change by anyone else to what the person confirmed is a proposal.
 - **Delivery** happens with v2 and the engine switch `brief` on (rule 2: with v1 nothing changes).
   - A Claude session gets a second `SessionStart` hook, `"<glasscode>" memory brief --hook`. It prints the fixed memory instructions and the current brief as `additionalContext` at start, on resume and after a compaction (P03).
-  - Before a compaction, its `PreCompact` hook runs `"<glasscode>" memory snapshot` (land-18). The session's last turn report (M30's `turn.ended` line) goes into its work file, so the brief after the compaction holds where the work was. With no report, or no work yet, nothing is kept, and the hook does not fail.
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
   - An auto-review run gets its project's brief, read-only, ahead of its task.
 

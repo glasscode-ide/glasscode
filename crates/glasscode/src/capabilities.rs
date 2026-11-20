@@ -502,7 +502,6 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode memory show", "control_plan", "memory.show"),
     op("Command", "glasscode memory brief", "control_plan", "memory.brief"),
     op("Command", "glasscode memory note", "control_plan", "memory.note"),
-    op("Command", "glasscode memory snapshot", "control_plan", "memory.snapshot"),
     op("Command", "glasscode memory propose", "control_plan", "memory.propose"),
     op("Command", "glasscode memory accept", "control_plan", "memory.accept"),
     op("Command", "glasscode memory reject", "control_plan", "memory.reject"),

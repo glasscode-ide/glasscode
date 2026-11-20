@@ -53,7 +53,6 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("memory.show", memory_show),
     ("memory.brief", memory_brief),
     ("memory.note", memory_note),
-    ("memory.snapshot", memory_snapshot),
     ("memory.propose", memory_propose),
     ("memory.accept", memory_accept),
     ("memory.reject", memory_reject),
@@ -2028,29 +2027,6 @@ fn memory_note(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let worktree = ask.session.as_ref().map(|s| s.worktree.clone());
             let remembered = Memory::open().note_in(&ask.who, &work, worktree.as_deref(), &text).map_err(memory_reply)?;
             Ok(remembered_reply(remembered, &format!("Noted in the work file of {}", work.id)))
-        };
-        run().unwrap_or_else(|reply| reply)
-    })
-}
-
-/// `memory snapshot` (Claude's PreCompact hook, land-18): the session's last turn report goes into
-/// its work file, so the brief after the compaction holds where the work was. Nothing to keep is
-/// no failure: a hook's failure would show in the session.
-fn memory_snapshot(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
-    let ask = memory_ask(ws, caller, op)?;
-    let Some(session) = ask.session.clone() else {
-        return Err(usage("Say whose work it is: `glasscode memory snapshot --session <id>` (a session's own needs no --session)."));
-    };
-    memory_plan(Kind::Board, "note the last turn in the work file", move || {
-        let run = || -> Result<Reply, Reply> {
-            let Some(line) = glasscode_core::memstore::archive::last_turn(std::slice::from_ref(&session.id)) else {
-                return Ok(Reply::ok("No turn report yet: nothing to keep before the compaction.", json!({ "kept": false })));
-            };
-            let Some(key) = ask.key()? else { return Ok(Reply::ok("That session's project has no memory key: nothing kept.", json!({ "kept": false }))) };
-            let Some(work) = ask.work(&key) else { return Ok(Reply::ok("That session has no piece of work: nothing kept.", json!({ "kept": false }))) };
-            let text = format!("Before a compaction, the last turn: {line}");
-            let remembered = Memory::open().note_in(&ask.who, &work, Some(&session.worktree), &text).map_err(memory_reply)?;
-            Ok(remembered_reply(remembered, &format!("Kept the last turn in the work file of {}", work.id)))
         };
         run().unwrap_or_else(|reply| reply)
     })

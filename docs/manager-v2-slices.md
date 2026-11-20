@@ -657,11 +657,10 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
   - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
   - **Left out:**
-    - the trust entry of Codex's `SessionStart` hook. It needs the hash that app-server `hooks/list` reports, and `profile::with_hook_trust` (M22) has no caller yet. Until then Codex asks for its brief;
+    - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);
+    - the `PreCompact` snapshot of the work file from the last turn report (turn reports are M30);
+    - the ticket and pull request a session was started from, in its work key (sessions are keyed by review or branch until M32);
     - the demonstration (fast-track rules).
-  - **Follow-up:**
-    - the `PreCompact` snapshot (`memory.snapshot`);
-    - work keys by ticket and pull request came with M32 (`State::work_key`).
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
 
