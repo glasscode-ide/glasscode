@@ -139,8 +139,9 @@ pub fn own_drop_dir(worktree: &Path) -> Option<PathBuf> {
 }
 
 /// Append one line to a request's answer file (`<name>.out` in a worktree's request folder),
-/// never through a link: not at the file (on Unix the open refuses one, `O_NOFOLLOW`), not at its
-/// folder or at `.glasscode` (checked first). A session can plant one there between its request
+/// never through a link: not at the file (on Unix the open refuses one, `O_NOFOLLOW`, and what it
+/// opened must be a plain file with no other name, so not a hard link either), not at its folder
+/// or at `.glasscode` (checked first). A session can plant one there between its request
 /// and the answer, minutes apart when the person is asked; followed, the app would append the
 /// answer, the request's words in it, to any file of the person's (`~/.zshrc`).
 pub fn append_answer(path: &Path, line: &str) -> std::io::Result<()> {
@@ -154,13 +155,27 @@ pub fn append_answer(path: &Path, line: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        // Not a link, and never waiting on a pipe planted there.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).mode(0o600);
     }
     #[cfg(not(unix))]
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(refused());
     }
     let mut file = options.open(path)?;
+    // What was opened is a plain file of this folder only: not a hard link to a file elsewhere,
+    // which no flag of the open refuses.
+    let opened = file.metadata()?;
+    #[cfg(unix)]
+    let one_name = {
+        use std::os::unix::fs::MetadataExt as _;
+        opened.nlink() == 1
+    };
+    #[cfg(not(unix))]
+    let one_name = true;
+    if !opened.is_file() || !one_name {
+        return Err(refused());
+    }
     writeln!(file, "{line}")
 }
 
@@ -534,6 +549,13 @@ mod tests {
         std::os::unix::fs::symlink(&rc, dir.join("b.out")).unwrap();
         assert!(append_answer(&dir.join("b.out"), "$(touch pwned)").is_err());
         assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+        // A hard link to it, which no flag of the open refuses.
+        std::fs::hard_link(&rc, dir.join("h.out")).unwrap();
+        assert!(append_answer(&dir.join("h.out"), "$(touch pwned)").is_err());
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+        // A pipe there does not hold the app's thread.
+        assert!(std::process::Command::new("mkfifo").arg(dir.join("p.out")).status().unwrap().success());
+        assert!(append_answer(&dir.join("p.out"), "x").is_err());
         // A link at the folder, or at `.glasscode`.
         let elsewhere = scratch.path().join("elsewhere");
         std::fs::create_dir_all(elsewhere.join("cli")).unwrap();
