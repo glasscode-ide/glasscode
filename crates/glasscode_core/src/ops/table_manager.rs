@@ -1,5 +1,5 @@
-//! The manager's ops that change something or ask it (M12.2). Summaries and examples are `cli.rs`'s
-//! `HELP`, word for word (a test checks); the words, options and messages are those of
+//! The manager's ops that change something or ask it (M12.2). Summaries and examples are the
+//! help's (`help.rs`), word for word (a test checks); the words, options and messages are those of
 //! `manager_plan` in `manager_cmd.rs`, which these replace. They count as the Today board does in
 //! Settings › Permissions, and showing, drawing and speaking as changing what the window shows.
 

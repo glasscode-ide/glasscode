@@ -56,10 +56,82 @@ fn property(arg: &ArgSpec) -> Value {
     p
 }
 
+/// An op from a typed caller (a key bound to an op, a tool of M34): its arguments as JSON, checked
+/// against the op's schema before anything runs. A typed caller sends what `parse` would have made
+/// of the words: whole ids, numbers, `YYYY-MM-DD` days; a word that names a project, a task or a
+/// ticket stays a word, which its handler looks up.
+pub fn typed(name: &str, args: Value) -> Result<super::Op, super::OpError> {
+    use super::{ErrorCode, Op, OpError};
+    let spec = super::find(name).ok_or_else(|| OpError::new(ErrorCode::Usage, format!("There is no op “{name}”.")))?;
+    let args = match args {
+        Value::Null => Value::Object(Map::new()),
+        Value::Object(map) => Value::Object(map),
+        other => return Err(OpError::new(ErrorCode::Usage, format!("{name}: its arguments are an object, not {other}."))),
+    };
+    check(spec, &args).map_err(|why| OpError::new(ErrorCode::Usage, format!("{name}: {why}")))?;
+    Ok(Op { spec, args })
+}
+
+/// Why `args` does not fit the schema of `spec`, if it does not.
+fn check(spec: &OpSpec, args: &Value) -> Result<(), String> {
+    let schema = json_schema(spec);
+    let properties = schema["properties"].as_object().expect("an object schema");
+    let given = args.as_object().expect("checked by the caller");
+    for required in schema["required"].as_array().expect("a list") {
+        let required = required.as_str().unwrap_or_default();
+        if !given.contains_key(required) {
+            return Err(format!("{required} is missing ({}).", spec.args.iter().find(|a| a.name == required).map(|a| a.missing).unwrap_or_default()));
+        }
+    }
+    for (key, value) in given {
+        let property = properties.get(key).ok_or_else(|| format!("it takes no argument “{key}”."))?;
+        if !fits(property, value) {
+            return Err(format!("{key} is not {}.", property["description"].as_str().unwrap_or("what it takes")));
+        }
+    }
+    Ok(())
+}
+
+/// A value against one property of the flat subset `json_schema` makes.
+fn fits(property: &Value, value: &Value) -> bool {
+    let types: Vec<&str> = match &property["type"] {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => return false,
+    };
+    let typed = types.iter().any(|kind| match *kind {
+        "string" => value.as_str().is_some_and(|text| property["format"] != "date" || crate::day::parse_iso(text).is_some()),
+        "integer" => value.as_u64().is_some_and(|n| property["minimum"].as_u64().is_none_or(|min| n >= min)),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        "array" => value.as_array().is_some_and(|items| items.iter().all(|item| fits(&property["items"], item))),
+        _ => false,
+    });
+    typed && property["enum"].as_array().is_none_or(|choices| choices.contains(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ops::{OPS, find};
+
+    #[test]
+    fn typed_ops_are_checked_against_their_schema() {
+        let op = typed("board.done", json!({ "task": "zysg" })).unwrap();
+        assert_eq!((op.name(), op.text("task")), ("board.done", Some("zysg")));
+        assert_eq!(typed("session.list", Value::Null).unwrap().args, json!({}));
+        let error = |name: &str, args: Value| typed(name, args).unwrap_err().text;
+        assert!(error("board.nothing", json!({})).contains("no op"));
+        assert!(error("board.done", json!({})).contains("task is missing"));
+        assert!(error("board.done", json!({ "task": "zysg", "force": true })).contains("no argument “force”"));
+        assert!(error("board.done", json!({ "task": 7 })).contains("task is not"));
+        assert!(error("board.done", json!(["zysg"])).contains("an object"));
+        assert!(error("board.move", json!({ "task": "zysg", "to": "nowhere" })).contains("to is not"));
+        assert!(error("board.add", json!({ "title": "x", "due": "fri" })).contains("due is not"));
+        assert_eq!(typed("board.add", json!({ "title": "x", "due": "2026-11-20" })).unwrap().day("due"), Some(crate::day::parse_iso("2026-11-20")));
+        assert!(typed("board.add", json!({ "title": "x", "due": null })).is_ok());
+        assert!(error("pr.status", json!({ "number": 0 })).contains("number is not"));
+    }
 
     #[test]
     fn the_schema_has_every_argument_and_only_them() {

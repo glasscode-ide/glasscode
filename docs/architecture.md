@@ -326,7 +326,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Protocol** (`glasscode_core::control`): the command sends `Request { args, session, sig,
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
-  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`). A failure's `data` says
+  `--no-wait`, `--timeout`) and the help text, which the registry makes (`ops::help`). A failure's `data` says
   which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
   its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
   (with the v2 engine an object also gets `op`).
@@ -344,10 +344,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   asked, what was decided, the exit code) for the journal of M14. Tests keep it honest: a golden
   corpus of command lines recorded from the app before the registry (`ops_golden`), a source scan
   that each `plan(Kind::…)` is its op's v1 kind, and the sentences of the approvals checked
-  against what v1 said. GPUI actions stay for key bindings and text editing; from M33.1 they, and
-  the Jump commands, call ops, and each list the registry absorbs is deleted by the slice that
-  absorbs it (`HELP` in M33.1, `past_tense` with M14's Activity, the manager's `VIEWS` and
-  `SECTIONS` with M33.2's `ui.open`). Only the person names a session, a project or a task by the
+  against what v1 said. `glasscode help` is made from the table (`ops/help.rs`: each command's
+  line is its op's example and summary; the file keeps only the layout), with a golden of its
+  text. GPUI actions stay for key bindings and text editing; a key bound to an op uses the one
+  action `RunOp { name, args }`, and a Jump command that is an op runs it. Both go through
+  `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
+  `ops::typed`) by the same rules as the command, so the person's own actions leave the
+  journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
+  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
+  `SECTIONS` with M33.2's `ui.open`).
+- **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
+  person can do in the app, by screen, in one class: an op, an op planned for later, the
+  person's alone (with what the manager says and where it takes them), or view-local. Tests
+  with no window keep it whole: every op has a row, every Settings card a settings key (or only
+  actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
+  command a row, and every row names a function of the app. A committed count of the raw click
+  handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.

@@ -42,6 +42,15 @@ actions!(
     ]
 );
 
+/// A key bound to an op (ops-7): `keymap.rs` binds op names with it, and it runs the op for the
+/// person, as a button does (`Workspace::run_op`). `args` are the op's arguments as JSON.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = glasscode, no_json)]
+pub struct RunOp {
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
 pub fn bind_keys(cx: &mut App) {
     crate::keymap::bind(cx, None);
     crate::keymap::bind(cx, Some("Palette"));
@@ -71,7 +80,7 @@ pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightTab {
     /// The session's pull request: its state, reviews, preview and comments.
     PullRequest,
@@ -1819,6 +1828,51 @@ impl Workspace {
         self.prompt_add_project(window, cx);
     }
 
+    fn on_run_op(&mut self, action: &RunOp, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_op_named(&action.name, action.args.clone(), window, cx);
+    }
+
+    /// Run an op from inside the app (a button, a key bound to an op, a Jump command) for
+    /// `caller`, which there is the person (`Caller::you()`): its handler's plan, by the same
+    /// rules of Settings › Permissions as the `glasscode` command (the person may do everything),
+    /// and its reply leaves the journal's record of the person's action (ops-21). `done` hears the
+    /// reply.
+    pub fn run_op(&mut self, op: &glasscode_core::ops::Op, caller: crate::control_ui::Caller, done: impl FnOnce(&mut Workspace, &glasscode_core::control::Reply) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = match self.op_plan(&caller, op) {
+            Ok(plan) => plan,
+            Err(reply) => {
+                done(self, &reply);
+                return;
+            }
+        };
+        let targets = glasscode_core::ops::targets(op, &self.world(&caller)).ok();
+        let responder = crate::control_ui::Responder::for_op(caller, op.clone(), targets, &plan, done);
+        self.control_run(plan, responder, window, cx);
+    }
+
+    /// [`Workspace::run_op`] for the person, by the op's name and its arguments as JSON (checked
+    /// against its schema); what failed shows as a toast.
+    pub fn run_op_named(&mut self, name: &str, args: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        let op = match glasscode_core::ops::typed(name, args) {
+            Ok(op) => op,
+            Err(error) => return self.show_toast(error.text, cx),
+        };
+        self.run_op(
+            &op,
+            crate::control_ui::Caller::you(),
+            |ws, reply| {
+                if let glasscode_core::control::Reply::Done { code, text, .. } = reply
+                    && *code != glasscode_core::control::code::OK
+                {
+                    ws.toast = Some((text.clone(), Instant::now()));
+                }
+            },
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
     fn on_handoff(&mut self, _: &Handoff, window: &mut Window, cx: &mut Context<Self>) {
         self.open_handoff(None, None, window, cx);
     }
@@ -1864,6 +1918,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_accounts))
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_handoff))
+            .on_action(cx.listener(Self::on_run_op))
             .on_action(cx.listener(Self::on_toggle_right))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))

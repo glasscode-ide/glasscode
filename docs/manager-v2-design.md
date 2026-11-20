@@ -624,6 +624,13 @@ impl Action { pub fn of(op: &Op, targets: Targets, caller: &str, session: Option
 pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help: the shape of Op.args
 pub fn description(spec: &OpSpec) -> String;                                     // "session open: show it in the window": the schema's description,
                                                                                   // its command words (the op's key nouns) first (ops-23)
+pub fn typed(name: &str, args: serde_json::Value) -> Result<Op, OpError>;     // a typed caller's op (a key, a tool of M34): args checked
+                                                                                  // against json_schema before anything runs (M33.1)
+pub fn help(topic: Option<&str>) -> String;                                      // `glasscode help`, made from OPS and a layout table (M33.1)
+// The app (M33.1): Workspace::run_op(&Op, Caller, done) runs an op for the person in the app by the command's rules, and its
+// reply leaves the journal's record; RunOp { name, args } is the one GPUI action that binds a key to an op;
+// capabilities::INVENTORY (Capability { screen, control, handler, class: Op | Planned | PersonOnly { say, place } | ViewLocal }),
+// Place (View | Settings(Section) | Tab(RightTab), "settings:automation"), card_key(CardId) -> Key | ActionOnly, cannot_do().
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
 pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3

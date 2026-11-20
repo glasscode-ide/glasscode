@@ -273,12 +273,19 @@ impl Workspace {
         let ctx = self.parse_ctx(caller);
         let v2 = ctx.v2;
         let op = ops::parse(words, &ctx).map_err(|e| with_op(error_reply(&e), ops::name_of(words, v2), v2))?;
-        let Some((_, handler)) = HANDLERS.iter().find(|(name, _)| *name == op.name()) else {
+        let plan = self.op_plan(caller, &op)?;
+        Ok((op, plan))
+    }
+
+    /// The plan of an op its caller has already named (the command's words, a key, a button, a
+    /// typed tool): its handler's, or the reply that says why not.
+    pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op) -> Result<Plan, Reply> {
+        let v2 = self.control.engine_v2;
+        let Some((_, handler)) = HANDLERS.iter().find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
             return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name()), v2));
         };
-        let plan = handler(self, caller, &op).map_err(|reply| with_op(reply, Some(op.name()), v2))?;
-        Ok((op, plan))
+        handler(self, caller, op).map_err(|reply| with_op(reply, Some(op.name()), v2))
     }
 
     /// Whether the caller may name things by the start of a name or words from a title (ops-17):
