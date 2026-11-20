@@ -218,6 +218,29 @@ impl Approval {
     }
 }
 
+/// The gate's decision for an op of the manager's wake (M51), and whether it is a card: a
+/// proposal always is; an op under the playbook that fired the wake is decided as usual (a card it
+/// makes names the playbook); any other op of a wake past a read is a card.
+fn for_a_wake(decision: Decision, act: Option<&WakeAct>, a_wake: bool, read: bool) -> (Decision, bool) {
+    let card = match act {
+        Some(WakeAct::Propose(reason)) => Some(reason.clone()),
+        Some(WakeAct::Under(playbook)) => {
+            return match decision {
+                Decision::Ask { why } => (Decision::Ask { why: format!("{why} (the playbook {playbook} acts)") }, false),
+                other => (other, false),
+            };
+        }
+        None if a_wake && !read => Some("a wake of the manager proposes it; you decide".to_string()),
+        None => None,
+    };
+    match (card, decision) {
+        (Some(reason), Decision::Allow) => (Decision::Ask { why: reason }, true),
+        (Some(reason), Decision::Ask { why }) => (Decision::Ask { why: format!("{reason} ({why})") }, true),
+        (Some(_), never) => (never, true),
+        (None, decision) => (decision, false),
+    }
+}
+
 /// How a wake's op comes to the gate (M51): as a proposal (its reason), always a card; or under
 /// the playbook that fired the wake, which the person approved to act, through the gate as usual.
 /// Any other op a wake asks for that is more than a read is a card too.
@@ -1271,21 +1294,13 @@ impl Workspace {
         // A wake proposes; only under the playbook that fired it, approved to act, does it act
         // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.
         let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(_), .. });
-        let card = match &act {
-            Some(WakeAct::Propose(reason)) => Some(reason.clone()),
-            Some(WakeAct::Under(_)) => None,
-            None if a_wake && op.spec.effect != ops::EffectClass::Read => Some("a wake of the manager proposes it; you decide".to_string()),
-            None => None,
-        };
-        if let Some(reason) = card {
-            decision = match decision {
-                Decision::Allow => Decision::Ask { why: reason },
-                Decision::Ask { why } => Decision::Ask { why: format!("{reason} ({why})") },
-                never => never,
-            };
-        } else if let caller::Caller::Manager { lane, .. } = &caller.channel
-            // The manager's lanes: a wake does not act while the person talks to the manager, and
-            // one lane at a time works on a session or a repository.
+        let card;
+        (decision, card) = for_a_wake(decision, act.as_ref(), a_wake, op.spec.effect == ops::EffectClass::Read);
+        // The manager's lanes: a wake does not act while the person talks to the manager, and one
+        // lane at a time works on a session or a repository. A card acts on nothing yet, so it
+        // claims nothing.
+        if !card
+            && let caller::Caller::Manager { lane, .. } = &caller.channel
             && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, *lane, op.spec.effect, &targets, op.spec.summary)
         {
             return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
@@ -1650,5 +1665,28 @@ pub fn capitalize(text: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wake acts only under the playbook that fired it (M51): its proposals, and any other op of
+    /// its tools past a read, are cards whatever the gate would allow; a "never" stays never.
+    #[test]
+    fn wake_cannot_act_without_playbook() {
+        let allow = || Decision::Allow;
+        assert_eq!(for_a_wake(allow(), None, true, false), (Decision::Ask { why: "a wake of the manager proposes it; you decide".into() }, true));
+        assert_eq!(for_a_wake(allow(), None, true, true), (Decision::Allow, false), "a read is the wake's own");
+        assert_eq!(for_a_wake(allow(), None, false, false), (Decision::Allow, false), "the chat, and v1's brain, as the gate says");
+        let propose = WakeAct::Propose("CI is red".into());
+        assert_eq!(for_a_wake(allow(), Some(&propose), true, false), (Decision::Ask { why: "CI is red".into() }, true));
+        assert_eq!(for_a_wake(Decision::Ask { why: "it leaves the Mac".into() }, Some(&propose), true, false).0, Decision::Ask { why: "CI is red (it leaves the Mac)".into() });
+        let never = Decision::Never { why: "the project's policy".into() };
+        assert_eq!(for_a_wake(never.clone(), Some(&propose), true, false).0, never);
+        let under = WakeAct::Under("ci-fix".into());
+        assert_eq!(for_a_wake(allow(), Some(&under), true, false), (Decision::Allow, false), "under its approved playbook, the gate decides");
+        assert_eq!(for_a_wake(Decision::Ask { why: "Careful".into() }, Some(&under), true, false).0, Decision::Ask { why: "Careful (the playbook ci-fix acts)".into() });
     }
 }

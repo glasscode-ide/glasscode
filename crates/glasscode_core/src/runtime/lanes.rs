@@ -634,4 +634,48 @@ mod tests {
         book.all_paused = Some(crate::playbooks::Paused { by: "you".into(), since_ms: 0, why: "the breaker".into() });
         assert_eq!(under_playbook(&wake, &book), None, "the breaker is on");
     }
+
+    /// The slice's check: over a day of the reference load (20 sessions, 2,000 events an hour),
+    /// the wakes of each hour stay under the cap (D6), nothing routine wakes anyone, and the
+    /// queue stays inside its bound.
+    #[test]
+    fn wakes_per_hour_under_the_cap_at_the_reference_load() {
+        use crate::journal::{Event, Source};
+        use crate::journal_kinds as k;
+        use crate::testkit::clock::HOUR;
+        use crate::testkit::load::{Reference, events};
+        use crate::testkit::sim::Input;
+        let start = 1_795_000_000_000;
+        let (hold, mut queue, mut ledger) = (Hold::default(), Queue::default(), Ledger::default());
+        let mut per_hour = std::collections::BTreeMap::<u64, u32>::new();
+        let mut next_tick = start;
+        let mut most = 0;
+        let tick = |now: u64, queue: &mut Queue, ledger: &mut Ledger, per_hour: &mut std::collections::BTreeMap<u64, u32>| {
+            ledger.record_window_at(&serde_json::json!({ "rate_limit_info": { "status": "allowed", "rateLimitType": "five_hour" } }), now);
+            while let (Some(_), _) = next_wake(queue, &hold, ledger, now, &|_| true) {
+                ledger.record_wake(now);
+                *per_hour.entry((now - start) / HOUR).or_default() += 1;
+            }
+        };
+        for (at, input) in events(Reference::small(), start, 1, 7) {
+            while next_tick <= at {
+                tick(next_tick, &mut queue, &mut ledger, &mut per_hour);
+                next_tick += 10_000;
+            }
+            let (kind, session) = match &input {
+                Input::Hook { session, payload } if payload.contains("Notification") => (k::SESSION_NEEDS_INPUT, session),
+                Input::Hook { session, payload } if payload.contains("UserPromptSubmit") => (k::TURN_STARTED, session),
+                Input::Hook { session, .. } | Input::Rollout { session, .. } => (k::TURN_ENDED, session),
+                _ => continue,
+            };
+            let event = Event::new(kind, Source::Hook, "x").session(Some(session));
+            if let Some(wake) = wake_for_event(&event, at) {
+                queue.push(wake, at);
+            }
+            most = most.max(queue.len());
+        }
+        assert!(per_hour.values().all(|n| *n <= crate::runtime::budget::WAKES_PER_HOUR), "{per_hour:?}");
+        assert!(per_hour.values().sum::<u32>() > 0, "the sessions that need the person woke the manager");
+        assert!(most <= crate::runtime::queue::BOUND && most <= 20, "one wake a session that needs the person: {most}");
+    }
 }
