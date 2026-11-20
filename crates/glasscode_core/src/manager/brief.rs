@@ -236,7 +236,7 @@ fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Ite
     }
 
     // 4. Follow-ups (the reviews received that were told above are not repeated).
-    for f in followups::open(data) {
+    for f in followups::open(&data.followups) {
         if f.kind == FollowKind::ReviewReceived && covered.contains(&f.id) {
             continue;
         }
@@ -315,7 +315,7 @@ fn next_line(settings: &Settings, data: &Data, snap: &Snapshot) -> String {
         plans.push(format!("send the {} you allowed", if going == 1 { "message".to_string() } else { format!("{going} messages") }));
     }
 
-    let watched: Vec<String> = followups::open(data).iter().filter(|f| f.kind == FollowKind::BlockersGiven && f.state == FollowState::Open).take(3).map(|f| format!("#{}", f.number)).collect();
+    let watched: Vec<String> = followups::open(&data.followups).iter().filter(|f| f.kind == FollowKind::BlockersGiven && f.state == FollowState::Open).take(3).map(|f| format!("#{}", f.number)).collect();
     if !watched.is_empty() {
         plans.push(format!("watch {} for fixes", and_list(&watched)));
     }
@@ -475,7 +475,7 @@ pub fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Bri
 pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> {
     let now = if snap.at > 0 { snap.at } else { data.heartbeat };
     let found = items(settings, data, snap, now);
-    let follow = followups::open(data).len();
+    let follow = followups::open(&data.followups).len();
     let messages = super::messages::waiting(data).len();
     let page = follow > 0 || messages > 0;
 
@@ -501,7 +501,7 @@ pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> 
             parts.push(format!("{} for your OK", if messages == 1 { "1 message waits".to_string() } else { format!("{messages} messages wait") }));
         }
         let mut say = format!("On my page: {}.", parts.join(" and "));
-        if let Some(top) = followups::open(data).first() {
+        if let Some(top) = followups::open(&data.followups).first() {
             say.push(' ');
             say.push_str(&sentence(&followups::line(top)));
         }
@@ -515,7 +515,7 @@ pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> 
 pub fn status_line(data: &Data, snap: &Snapshot) -> String {
     let need = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count() + snap.approvals;
     let working = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
-    let follow = followups::open(data).len();
+    let follow = followups::open(&data.followups).len();
     let messages = super::messages::waiting(data).len();
     let mut parts = Vec::new();
     if need > 0 {

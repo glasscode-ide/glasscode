@@ -182,7 +182,7 @@ fn to_view(view: &str) -> Show {
 /// Everything that waits for the person, most pressing first: an urgent message, sessions
 /// that stopped on a question, commands waiting for an OK, messages waiting to be allowed,
 /// follow-ups the other side says are fixed, and reviews asked of them.
-fn needs(data: &Data, snap: &Snapshot) -> Vec<Need> {
+fn needs(data: &Data, follow_ups: &[FollowUp], snap: &Snapshot) -> Vec<Need> {
     let mut out = Vec::new();
     for m in data.inbox.iter().filter(|m| m.urgent && !m.handled) {
         out.push(Need { title: format!("Urgent from {}", m.from), detail: first_line(&m.text), go: Go::Stage(Stage::Messages), urgent: true });
@@ -202,7 +202,7 @@ fn needs(data: &Data, snap: &Snapshot) -> Vec<Need> {
     for m in data.outbox.iter().filter(|m| m.state == MsgState::Draft) {
         out.push(Need { title: format!("A message to {} waits for your OK", m.to), detail: first_line(&m.body), go: Go::Stage(Stage::Messages), urgent: m.urgent });
     }
-    for f in data.followups.iter().filter(|f| f.state == FollowState::Fixed) {
+    for f in follow_ups.iter().filter(|f| f.state == FollowState::Fixed) {
         let who = who(f);
         let title = if who.is_empty() { format!("#{} is said to be fixed", f.number) } else { format!("{who} says #{} is fixed", f.number) };
         out.push(Need { title, detail: format!("Look again: {}", first_line(&f.title)), go: Go::Stage(Stage::FollowUps), urgent: false });
@@ -449,7 +449,7 @@ impl Workspace {
     }
 
     /// The box to type to it in, made the first time its page is opened or drawn.
-    fn manager_ensure_input(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn manager_ensure_input(&mut self, cx: &mut Context<Self>) {
         if self.manager.input.is_some() {
             return;
         }
@@ -525,9 +525,8 @@ impl Workspace {
 
     /// The person says a follow-up is done.
     fn manager_follow_done(&mut self, id: &str, cx: &mut Context<Self>) {
-        if followups::close(&mut self.manager.harness.data, id, false, now()).is_some() {
-            self.manager.harness.dirty = true;
-        }
+        // Where the engine keeps them (the work ledger at v2, M56.2).
+        self.follow_ups_edit(|list| followups::close(list, id, false, now()));
         cx.notify();
     }
 
@@ -564,7 +563,7 @@ impl Workspace {
             return None;
         }
         let on = self.view == View::Manager;
-        let waiting = self.manager.harness.needs_you(&self.manager_snapshot());
+        let waiting = self.manager.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
         let color = if on { theme::text_strong() } else { theme::text_soft() };
         Some(
             div()
@@ -1103,9 +1102,9 @@ impl Workspace {
         let m = &self.manager;
         let data = &m.harness.data;
         let time = now();
-        let needs = needs(data, snap);
+        let needs = needs(data, self.follow_ups(), snap);
         let moving = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
-        let open = followups::open(data);
+        let open = followups::open(self.follow_ups());
         let mut out: Vec<AnyElement> = Vec::new();
 
         // One sentence, its date in bold.
@@ -1321,11 +1320,10 @@ impl Workspace {
     }
 
     fn manager_followups(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let data = &self.manager.harness.data;
         let time = now();
         let mut out = self.manager_stage_head("Follow-ups", cx);
         out.push(lead("Things that are open with someone else. He keeps them until they close, so nobody has to tell you by hand.").into_any_element());
-        let open = followups::open(data);
+        let open = followups::open(self.follow_ups());
         if open.is_empty() {
             out.push(stage_card().child(div().text_color(theme::muted()).child("Nothing is open with anyone. A review you leave with blockers, or one left on your pull request, shows up here.")).into_any_element());
         }
@@ -1781,7 +1779,7 @@ mod tests {
             approvals: 2,
             ..Snapshot::default()
         };
-        let list = needs(&data, &snap);
+        let list = needs(&data, &data.followups, &snap);
         let titles: Vec<&str> = list.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["Urgent from Sam", "Backoff", "2 commands wait for your OK", "A message to Alex waits for your OK", "Alex says #41 is fixed", "Sam asks for your review"]);
         assert!(list[0].urgent && !list[1].urgent);
@@ -1796,7 +1794,7 @@ mod tests {
 
     #[test]
     fn nothing_waits_when_all_is_quiet() {
-        assert!(needs(&Data::default(), &Snapshot::default()).is_empty());
+        assert!(needs(&Data::default(), &[], &Snapshot::default()).is_empty());
     }
 
     #[test]

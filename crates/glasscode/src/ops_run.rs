@@ -2359,7 +2359,9 @@ pub(crate) fn default_export_file() -> std::path::PathBuf {
 
 fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "export your data")?;
-    let to = op.text("to").map(std::path::PathBuf::from).unwrap_or_else(default_export_file);
+    // A relative path is from where the command was typed, not the app's own folder (found in the
+    // journey run: `--to export.tar` from a shell tab was written in the app's working folder).
+    let to = op.text("to").map(|to| crate::commands::expand(to.trim(), caller.cwd.as_deref())).unwrap_or_else(default_export_file);
     let world = ws.world(caller);
     let mut include = Vec::new();
     for word in op.texts("include") {
@@ -2434,7 +2436,7 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
-    let from = std::path::PathBuf::from(arg(op, "from").trim());
+    let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
     memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
         Ok(done) => Reply::ok(
             format!(
@@ -2450,16 +2452,18 @@ fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 fn data_forget(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     use glasscode_core::portability::Forget;
     person_only(caller, "forget data")?;
-    let what = match (op.text("person"), op.text("project"), op.text("employer")) {
-        (Some(name), None, None) => Forget::Person(name.to_string()),
+    // The card says what goes (found in the journey run: it said "forget data").
+    let (what, named) = match (op.text("person"), op.text("project"), op.text("employer")) {
+        (Some(name), None, None) => (Forget::Person(name.to_string()), format!("the person “{}”", name.trim())),
         (None, Some(word), None) => {
             let id = ops::find_project(&ws.world(caller), word).map_err(|e| error_reply(&e))?;
-            Forget::Project(ws.control.project_keys.get(&id).cloned().ok_or_else(|| failed("That project has no memory key, so memory holds nothing of it."))?)
+            let name = ws.state.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_else(|| word.to_string());
+            (Forget::Project(ws.control.project_keys.get(&id).cloned().ok_or_else(|| failed("That project has no memory key, so memory holds nothing of it."))?), format!("the project {name}"))
         }
-        (None, None, Some(word)) => Forget::Employer(glasscode_core::memstore::Employer::parse(&word.to_lowercase()).ok_or_else(|| usage(format!("“{word}” is no employer's folder name.")))?),
+        (None, None, Some(word)) => (Forget::Employer(glasscode_core::memstore::Employer::parse(&word.to_lowercase()).ok_or_else(|| usage(format!("“{word}” is no employer's folder name.")))?), format!("the employer {word}")),
         _ => return Err(usage("data forget --person \"<name>\" | --project <name> | --employer <name> (one of them)")),
     };
-    memory_plan(Kind::Settings, "forget data", move || match glasscode_core::portability::forget(&what) {
+    memory_plan(Kind::Settings, format!("forget {named} everywhere Glasscode keeps it, memory's history included"), move || match glasscode_core::portability::forget(&what) {
         Ok(done) => Reply::ok(
             format!(
                 "Forgotten: {}{} words records, {} journal lines, {} effect ledger lines and {} of moving in's questions and studies changed. Memory's history before this point is gone.",
@@ -2860,7 +2864,7 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    let mut made = brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now());
+    let mut made = brief::build(&settings, &ws.data_with_follow_ups(), &ws.manager_snapshot(), now());
     // v2 (M42): what was told and still waits on the person, with its age, from code.
     if ws.control.engine_v2 {
         let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
@@ -2880,7 +2884,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let stops = brief::tour(&ws.state.manager, &ws.manager.harness.data, &ws.manager_snapshot());
+        let stops = brief::tour(&ws.state.manager, &ws.data_with_follow_ups(), &ws.manager_snapshot());
         if stops.is_empty() {
             ws.reply(r, Reply::ok("Nothing to walk through right now.", json!({ "stops": [] })));
             return;
@@ -3103,10 +3107,19 @@ fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
     })
 }
 
+/// At v2 the follow-ups are the work ledger's: while it is not running here (the journal is off,
+/// or its file needs repair), nothing about them can be kept.
+const NO_LEDGER: &str = "The work ledger is not running here (the journal is off, or manager/work.json needs repair), so nothing was changed.";
+const NO_LEDGER_LIST: &str = "The work ledger is not running here (the journal is off, or manager/work.json needs repair), so the follow-ups cannot be read.";
+
 fn follow_up_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
-    let data = &ws.manager.harness.data;
-    let list: Vec<&FollowUp> = if op.on("all") { data.followups.iter().collect() } else { followups::open(data) };
+    // With the engine at v2, the work ledger's (M56.2).
+    if ws.control.engine_v2 && ws.work_ledger().is_none() {
+        return Err(failed(NO_LEDGER_LIST));
+    }
+    let all = ws.follow_ups();
+    let list: Vec<&FollowUp> = if op.on("all") { all.iter().collect() } else { followups::open(all) };
     let text = if list.is_empty() { "No follow-ups are open.".to_string() } else { list.iter().map(|f| follow_up_line(f)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|f| to_json(*f)).collect())))
 }
@@ -3117,8 +3130,9 @@ fn follow_up_add(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let person = arg(op, "person").to_string();
     let from = source_of(caller);
     plan(Kind::Board, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
-        let id = followups::add_custom(&mut ws.manager.harness.data, &what_text, &person, now());
-        ws.manager.harness.dirty = true;
+        let Some(id) = ws.follow_ups_edit(|list| followups::add_custom(list, &what_text, &person, now())) else {
+            return ws.reply(r, failed(NO_LEDGER));
+        };
         cx.notify();
         ws.reply(r, Reply::ok(format!("{} keeps an eye on it: {what_text}", ws.state.manager.name), json!({ "id": id, "what": what_text, "person": person, "from": from })));
     })
@@ -3136,9 +3150,11 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
     ws.manager_on()?;
     let which = arg(op, "which").trim().to_string();
     plan(Kind::Board, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let reply = match followups::close(&mut ws.manager.harness.data, &which, dropped, now()) {
+        let Some(closed) = ws.follow_ups_edit(|list| followups::close(list, &which, dropped, now())) else {
+            return ws.reply(r, failed(NO_LEDGER));
+        };
+        let reply = match closed {
             Some(f) => {
-                ws.manager.harness.dirty = true;
                 cx.notify();
                 let what = if f.number > 0 {
                     format!("{}#{} {}", f.repo, f.number, f.title)
@@ -3294,6 +3310,30 @@ fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The card of `data forget` says what it forgets (found in the journey run: "forget data").
+    #[test]
+    fn the_forget_card_names_what_goes() {
+        let source = include_str!("ops_run.rs");
+        let body = &source[source.find("fn data_forget(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("format!(\"forget {named} everywhere"));
+        assert!(!body.contains("memory_plan(Kind::Settings, \"forget data\""));
+    }
+
+    /// An export's or an import's relative path is from where the command was typed, not the
+    /// app's own folder (found in the journey run).
+    #[test]
+    fn a_data_path_is_from_the_callers_folder() {
+        assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
+        assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
+        let source = include_str!("ops_run.rs");
+        for handler in ["fn data_export(", "fn data_import("] {
+            let body = &source[source.find(handler).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");
+        }
+    }
     use glasscode_core::control::Rule;
 
     /// This file, for the scans below.

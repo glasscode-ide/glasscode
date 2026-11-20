@@ -214,8 +214,8 @@ impl Workspace {
         } else {
             "idle"
         };
-        let needs_you = ui.harness.needs_you(&self.manager_snapshot());
-        let follow_ups = followups::open(data).len();
+        let needs_you = ui.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
+        let follow_ups = followups::open(self.follow_ups()).len();
         let waiting = messages::waiting(data).len();
         // Where it acts: the home's lease says (D5, M57).
         let on_server = !self.acts_as_home();

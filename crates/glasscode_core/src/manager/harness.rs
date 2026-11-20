@@ -15,10 +15,10 @@ use super::brief::{self, PendingTell};
 use super::gh::{one_line, GivenReview};
 use super::handover::{Owned, Owner};
 use super::{followups, memory, messages};
-use super::{Action, Check, Data, Event, FollowKind, FollowState, FollowUp, InMessage, MsgState, PanelTab, Person, SessionState, Settings, Show, Snapshot, Tier};
+use super::{Action, Check, Data, Event, FollowKind, FollowState, InMessage, MsgState, Person, SessionState, Settings, Show, Snapshot, Tier};
 
 /// A follow-up nobody touched for this long is brought up again.
-pub const STALE_AFTER: u64 = 48 * 3600;
+pub use super::followups::STALE_AFTER;
 /// A send that was asked for and never reported back is asked for again after this long.
 const RESEND_AFTER: u64 = 15 * 60;
 /// The heartbeat alone is written to disk at most this often.
@@ -107,44 +107,6 @@ fn session_events(data: &mut Data, prev: Option<&Snapshot>, snap: &Snapshot, now
         }
     }
     events
-}
-
-/// Where a follow-up is looked at: its session's pull request, else the manager's page.
-fn show_follow(f: &FollowUp, snap: Option<&Snapshot>) -> Option<Show> {
-    match f.session.as_deref().filter(|id| snap.is_none_or(|s| s.session(id).is_some())) {
-        Some(id) => brief::show_session(id, Some(PanelTab::PullRequest), Some("reviews")),
-        None => brief::show_manager("followups"),
-    }
-}
-
-/// A teammate fixed what the person asked for: tell the person, once.
-fn fixed_actions(f: &FollowUp, snap: Option<&Snapshot>) -> Vec<Action> {
-    let line = brief::sentence(&followups::line(f));
-    vec![
-        Action::Notify { title: format!("#{} is ready for you to look again", f.number), body: line.clone(), session: f.session.clone() },
-        Action::Say { text: brief::spoken(&line), show: show_follow(f, snap) },
-    ]
-}
-
-/// The reminder to the author of a pull request the person reviewed, in the person's words.
-pub fn nudge_text(f: &FollowUp) -> String {
-    let total = f.blockers.len();
-    let open = f.open_blockers();
-    let what = if total == 0 || open == 0 {
-        "the changes I asked for in my review are still open".to_string()
-    } else if total == 1 {
-        "the point from my review is still open".to_string()
-    } else if open == 1 {
-        format!("1 of the {total} points from my review is still open")
-    } else {
-        format!("{open} of the {total} points from my review are still open")
-    };
-    format!("#{}: {what}. Could you take a look?", f.number)
-}
-
-/// The teammate a follow-up is about, when the person listed them.
-fn person_of<'a>(settings: &'a Settings, f: &FollowUp) -> Option<&'a Person> {
-    [f.login.trim(), f.person.trim()].into_iter().filter(|w| !w.is_empty()).find_map(|w| settings.person(w)).filter(|p| !p.name.trim().is_empty())
 }
 
 /// The teammate who wrote a message: by name or login, or by how the messenger knows them
@@ -351,13 +313,20 @@ impl Harness {
         let first = self.prev.is_none();
         let mut actions = Vec::new();
 
-        let mut events = followups::from_snapshot(&mut self.data, self.prev.as_ref(), &snap, now);
+        // At v2 the follow-ups are the work ledger's (M56.2, `followups::round`): here only the
+        // reviews' news is read, and no follow-up of `Data` changes.
+        let follow = !owned.engine_v2;
+        let mut events = followups::snapshot_on(&mut followups::Book::of_data(&mut self.data), self.prev.as_ref(), &snap, now, follow);
         events.extend(session_events(&mut self.data, self.prev.as_ref(), &snap, now));
-        followups::fill_people(&mut self.data, settings);
+        if follow {
+            followups::fill_people(&mut self.data.followups, settings);
+        }
 
         let mut journal = Vec::new();
         if !first {
-            events.extend(followups::stale(&mut self.data, STALE_AFTER, now));
+            if follow {
+                events.extend(followups::stale(&mut self.data.followups, STALE_AFTER, now));
+            }
             for event in &events {
                 self.react(settings, &snap, event, owned, &mut actions, &mut journal);
             }
@@ -418,17 +387,12 @@ impl Harness {
             }
             Event::FollowUpFixed { id } => {
                 if let Some(f) = self.data.followups.iter().find(|f| f.id == *id) {
-                    actions.extend(fixed_actions(f, Some(snap)));
+                    actions.extend(followups::fixed_actions(f, Some(snap)));
                 }
             }
             Event::FollowUpStale { id } => {
                 let Some(f) = self.data.followups.iter().find(|f| f.id == *id) else { return };
-                let days = STALE_AFTER / 86_400;
-                match person_of(settings, f).filter(|_| f.kind == FollowKind::BlockersGiven) {
-                    // A draft only: whether it waits for the person or goes is the outbox's rule.
-                    Some(p) => actions.push(Action::Draft { to: p.name.clone(), body: nudge_text(f), why: format!("Nothing happened on #{} for {days} days.", f.number), about: Some(f.id.clone()) }),
-                    None => actions.push(Action::Notify { title: format!("Quiet for {days} days"), body: brief::sentence(&followups::line(f)), session: f.session.clone() }),
-                }
+                actions.extend(followups::stale_actions(settings, f));
             }
             // The app fixes failing checks by itself; the brief names them.
             Event::CiFailed { .. } | Event::SessionStarted { .. } | Event::SessionFinished { .. } | Event::MessageIn { .. } | Event::BriefDue => {}
@@ -501,16 +465,17 @@ impl Harness {
 
     /// [`Harness::on_reviews`], saying nothing when the follow-ups are nobody's (`handover`).
     pub fn on_reviews_with(&mut self, settings: &Settings, reviews: &[GivenReview], now: u64, owned: &Owned) -> Vec<Action> {
-        if !settings.enabled {
+        // At v2 the reviews given are the work ledger's follow-ups (M56.2, `followups::given`).
+        if !settings.enabled || owned.engine_v2 {
             return Vec::new();
         }
         let before = self.data.clone();
-        let events = followups::from_reviews(&mut self.data, settings, reviews, now);
+        let events = followups::from_reviews(&mut followups::Book::of_data(&mut self.data), settings, reviews, now);
         let mut actions = Vec::new();
         for event in events.into_iter().filter(|_| owned.follow_ups != Owner::Nobody) {
             let Event::FollowUpFixed { id } = event else { continue };
             if let Some(f) = self.data.followups.iter().find(|f| f.id == id) {
-                actions.extend(fixed_actions(f, self.prev.as_ref()));
+                actions.extend(followups::fixed_actions(f, self.prev.as_ref()));
             }
         }
         if self.data != before {
@@ -630,7 +595,7 @@ impl Harness {
         let is_close = closes.iter().any(|p| low.starts_with(p)) || low.ends_with(" is done") || low.ends_with(" is finished") || low.ends_with(" as done");
         let is_drop = drops.iter().any(|p| low.starts_with(p));
         if let Some(number) = number_in(&low).filter(|_| (is_close || is_drop) && words <= 9) {
-            let closed = followups::close(&mut self.data, &format!("#{number}"), is_drop, now);
+            let closed = followups::close(&mut self.data.followups, &format!("#{number}"), is_drop, now);
             if closed.is_some() {
                 self.dirty = true;
             }
@@ -684,7 +649,7 @@ impl Harness {
         // (Asking for a new one, "follow up with Sam on …", is the brain's.)
         let adds = ["follow up", "follow-up with", "add", "create", "make", "track", "keep an eye", "watch", "start"].iter().any(|p| low.starts_with(p));
         if words <= 10 && !adds && any_in(&low, &["follow-up", "followup", "follow up", "blockers", "what am i waiting", "who am i waiting", "who owes me", "what is open with", "what's open with"]) {
-            let open = followups::open(&self.data);
+            let open = followups::open(&self.data.followups);
             if open.is_empty() {
                 return say("No follow-ups are open.".to_string());
             }
@@ -697,8 +662,8 @@ impl Harness {
         if words <= 10 && any_in(&low, &["what needs me", "what needs my", "who needs me", "what do i need to", "what do i have to", "anything need me", "anything needs me", "anything for me", "waiting for me", "waiting on me", "waits for me", "what should i do", "what should i look at", "needs you", "need me now", "what needs you"]) {
             let made = brief::build(settings, &self.data, &snap, now);
             let mut lines: Vec<(String, Option<Show>)> = made.lines.iter().filter(|l| matches!(l.kind.as_str(), "needs_you" | "review" | "message")).map(|l| (l.text.clone(), l.show.clone())).collect();
-            for f in followups::open(&self.data).into_iter().filter(|f| f.state == FollowState::Fixed) {
-                lines.push((followups::line(f), show_follow(f, Some(&snap))));
+            for f in followups::open(&self.data.followups).into_iter().filter(|f| f.state == FollowState::Fixed) {
+                lines.push((followups::line(f), followups::show_follow(f, Some(&snap))));
             }
             if lines.is_empty() {
                 return say("Nothing needs you right now.".to_string());
@@ -713,7 +678,7 @@ impl Harness {
         if words <= 8 && any_in(&low, &["blocked", "stuck", "what is failing", "what's failing", "what fails", "anything failing", "anything red"]) {
             let made = brief::build(settings, &self.data, &snap, now);
             let blocked: Vec<&super::BriefLine> = made.lines.iter().filter(|l| l.kind == "blocked").collect();
-            let waiting: Vec<String> = followups::open(&self.data).into_iter().filter(|f| f.state == FollowState::Open && f.kind != FollowKind::ReviewReceived).map(followups::line).collect();
+            let waiting: Vec<String> = followups::open(&self.data.followups).into_iter().filter(|f| f.state == FollowState::Open && f.kind != FollowKind::ReviewReceived).map(followups::line).collect();
             if blocked.is_empty() && waiting.is_empty() {
                 return say("Nothing is blocked.".to_string());
             }
@@ -764,7 +729,7 @@ impl Harness {
         if snap.approvals > 0 {
             out.push(format!("{} for your OK.", if snap.approvals == 1 { "1 command waits".to_string() } else { format!("{} commands wait", snap.approvals) }));
         }
-        let open = followups::open(&self.data);
+        let open = followups::open(&self.data.followups);
         let fixed = open.iter().filter(|f| f.state == FollowState::Fixed).count();
         if !open.is_empty() {
             let ready = if fixed == 0 { String::new() } else { format!(", {fixed} ready for you to look again") };
@@ -782,8 +747,14 @@ impl Harness {
 
     /// How many things wait for the person (the rail's badge).
     pub fn needs_you(&self, snap: &Snapshot) -> usize {
+        self.needs_you_with(snap, &self.data.followups)
+    }
+
+    /// [`Self::needs_you`] with the follow-ups where the engine keeps them (the work ledger's at
+    /// v2, M56.2).
+    pub fn needs_you_with(&self, snap: &Snapshot, follow_ups: &[super::FollowUp]) -> usize {
         let sessions = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count();
-        let fixed = self.data.followups.iter().filter(|f| f.state == FollowState::Fixed).count();
+        let fixed = follow_ups.iter().filter(|f| f.state == FollowState::Fixed).count();
         sessions + snap.approvals + fixed + messages::waiting(&self.data).len()
     }
 }
@@ -792,6 +763,8 @@ impl Harness {
 mod tests {
     use super::super::{Blocker, OutMessage, PrInfo, ReviewerInfo, SendPolicy, SessionInfo};
     use super::*;
+    use crate::manager::followups::nudge_text;
+    use crate::manager::{FollowUp, PanelTab};
 
     const T0: u64 = 1_800_000_000;
 
@@ -1053,7 +1026,7 @@ mod tests {
         assert!(h.step(&s, &snap(T0 + 200, vec![session("s1", SessionState::Idle, Some(old.clone()))]), T0 + 200).is_empty());
         assert!(h.step(&s, &snap(T0 + 203, vec![session("s1", SessionState::Idle, Some(old))]), T0 + 203).is_empty());
         // The standing request for changes is known all the same.
-        assert_eq!(followups::open(&h.data).len(), 1);
+        assert_eq!(followups::open(&h.data.followups).len(), 1);
         // A review after that is told.
         let newer = pr(12, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "CHANGES_REQUESTED")]);
         let actions = h.step(&s, &snap(T0 + 400, vec![session("s1", SessionState::Idle, Some(newer))]), T0 + 400);
@@ -1072,7 +1045,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(h.step(&s, &snap(T0 + 600, approved), T0 + 600).is_empty());
         // Nothing here ever approves, merges or posts.
-        assert!(followups::open(&h.data).is_empty());
+        assert!(followups::open(&h.data.followups).is_empty());
     }
 
     #[test]
@@ -1132,6 +1105,74 @@ mod tests {
         assert!(h.step(&s, &snap(T0 + 600, round(SessionState::Idle, "passing")), T0 + 600).is_empty());
         let made = brief::build(&s, &h.data, &snap(T0 + 900, round(SessionState::Idle, "passing")), T0 + 900);
         assert!(made.lines.iter().any(|l| l.kind == "done" && l.text == "Work s1 finished"), "{:?}", made.lines);
+    }
+
+    /// M56.2's parity: v2's follow-ups round on the work ledger (`followups::round` and `given`)
+    /// does what v1's harness did on `Data`, round by round: the same actions and the same
+    /// follow-ups. The reviews given and "fixed" told once; a quiet one nudged as a draft or a
+    /// notification, and not again until it is quiet again; closed by number; and a review
+    /// received on the person's own pull request, then approved. With the engine at v2 the harness
+    /// itself leaves every follow-up of `Data` alone.
+    #[test]
+    fn v2_round_matches_the_harness() {
+        enum Step {
+            Reviews(Vec<GivenReview>, u64),
+            Round(Snapshot, u64),
+            Close(&'static str, bool, u64),
+        }
+        let s = settings();
+        let mut unknown = given(vec![blocker("t1", false)], "aaa");
+        unknown.number = 1200;
+        unknown.author = "stranger".into();
+        let own = |at: u64, reviewers: &[(&str, &str)]| snap(at, vec![session("s1", SessionState::Idle, Some(pr(12, reviewers)))]);
+        let steps = vec![
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", false), blocker("t3", false)], "aaa"), unknown], T0),
+            Step::Round(Snapshot::default(), T0),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER - 10),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER + 60),
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", true), blocker("t3", true)], "bbb")], T0 + STALE_AFTER + 100),
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", true), blocker("t3", true)], "bbb")], T0 + STALE_AFTER + 200),
+            Step::Close("#1200", true, T0 + STALE_AFTER + 300),
+            Step::Round(own(T0 + STALE_AFTER + 400, &[("alex", "PENDING")]), T0 + STALE_AFTER + 400),
+            Step::Round(own(T0 + STALE_AFTER + 1100, &[("alex", "CHANGES_REQUESTED")]), T0 + STALE_AFTER + 1100),
+            Step::Round(own(T0 + STALE_AFTER + 1200, &[("alex", "APPROVED")]), T0 + STALE_AFTER + 1200),
+            Step::Round(Snapshot::default(), T0 + 3 * STALE_AFTER),
+        ];
+        let mut h = Harness::default();
+        let mut ledger = crate::work::WorkLedger::default();
+        let mut prev: Option<Snapshot> = None;
+        let follow_up_actions = |actions: Vec<Action>| -> Vec<Action> {
+            // v1's harness also tells reviews and stops (v2's review feed and natives do that).
+            actions.into_iter().filter(|a| !matches!(a, Action::TellSession { .. }) && !matches!(a, Action::Notify { title, .. } if title.starts_with("Alex ") || title.ends_with(" needs you"))).collect()
+        };
+        for (n, step) in steps.into_iter().enumerate() {
+            let (old, new) = match step {
+                Step::Reviews(reviews, now) => (h.on_reviews(&s, &reviews, now), followups::given(&mut ledger.book(), &s, &reviews, prev.as_ref(), now)),
+                Step::Round(snapshot, now) => {
+                    let old = h.step(&s, &snapshot, now);
+                    let new = followups::round(&mut ledger.book(), &s, prev.as_ref(), &snapshot, now);
+                    prev = Some(snapshot);
+                    (follow_up_actions(old), new)
+                }
+                Step::Close(which, dropped, now) => {
+                    let (a, b) = (followups::close(&mut h.data.followups, which, dropped, now), followups::close(&mut ledger.follow_ups, which, dropped, now));
+                    assert_eq!(a, b, "step {n}");
+                    (Vec::new(), Vec::new())
+                }
+            };
+            assert_eq!(new, old, "step {n}: the actions");
+            assert_eq!(ledger.follow_ups, h.data.followups, "step {n}: the follow-ups");
+        }
+        assert!(ledger.follow_ups.iter().any(|f| f.kind == FollowKind::ReviewReceived && f.state == FollowState::Done), "the review received was followed and closed");
+
+        // The harness at v2: no follow-up of `Data` changes, and the reviews given are not its.
+        let mut v2 = Harness::default();
+        let owned = Owned { engine_v2: true, ..Owned::V1 };
+        assert!(v2.on_reviews_with(&s, &[given(vec![blocker("t1", false)], "aaa")], T0, &owned).is_empty());
+        v2.step_with(&s, &own(T0, &[("alex", "CHANGES_REQUESTED")]), T0, &owned);
+        v2.step_with(&s, &own(T0 + 1200, &[("alex", "COMMENTED")]), T0 + 1200, &owned);
+        assert!(v2.data.followups.is_empty());
     }
 
     #[test]
@@ -1434,12 +1475,12 @@ mod tests {
         let (mut h, s, sn) = busy_day();
         assert_eq!(h.quick_answer(&s, &sn, "done with #1111", T0 + 60).map(|a| a.say), Some("Done. The follow-up on PR 1111 is closed: Token refresh.".to_string()));
         assert!(h.dirty);
-        assert!(!followups::open(&h.data).iter().any(|f| f.number == 1111));
+        assert!(!followups::open(&h.data.followups).iter().any(|f| f.number == 1111));
         assert_eq!(h.quick_answer(&s, &sn, "Done with #1111.", T0 + 70).map(|a| a.say), Some("I have no open follow-up on PR 1111.".to_string()));
         assert_eq!(h.quick_answer(&s, &sn, "stop tracking PR 12", T0 + 80).map(|a| a.say), Some("I no longer follow PR 12.".to_string()));
         assert_eq!(h.quick_answer(&s, &sn, "drop #12", T0 + 85).map(|a| a.say), Some("I have no open follow-up on PR 12.".to_string()));
         assert_eq!(h.data.followups.iter().find(|f| f.number == 12).map(|f| f.state), Some(FollowState::Dropped));
-        assert!(followups::open(&h.data).is_empty());
+        assert!(followups::open(&h.data.followups).is_empty());
         assert_eq!(h.quick_answer(&s, &sn, "follow-ups?", T0 + 90).map(|a| a.say), Some("No follow-ups are open.".to_string()));
     }
 
