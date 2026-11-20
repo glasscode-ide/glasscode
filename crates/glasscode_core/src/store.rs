@@ -922,6 +922,35 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "never",
         ..TODAY
     },
+    // On the server only (M57): what the Mac says of the manager (on or off, its brain, model and
+    // account, the projects as a wake sees them), kept so the wakes run while the Mac is away.
+    DataRow {
+        path: "manager/from-mac.json",
+        module: "glasscoded::brain",
+        writer: "glasscoded, from the primary Mac's own sync connection",
+        format: "JSON (`remote::ManagerFromMac`), written whole through a temporary file",
+        retention: "until the Mac says otherwise",
+        on_damage: "not read: the manager does not run on the server until the Mac's next sync",
+        export: "no: the Mac's settings, kept here for it",
+        local_only: "—: it names only the projects that may leave the Mac",
+        forget: "with everything (uninstall)",
+        sync: "one way, from the Mac (like the approved authority)",
+        ..TODAY
+    },
+    // On the server only (M57): the window ops its manager asked for while the Mac was away.
+    DataRow {
+        path: "manager/window-queue.json",
+        module: "glasscoded::brain",
+        writer: "glasscoded (its manager's wakes and chat)",
+        format: "JSON: the next id and each queued op with its time",
+        retention: "until the Mac has it, at most 6 hours and 50 ops",
+        on_damage: "read as empty: what waited is dropped",
+        export: "no",
+        local_only: "—",
+        forget: "with everything (uninstall)",
+        sync: "to the Mac with every sync until it names each in its acks; the Mac runs each once, through its own gate",
+        ..TODAY
+    },
     // The manager's conversation is JSON lines, not a Store: whole versions of items and topics,
     // newest stamp wins, appended under a lock beside each file (`conversation`).
     DataRow {
