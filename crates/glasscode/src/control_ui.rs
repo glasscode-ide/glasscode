@@ -462,7 +462,9 @@ impl Workspace {
         // With it, at v2, the projects' keys (the same folder).
         let engine = cx.background_spawn(async {
             let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
-            (v2, if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())))
+            // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
+            let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
+            (v2, if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -483,9 +485,13 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, keys, authority) = engine.await;
-            let started = this.update(cx, |this, cx| {
+            let (v2, keys, authority, machine) = engine.await;
+            let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                if let Some(machine) = machine {
+                    let calls = this.brain_host_start(window, cx);
+                    this.brain_host = Some(std::sync::Arc::new(crate::brain_host::AppHost::new(machine, calls)));
+                }
                 if let Some((authority, pending)) = authority {
                     this.control_set_authority(authority, cx);
                     this.control_restore_pending(pending, cx);

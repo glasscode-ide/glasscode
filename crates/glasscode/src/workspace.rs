@@ -186,6 +186,10 @@ pub struct Workspace {
     pub session_more: bool,
     /// The `glasscode` command: its socket, waiting requests, what agents did.
     pub control: crate::control_ui::ControlUi,
+    /// The brain runtime's host (M50), with the engine at v2: what the manager's lanes (M51) and
+    /// the chat (M52) run their brains with.
+    #[allow(dead_code)]
+    pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
     /// The Today board.
     pub today: crate::today_ui::TodayUi,
     /// The UI kit page (debug hook `kit`).
@@ -300,6 +304,7 @@ impl Workspace {
             chat: Default::default(),
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
+            brain_host: None,
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),

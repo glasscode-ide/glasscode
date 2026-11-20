@@ -24,7 +24,7 @@ use crate::ops::{Op, OpHost, OpReply};
 use crate::paths::MachineId;
 
 pub use budget::{Blocked, Ledger, Turn, Usage};
-pub use driver::{BrainDriver, BrainSpec, Limits, Outcome, TurnEnd, Update};
+pub use driver::{BrainDriver, BrainSpec, Expected, Limits, Outcome, TurnEnd, Update};
 pub use health::BrainHealth;
 
 /// What only the app or only glasscoded can do for the runtime (design section 8).
@@ -88,9 +88,212 @@ pub fn rss_of(pid: u32) -> Option<u64> {
     String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok().map(|kb| kb * 1024)
 }
 
+/// Why a brain did not take a turn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Refusal {
+    /// It cannot think now (the no-model mode): the chat says so and answers from code.
+    Health(BrainHealth),
+    /// The budget is spent for now.
+    Budget(Blocked),
+}
+
+/// One lane's brain: its driver, its health, whether its tools were checked, its turns.
+pub struct Brain {
+    spec: BrainSpec,
+    driver: Box<dyn BrainDriver>,
+    pub health: BrainHealth,
+    checked: bool,
+    turns: u32,
+    pub limits: Limits,
+}
+
+impl Brain {
+    pub fn new(spec: BrainSpec) -> Brain {
+        let driver = driver_for(spec.clone());
+        Brain { spec, driver, health: BrainHealth::Ready, checked: false, turns: 0, limits: Limits::default() }
+    }
+
+    /// For a test: a brain on a driver of the test's own.
+    pub fn with_driver(spec: BrainSpec, driver: Box<dyn BrainDriver>) -> Brain {
+        Brain { spec, driver, health: BrainHealth::Ready, checked: false, turns: 0, limits: Limits::default() }
+    }
+
+    /// The conversation's id, to load it again after a restart of the app.
+    pub fn session_id(&self) -> Option<String> {
+        self.driver.session_id()
+    }
+
+    /// The person's Stop.
+    pub fn cancel(&mut self) {
+        self.driver.cancel();
+    }
+
+    /// End its process (its conversation is kept).
+    pub fn stop(&mut self) {
+        self.driver.stop();
+        self.checked = false;
+    }
+
+    /// Set its state, and when it changed, tell the journal and the person once (brain-14).
+    pub fn set_health(&mut self, host: &dyn Host, after: BrainHealth) {
+        if health::change(&self.health, &after).is_some() {
+            crate::journal::append(health::event(&after, self.spec.agent, self.spec.lane));
+            let title = if after == BrainHealth::Ready { "The manager thinks again" } else { "The manager cannot think" };
+            host.notify(title, &after.sentence(self.spec.agent), "brain-health");
+        }
+        self.health = after;
+    }
+
+    /// One turn: refused when it cannot think or the budget is spent (`ledger`, read by the
+    /// caller); a process that has grown too old or big starts again with its conversation; the
+    /// tools are checked on the first turn of each process, and only then does `host` serve its MCP
+    /// calls. The ledger gets what it used.
+    pub fn ask(&mut self, host: &dyn Host, ledger: &mut Ledger, text: &str, turn: Turn, now_ms: u64, on_update: &mut dyn FnMut(&Update)) -> Result<Outcome, Refusal> {
+        if !self.health.can_think() && self.health.backoff().is_none() {
+            return Err(Refusal::Health(self.health.clone()));
+        }
+        ledger.allow(turn, now_ms).map_err(Refusal::Budget)?;
+        if turn == Turn::Wake {
+            ledger.record_wake(now_ms);
+        }
+        if restart_due(self.turns, self.driver.pid().and_then(rss_of)) {
+            self.spec.resume = self.driver.session_id();
+            self.driver.stop();
+            self.driver = driver_for(self.spec.clone());
+            self.checked = false;
+            self.turns = 0;
+        }
+        let (lane, wake) = (self.spec.lane, self.spec.wake.clone());
+        if self.spec.agent == AgentKind::Codex && !self.checked {
+            // Codex prints no tool list: its whole list is read from ALL_TOOLS, on its first turn.
+            if let Err(state) = self.codex_check(host) {
+                self.set_health(host, state.clone());
+                return Err(Refusal::Health(state));
+            }
+        }
+        let mut checked_now = false;
+        let expected: Expected = if self.spec.agent == AgentKind::Codex { &|_| Ok(()) } else { &claude_expected };
+        let outcome = driver::run_turn(self.driver.as_mut(), text, self.checked, expected, &mut || checked_now = true, &mut |update| {
+            if let Update::RateLimit(event) = update {
+                ledger.record_window(event);
+            }
+            on_update(update);
+        }, self.limits);
+        if checked_now {
+            host.brain_checked(lane, wake.as_deref());
+        }
+        self.checked = outcome.checked;
+        self.turns += 1;
+        ledger.record(lane, outcome.usage, now_ms);
+        let after = match (&outcome.health, &outcome.end) {
+            (Some(state), _) => state.clone(),
+            (None, TurnEnd::Failed(why)) if self.driver.pid().is_none() => BrainHealth::Crashed { why: why.clone() },
+            _ => BrainHealth::Ready,
+        };
+        self.set_health(host, after);
+        Ok(outcome)
+    }
+
+    /// A Codex brain's first turn: its `ALL_TOOLS`, checked against Glasscode's tools.
+    fn codex_check(&mut self, host: &dyn Host) -> Result<(), BrainHealth> {
+        let outcome = driver::run_turn(self.driver.as_mut(), codex::ALL_TOOLS_PROMPT, true, &|_| Ok(()), &mut || {}, &mut |_| {}, self.limits);
+        let TurnEnd::Answered(answer) = outcome.end else { return Err(outcome.health.unwrap_or(BrainHealth::Crashed { why: "it could not list its tools".into() })) };
+        let ours: Vec<String> = crate::mcp::tools(crate::mcp::Profile::Manager).iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+        let tools = codex::all_tools_of(&answer).ok_or(BrainHealth::ToolListWrong { extra: vec!["(its list could not be read)".into()], missing: vec![] })?;
+        codex::check_all_tools(&tools, &ours).map_err(|(extra, missing)| {
+            self.driver.stop();
+            BrainHealth::ToolListWrong { extra, missing }
+        })?;
+        self.checked = true;
+        host.brain_checked(self.spec.lane, self.spec.wake.as_deref());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host that records what the runtime asks of it.
+    #[derive(Default)]
+    struct Seen {
+        notices: std::sync::Mutex<Vec<String>>,
+        checked: std::sync::Mutex<u32>,
+        machine: Option<MachineId>,
+    }
+
+    impl Host for Seen {
+        fn machine(&self) -> &MachineId {
+            self.machine.as_ref().unwrap()
+        }
+        fn run_op(&self, _: &Op, _: &Caller) -> OpReply {
+            OpReply::Done { text: String::new(), data: serde_json::Value::Null }
+        }
+        fn has(&self, _: OpHost) -> bool {
+            true
+        }
+        fn notify(&self, _: &str, body: &str, _: &str) {
+            self.notices.lock().unwrap().push(body.into());
+        }
+        fn brain_checked(&self, _: Lane, _: Option<&str>) {
+            *self.checked.lock().unwrap() += 1;
+        }
+    }
+
+    fn spec(agent: AgentKind) -> BrainSpec {
+        BrainSpec { agent, lane: Lane::Chat, wake: None, program: "x".into(), glasscode: "g".into(), model: "m".into(), effort: None, fallback_model: None, cwd: "/w".into(), run_dir: "/r".into(), env: Default::default(), instructions: String::new(), brain_env: vec![], resume: None }
+    }
+
+    fn ours() -> Vec<String> {
+        crate::mcp::tools(crate::mcp::Profile::Manager).iter().map(|t| format!("{}{}", crate::mcp::CLAUDE_PREFIX, t["name"].as_str().unwrap())).collect()
+    }
+
+    #[test]
+    fn a_brain_is_served_only_once_checked_and_says_its_health_once() {
+        crate::paths::use_test_root();
+        let init = Update::Init { tools: ours(), model: "m".into(), version: "2.1.328".into() };
+        let played = driver::tests::Played::new(vec![
+            vec![init, Update::Usage(Usage { input: 50, ..Usage::default() }), Update::Ended(TurnEnd::Answered("Two run.".into()))],
+            vec![Update::Ended(TurnEnd::Failed("Please run /login".into()))],
+            vec![Update::Ended(TurnEnd::Failed("Please run /login".into()))],
+        ]);
+        let mut brain = Brain::with_driver(spec(AgentKind::Claude), Box::new(played));
+        let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
+        let mut ledger = Ledger::default();
+        let first = brain.ask(&host, &mut ledger, "what is running?", Turn::Chat, 1_795_000_000_000, &mut |_| {}).unwrap();
+        assert_eq!((first.end, *host.checked.lock().unwrap(), ledger.today(1_795_000_000_000)["chat"]), (TurnEnd::Answered("Two run.".into()), 1, 50));
+        brain.ask(&host, &mut ledger, "and now?", Turn::Chat, 1_795_000_000_000, &mut |_| {}).unwrap();
+        assert_eq!(brain.health, BrainHealth::SignedOut);
+        // Signed out is the person's to end: no further turn, and one notice in all.
+        assert_eq!(brain.ask(&host, &mut ledger, "again?", Turn::Chat, 1_795_000_000_000, &mut |_| {}), Err(Refusal::Health(BrainHealth::SignedOut)));
+        assert_eq!(host.notices.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_codex_brain_lists_its_tools_first() {
+        crate::paths::use_test_root();
+        let names: Vec<String> = crate::mcp::tools(crate::mcp::Profile::Manager).iter().map(|t| format!("mcp__glasscode__{}", t["name"].as_str().unwrap())).collect();
+        let mut all = vec!["exec".to_string(), "wait".to_string()];
+        all.extend(names);
+        let list = serde_json::to_string(&all).unwrap();
+        let played = driver::tests::Played::new(vec![vec![Update::Ended(TurnEnd::Answered(list))], vec![Update::Ended(TurnEnd::Answered("Two run.".into()))]]);
+        let mut brain = Brain::with_driver(spec(AgentKind::Codex), Box::new(played));
+        let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
+        let outcome = brain.ask(&host, &mut Ledger::default(), "what is running?", Turn::Chat, 1, &mut |_| {}).unwrap();
+        assert_eq!((outcome.end, *host.checked.lock().unwrap()), (TurnEnd::Answered("Two run.".into()), 1));
+        let shell = driver::tests::Played::new(vec![vec![Update::Ended(TurnEnd::Answered("[\"exec\",\"exec_command\"]".into()))]]);
+        let mut brain = Brain::with_driver(spec(AgentKind::Codex), Box::new(shell));
+        assert!(matches!(brain.ask(&host, &mut Ledger::default(), "x", Turn::Chat, 1, &mut |_| {}), Err(Refusal::Health(BrainHealth::ToolListWrong { .. }))));
+    }
+
+    #[test]
+    fn a_spent_budget_refuses_a_wake() {
+        let mut brain = Brain::with_driver(spec(AgentKind::Claude), Box::new(driver::tests::Played::new(vec![])));
+        let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
+        let mut ledger = Ledger { daily_cap: 10, ..Ledger::default() };
+        ledger.record(Lane::Wake, Usage { input: 10, ..Usage::default() }, 5);
+        assert!(matches!(brain.ask(&host, &mut ledger, "x", Turn::Wake, 5, &mut |_| {}), Err(Refusal::Budget(Blocked::DailyCap { .. }))));
+    }
 
     #[test]
     fn the_prompt_is_laid_out_for_the_cache() {

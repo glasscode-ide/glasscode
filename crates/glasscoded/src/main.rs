@@ -7,6 +7,7 @@
 // The daemon needs tmux, systemd and Unix sockets, so on Windows only a short main is built
 // (the Windows app reaches the daemon on a Linux server over SSH).
 #[cfg(unix)]
+mod brain_host;
 mod daemon;
 #[cfg(unix)]
 mod doctor;
