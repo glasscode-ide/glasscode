@@ -114,6 +114,8 @@ impl Workspace {
     /// the manager on and a Claude brain (D6: no Codex wake lane in release 1). A change of the
     /// manager's settings starts it again, with them.
     pub(crate) fn lanes_refresh(&mut self) {
+        // The chat's brain starts again with the settings too, at its next question.
+        self.chat_restart();
         if let Some(stop) = self.lanes.stop.take() {
             stop.store(true, Ordering::SeqCst);
         }
