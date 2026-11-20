@@ -42,9 +42,14 @@ pub trait Host: Send + Sync {
     /// The brain of `lane` (and `wake`) passed its tool-list check: its MCP server's calls are
     /// served from now on (brain-m5).
     fn brain_checked(&self, lane: Lane, wake: Option<&str>);
-    /// A card for the person: `op` as a wake proposed it, with its reason; the pending action's id
-    /// (a gate "never" refuses it).
+    /// A card for the person: `op` as a wake proposed it, with its reason; the card's number (a
+    /// gate "never" refuses it).
     fn propose(&self, op: &Op, reason: &str, lane: Lane, wake: Option<&str>) -> Result<String, String>;
+    /// `op`, which a wake decided on under the playbook that fired it (`lanes::under_playbook`):
+    /// through the gate as that playbook's wake, not as a card. A host with no playbooks refuses.
+    fn run_under(&self, op: &Op, _caller: &Caller, playbook: &str) -> OpReply {
+        OpReply::Failed(crate::ops::OpError::new(crate::ops::ErrorCode::Failed, format!("{} under the playbook {playbook}: this host runs no playbook's ops", op.name())))
+    }
 }
 
 /// The driver for a brain spec.

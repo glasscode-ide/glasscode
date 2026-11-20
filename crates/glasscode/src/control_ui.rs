@@ -218,6 +218,14 @@ impl Approval {
     }
 }
 
+/// How a wake's op comes to the gate (M51): as a proposal (its reason), always a card; or under
+/// the playbook that fired the wake, which the person approved to act, through the gate as usual.
+/// Any other op a wake asks for that is more than a read is a card too.
+pub(crate) enum WakeAct {
+    Propose(String),
+    Under(String),
+}
+
 /// Signs a brain's lane and wake as [`ControlUi::signature`] does, off the main thread.
 #[derive(Clone)]
 pub struct Signer([u8; 32]);
@@ -778,6 +786,8 @@ impl Workspace {
             let lines = gate::diff(&approved, &live);
             self.modal = Some(crate::dialogs::Modal::PolicyChanged { lines, live });
         }
+        // What a wake may be told follows the policy (its Careful projects, D17's accounts).
+        self.lanes_projects_refresh();
         cx.notify();
     }
 
@@ -1222,10 +1232,10 @@ impl Workspace {
         self.control_gated_as(op, caller, sinks, command, done, false, None, window, cx);
     }
 
-    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`), or for a
-    /// wake's proposal (`propose`, its reason: never more than a card, M51).
+    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`), or for an
+    /// op of a wake's answer (`act`, M51).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, propose: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, act: Option<WakeAct>, window: &mut Window, cx: &mut Context<Self>) {
         let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
             for sink in sinks {
                 sink.send(&reply);
@@ -1258,8 +1268,16 @@ impl Workspace {
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
         }
-        // A wake's proposal is a card for the person, whatever the gate would allow (M51).
-        if let Some(reason) = propose {
+        // A wake proposes; only under the playbook that fired it, approved to act, does it act
+        // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.
+        let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(_), .. });
+        let card = match &act {
+            Some(WakeAct::Propose(reason)) => Some(reason.clone()),
+            Some(WakeAct::Under(_)) => None,
+            None if a_wake && op.spec.effect != ops::EffectClass::Read => Some("a wake of the manager proposes it; you decide".to_string()),
+            None => None,
+        };
+        if let Some(reason) = card {
             decision = match decision {
                 Decision::Allow => Decision::Ask { why: reason },
                 Decision::Ask { why } => Decision::Ask { why: format!("{reason} ({why})") },
@@ -1267,7 +1285,7 @@ impl Workspace {
             };
         } else if let caller::Caller::Manager { lane, .. } = &caller.channel
             // The manager's lanes: a wake does not act while the person talks to the manager, and
-            // one lane at a time works on a session or a repository (M51).
+            // one lane at a time works on a session or a repository.
             && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, *lane, op.spec.effect, &targets, op.spec.summary)
         {
             return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));

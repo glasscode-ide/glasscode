@@ -67,6 +67,10 @@ fn manager_wake(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     if reason.is_empty() {
         return Err(usage("manager wake \"<reason>\" [--project <p>]"));
     }
+    // A wake does not wake the next, nor the chat itself: the manager's lanes have their own way.
+    if matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. }) {
+        return Err(error(ErrorCode::Denied, "The manager does not wake itself: a wake proposes what is next, and the chat answers now."));
+    }
     let projects: Vec<String> = glasscode_core::ops::targets(op, &ws.world(caller)).map(|t| t.projects.iter().map(|k| k.as_str().to_string()).collect()).unwrap_or_default();
     let source = if person(caller) { "you asked".to_string() } else { format!("{} asked", caller.describe()) };
     let outside = !person(caller);

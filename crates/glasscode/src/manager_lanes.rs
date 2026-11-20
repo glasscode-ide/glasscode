@@ -2,23 +2,25 @@
 //! worker, on a thread of its own, and what a lane's brain starts with (the chat lane's is M52's).
 //!
 //! The worker reads the journal from where it started, makes the wakes the events call for
-//! (`runtime::lanes::wake_for_event`), and runs the queue: each wake on a fresh brain of Claude's
-//! cheapest model, its situation holding only its projects, its answer read by Rust. A line it
-//! tells goes into the manager's conversation; a notice is a notification; an op it proposes is a
-//! card (posted in the conversation by the gate's ask), unless a playbook the person approved
-//! covers it. While the person's chat turn runs, the worker holds, and the gate refuses a wake's
-//! action.
+//! (`runtime::lanes::wake_for_event`), and runs the queue as the budget lets it: each wake on a
+//! fresh brain of Claude's cheapest model, its situation holding only its projects, its answer read
+//! by Rust. Before a wake runs, what it is about is read again from the events since; a stale one
+//! is dropped with a journal line. A line it tells goes into the manager's conversation; a notice
+//! is a notification; an op it proposes is a card (posted in the conversation by the gate's ask),
+//! unless the playbook that fired it was approved to act. While the person's chat turn runs, the
+//! worker holds, and the gate refuses a wake's action.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glasscode_core::caller::Lane;
 use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Stream};
+use glasscode_core::journal::Event;
 use glasscode_core::model::AgentKind;
 use glasscode_core::runtime::lanes::{self, Hold, Locks};
-use glasscode_core::runtime::queue::{Dropped, Queue, Wake};
+use glasscode_core::runtime::queue::{Queue, Wake};
 use glasscode_core::runtime::situation::{Fact, Project};
 use glasscode_core::runtime::wake::Effect;
 use glasscode_core::runtime::{Brain, BrainSpec, Host, Ledger};
@@ -34,10 +36,8 @@ pub struct Lanes {
     pub locks: Locks,
     /// The running worker's stop flag (none: no worker).
     stop: Option<Arc<AtomicBool>>,
-    /// The projects as a wake's situation sees them, refreshed when the worker starts.
+    /// The projects as a wake's situation sees them, kept as the policy changes.
     pub projects: Arc<Mutex<Vec<Project>>>,
-    /// The playbooks the person approved, and their ops.
-    pub approved: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Lanes {
@@ -99,18 +99,28 @@ impl Workspace {
         })
     }
 
-    /// The projects as a wake's situation sees them: their keys, names, and whether they are
-    /// Careful.
+    /// The projects as a wake's situation sees them: their keys and names; Careful ones; and
+    /// whether the manager's account may read them (D17: a project bound to another account is
+    /// none of its business).
     fn lanes_projects(&self) -> Vec<Project> {
-        let policy = self.control_policy_set().policy;
+        let set = self.control_policy_set();
         self.state
             .visible_projects()
             .filter(|p| !self.state.manager.off_projects.contains(&p.id))
             .filter_map(|p| {
                 let key = self.control.project_keys.get(&p.id)?;
-                Some(Project { id: key.as_str().to_string(), name: p.name.clone(), careful: policy.of(key).level == glasscode_core::gate::Level::Careful, visible: true })
+                let policy = set.policy.of(key);
+                let visible = policy.model_account.as_deref().is_none_or(|only| set.manager_account.as_deref() == Some(only));
+                Some(Project { id: key.as_str().to_string(), name: p.name.clone(), careful: policy.level == glasscode_core::gate::Level::Careful, visible })
             })
             .collect()
+    }
+
+    /// Keep the projects a wake may be told of as the policy is now.
+    pub(crate) fn lanes_projects_refresh(&mut self) {
+        if self.lanes.running() {
+            *self.lanes.projects.lock().unwrap_or_else(|p| p.into_inner()) = self.lanes_projects();
+        }
     }
 
     /// Start or stop the wake lane's worker as the settings say: it runs with the engine at v2,
@@ -127,22 +137,13 @@ impl Workspace {
         let Some(base) = self.brain_spec(Lane::Wake, None).filter(|s| s.agent == AgentKind::Claude) else { return };
         *self.lanes.projects.lock().unwrap_or_else(|p| p.into_inner()) = self.lanes_projects();
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Worker {
-            queue: self.lanes.queue.clone(),
-            hold: self.lanes.hold.clone(),
-            locks: self.lanes.locks.clone(),
-            stop: stop.clone(),
-            projects: self.lanes.projects.clone(),
-            approved: self.lanes.approved.clone(),
-            base,
-            signer: self.control.signer(),
-        };
+        let worker = Worker { queue: self.lanes.queue.clone(), hold: self.lanes.hold.clone(), locks: self.lanes.locks.clone(), stop: stop.clone(), projects: self.lanes.projects.clone(), base, signer: self.control.signer() };
         if std::thread::Builder::new().name("manager-wakes".into()).spawn(move || worker.run(host.as_ref())).is_ok() {
             self.lanes.stop = Some(stop);
         }
     }
 
-    /// A wake asked for by `manager.wake` (a playbook, a schedule or a command): into the queue.
+    /// A wake asked for by `manager.wake` (a schedule or a command): into the queue.
     pub(crate) fn lanes_wake(&mut self, wake: Wake) {
         let now = glasscode_core::clock::now_ms();
         self.lanes.queue.lock().unwrap_or_else(|p| p.into_inner()).push(wake, now);
@@ -156,20 +157,28 @@ struct Worker {
     locks: Locks,
     stop: Arc<AtomicBool>,
     projects: Arc<Mutex<Vec<Project>>>,
-    approved: Arc<Mutex<Vec<(String, String)>>>,
     base: BrainSpec,
     signer: crate::control_ui::Signer,
 }
 
-/// The newest events the worker keeps, for the situations of its wakes.
+/// The newest events the worker keeps, for the situations of its wakes and their staleness.
 const SEEN: usize = 500;
-/// How often the worker looks at the journal and the queue.
+/// How often the worker looks at the journal and the queue when there is nothing to run.
 const POLL: Duration = Duration::from_secs(2);
+
+/// The events after a wake's own (all of them when none of its events is kept).
+fn after<'a>(seen: &'a [Event], wake: &Wake) -> &'a [Event] {
+    match seen.iter().rposition(|e| wake.events.contains(&e.id)) {
+        Some(at) => &seen[at + 1..],
+        None if wake.events.is_empty() => &[],
+        None => seen,
+    }
+}
 
 impl Worker {
     fn run(self, host: &dyn Host) {
         let mut cursor = glasscode_core::journal::end();
-        let mut seen: VecDeque<glasscode_core::journal::Event> = VecDeque::new();
+        let mut seen: Vec<Event> = Vec::new();
         while !self.stop.load(Ordering::SeqCst) {
             let now = glasscode_core::clock::now_ms();
             let (events, next) = glasscode_core::journal::read_from(&cursor, 200);
@@ -178,21 +187,15 @@ impl Worker {
                 if let Some(wake) = lanes::wake_for_event(&event, now) {
                     self.queue.lock().unwrap_or_else(|p| p.into_inner()).push(wake, now);
                 }
-                seen.push_back(event);
-                if seen.len() > SEEN {
-                    seen.pop_front();
-                }
+                seen.push(event);
             }
-            // A precondition holds while none of the wake's events was answered since: the
-            // situation tells the brain the rest.
-            let (wake, dropped) = lanes::next_wake(&mut self.queue.lock().unwrap_or_else(|p| p.into_inner()), &self.hold, now, &|_| true);
-            for gone in dropped {
-                let (why, wake) = match gone {
-                    Dropped::Stale(w) => ("its reason no longer holds", w),
-                    Dropped::PastDeadline(w) => ("it was past its deadline", w),
-                    Dropped::Cancelled(w) => ("it was cancelled", w),
-                };
-                log::info!("manager: the wake {} was dropped: {why}", wake.key);
+            if seen.len() > SEEN {
+                seen.drain(..seen.len() - SEEN);
+            }
+            let ledger = Ledger::load().unwrap_or_default();
+            let (wake, dropped) = lanes::next_wake(&mut self.queue.lock().unwrap_or_else(|p| p.into_inner()), &self.hold, &ledger, now, &|w| lanes::still_holds(&w.precondition, after(&seen, w)));
+            for gone in &dropped {
+                glasscode_core::journal::append(lanes::dropped_event(gone));
             }
             match wake {
                 Some(wake) => self.run_wake(host, wake, &seen, now),
@@ -201,7 +204,7 @@ impl Worker {
         }
     }
 
-    fn run_wake(&self, host: &dyn Host, wake: Wake, seen: &VecDeque<glasscode_core::journal::Event>, now: u64) {
+    fn run_wake(&self, host: &dyn Host, wake: Wake, seen: &[Event], now: u64) {
         let id = glasscode_core::model::new_id();
         let mut spec = self.base.clone();
         spec.brain_env = brain_env(Lane::Wake, Some(&id), |text| self.signer.sign(text));
@@ -213,19 +216,26 @@ impl Worker {
                 project: e.project.as_ref().map(|p| p.as_str().to_string()),
                 source: e.kind.as_str().to_string(),
                 text: e.summary.clone(),
-                // What came from outside Glasscode (a forge, a session's words) is data.
+                // What came from outside Glasscode (a forge, a session's hook) is data.
                 outside: !matches!(e.source, glasscode_core::journal::Source::App | glasscode_core::journal::Source::Control),
                 order: 9,
             })
             .collect();
         let projects = self.projects.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let situation = glasscode_core::runtime::situation::for_wake(&wake, &facts, &projects);
-        let approved = self.approved.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        // It acts only under the playbook that fired it, while that is approved to act.
+        let under = match glasscode_core::playbooks::load(&glasscode_core::playbooks::model::journal_schema()) {
+            Ok(book) => lanes::under_playbook(&wake, &book),
+            Err(err) => {
+                log::warn!("manager: the playbooks could not be read, so the wake only proposes: {err}");
+                None
+            }
+        };
         // The lane's own copy of the ledger; what it records joins the stored one after.
         let before = Ledger::load().unwrap_or_default();
         let mut ledger = before.clone();
         let mut brain = Brain::new(spec);
-        let run = lanes::run_wake(host, &mut ledger, &mut brain, wake, &situation, &approved, now);
+        let run = lanes::run_wake(host, &mut ledger, &mut brain, wake, &situation, under.as_deref(), now);
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
             log::warn!("manager: the token ledger could not be kept: {err}");
         }
@@ -251,7 +261,7 @@ impl Worker {
                 }
                 Effect::Run { op, playbook, reason } => {
                     let caller = glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some(id.clone()), project: None };
-                    let outcome = match host.run_op(&op, &caller) {
+                    let outcome = match host.run_under(&op, &caller, &playbook) {
                         glasscode_core::ops::OpReply::Done { text, .. } => text,
                         glasscode_core::ops::OpReply::Waiting { summary, .. } => format!("waiting for you: {summary}"),
                         glasscode_core::ops::OpReply::Failed(error) => error.text,
@@ -263,5 +273,28 @@ impl Worker {
         }
         // The wake's turn ended: what it worked on is free for the chat.
         self.locks.release(Lane::Wake);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Staleness reads the events after a wake's own: all kept ones when its own are gone, none
+    /// when it has none.
+    #[test]
+    fn a_wake_is_judged_by_what_came_after_it() {
+        let event = |id: &str| {
+            let mut e = Event::new(glasscode_core::journal_kinds::CI_PASSED, glasscode_core::journal::Source::Forge, "x");
+            e.id = id.into();
+            e
+        };
+        let seen = vec![event("a"), event("b"), event("c")];
+        let mut wake = Wake::new("ci:x#1", glasscode_core::runtime::queue::Priority::Urgent, 0);
+        assert!(after(&seen, &wake).is_empty());
+        wake.events.push("b".into());
+        assert_eq!(after(&seen, &wake).iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["c"]);
+        wake.events = vec!["gone".into()];
+        assert_eq!(after(&seen, &wake).len(), 3);
     }
 }

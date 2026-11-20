@@ -13,7 +13,7 @@ use glasscode_core::control::{Reply, code};
 use glasscode_core::ops::{ErrorCode, Op, OpError, OpHost, OpReply};
 use glasscode_core::paths::MachineId;
 
-use crate::control_ui::{Caller, Sink, Trust};
+use crate::control_ui::{Caller, Sink, Trust, WakeAct};
 use crate::workspace::Workspace;
 
 /// What the runtime asks the main thread. An op's first reply comes back on `reply`: its result,
@@ -22,6 +22,8 @@ pub enum HostCall {
     RunOp { op: Op, caller: caller::Caller, reply: mpsc::Sender<Reply> },
     /// A wake's proposal: a card, whatever the gate would allow (M51).
     Propose { op: Op, caller: caller::Caller, reason: String, reply: mpsc::Sender<Reply> },
+    /// A wake's op under the playbook that fired it, which the person approved to act (M51).
+    RunUnder { op: Op, caller: caller::Caller, playbook: String, reply: mpsc::Sender<Reply> },
     Notify { title: String, body: String, matter: String },
     Checked { lane: Lane, wake: Option<String> },
 }
@@ -51,6 +53,14 @@ impl glasscode_core::runtime::Host for AppHost {
     fn run_op(&self, op: &Op, caller: &caller::Caller) -> OpReply {
         let (reply, answer) = mpsc::channel();
         if self.calls.send_blocking(HostCall::RunOp { op: op.clone(), caller: caller.clone(), reply }).is_err() {
+            return OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: OpHost::Window, queued: false }, "Glasscode is closing."));
+        }
+        answer.recv_timeout(OP_WAIT).map(|reply| op_reply(&reply)).unwrap_or_else(|_| OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{} gave no answer in {} minutes.", op.name(), OP_WAIT.as_secs() / 60))))
+    }
+
+    fn run_under(&self, op: &Op, caller: &caller::Caller, playbook: &str) -> OpReply {
+        let (reply, answer) = mpsc::channel();
+        if self.calls.send_blocking(HostCall::RunUnder { op: op.clone(), caller: caller.clone(), playbook: playbook.to_string(), reply }).is_err() {
             return OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: OpHost::Window, queued: false }, "Glasscode is closing."));
         }
         answer.recv_timeout(OP_WAIT).map(|reply| op_reply(&reply)).unwrap_or_else(|_| OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{} gave no answer in {} minutes.", op.name(), OP_WAIT.as_secs() / 60))))
@@ -128,7 +138,11 @@ impl Workspace {
             }
             HostCall::Propose { op, caller, reason, reply } => {
                 let who = self.brain_caller(caller);
-                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(reason), window, cx);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Propose(reason)), window, cx);
+            }
+            HostCall::RunUnder { op, caller, playbook, reply } => {
+                let who = self.brain_caller(caller);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Under(playbook)), window, cx);
             }
             // One notification a change of state (`runtime::health::change`); `matter` names it in
             // the log.
