@@ -252,7 +252,7 @@ pub fn tidy_up(memory: &Memory, projects: &[ProjectHere], state: &mut LearningSt
                 if !state.proposed.insert(hash(&format!("merge\n{}", ids.join(",")))) {
                     continue;
                 }
-                match memory.merge(&Who::Manager, &ids, &best.text) {
+                match memory.merge(&Who::Manager, None, &ids, &best.text) {
                     Ok(_) => out.merged += 1,
                     Err(err) => log::info!("learning: {} not merged: {err}", ids.join(", ")),
                 }
@@ -265,7 +265,7 @@ pub fn tidy_up(memory: &Memory, projects: &[ProjectHere], state: &mut LearningSt
                         if state.proposed.insert(hash(&format!("stale\n{}", entry.header.id))) {
                             out.stale.push((project.key.clone(), entry.text.clone()));
                         }
-                    } else if memory.let_go(&Who::Manager, &entry.header.id).is_ok() {
+                    } else if memory.let_go(&Who::Manager, None, &entry.header.id).is_ok() {
                         out.let_go += 1;
                     }
                 }

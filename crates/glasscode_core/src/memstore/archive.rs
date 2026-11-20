@@ -171,7 +171,7 @@ fn clip_bytes(text: &str, max: usize) -> String {
 /// A line from a transcript or a note, as the archive keeps it: one line, `-->` neutralized, and
 /// left out when the scan finds a secret in it (a token, a URL with a password, a `.env` value,
 /// invisible text). Instruction-like words stay: the archive is data.
-fn kept_line(text: &str, env: &[String]) -> String {
+pub(super) fn kept_line(text: &str, env: &[String]) -> String {
     let line = entry::clean_text(text);
     let secret = scan::scan(&line, env).iter().any(|f| matches!(f.rule, Rule::Token | Rule::CredentialUrl | Rule::EnvValue | Rule::Invisible));
     if secret { "[left out: it looked like a secret]".into() } else { line }
