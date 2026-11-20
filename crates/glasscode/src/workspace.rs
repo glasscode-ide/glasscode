@@ -1732,6 +1732,8 @@ impl Workspace {
                             session.initial_prompt = None;
                             dirty = true;
                         }
+                        // Its first turn made the file: the journal reads it from the start.
+                        self.journal.found_rollouts.insert(id.clone());
                     }
                 }
             }

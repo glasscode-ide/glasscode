@@ -101,6 +101,10 @@ it is made.
 - It cannot do the same thing twice. Each effect (a message, a report, a push) is done once,
   under its key, also after a crash or a restart.
 - In its first round after you switch it on it says nothing about what was already there.
+- It cannot keep a program that runs as you, outside any sandbox, from calling Glasscode as the
+  manager. Its brain's Glasscode tools carry a signature, kept in a file only you can read
+  (`~/.glasscode/manager/run/`), never on a command line; anything that runs as you can still read
+  that file. Sessions cannot: their profiles deny that folder.
 
 ## Where its data lives
 

@@ -39,6 +39,9 @@ const DEGRADED_AFTER: u32 = 3;
 pub struct JournalUi {
     /// The journal runs here: a v2 home, decided in the background at the start.
     pub on: bool,
+    /// The Codex sessions whose conversation this launch found (it began with their first turn):
+    /// the turns' tail reads their rollout from its start (`RolloutTail::for_turns`).
+    pub found_rollouts: HashSet<String>,
     intakes: HashMap<String, HookIntake>,
     cursors: Cursors,
     cursors_dirty: bool,
@@ -353,7 +356,7 @@ impl Workspace {
             match (agent, transcript) {
                 (glasscode_core::model::AgentKind::Codex, Some(path)) if alive => {
                     if entry.rollout.as_ref().is_none_or(|(p, _)| *p != path) {
-                        entry.rollout = Some((path.clone(), agents::RolloutTail::resumed(&path).keeping_events()));
+                        entry.rollout = Some((path.clone(), agents::RolloutTail::for_turns(&path, self.journal.found_rollouts.remove(&id))));
                     }
                     if let Some((_, tail)) = entry.rollout.as_mut() {
                         tail.poll();
