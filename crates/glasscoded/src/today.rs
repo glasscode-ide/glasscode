@@ -263,9 +263,11 @@ pub(crate) fn refused_here(request: &Request, session: Option<&str>) -> Option<S
 /// One worktree's request files on the server: each plain request nobody committed goes to
 /// `take` with the file its answers go to; anything else in the folder that is not a plain file
 /// is cleared away, and an answer nobody collected goes after a day. False when the worktree has
-/// no such folder.
+/// no such folder of its own: a link in place of the folder (or of `.glasscode`) is never
+/// followed (`control::own_drop_dir`), as glasscoded clears and writes there outside any sandbox.
 fn scan_drop_dir(worktree: &std::path::Path, take: &dyn Fn(Request, PathBuf)) -> bool {
-    let Ok(entries) = std::fs::read_dir(control::drop_dir(worktree)) else { return false };
+    let Some(dir) = control::own_drop_dir(worktree) else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
     for entry in entries.flatten() {
         let path = entry.path();
         let plain = entry.file_type().is_ok_and(|t| t.is_file());
@@ -298,10 +300,11 @@ fn scan_drop_dir(worktree: &std::path::Path, take: &dyn Fn(Request, PathBuf)) ->
     true
 }
 
-/// One answer line into a request's answer file.
+/// One answer line into a request's answer file, never through a link a session planted there
+/// (`control::append_answer`).
 fn write_answer(out: &std::path::Path, reply: &Reply) {
-    if let Ok(mut file) = std::fs::OpenOptions::new().create_new(true).append(true).open(out).or_else(|_| std::fs::OpenOptions::new().append(true).open(out)) {
-        let _ = writeln!(file, "{}", serde_json::to_string(reply).unwrap_or_default());
+    if let Err(err) = control::append_answer(out, &serde_json::to_string(reply).unwrap_or_default()) {
+        log(format!("a request's answer was not written: {err}"));
     }
 }
 
