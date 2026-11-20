@@ -1611,6 +1611,57 @@ mod scripts {
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_err(), "nothing after the end of input");
     }
 
+    /// Started with the brain's flags (P01), the stand-in's init line lists what a real Claude
+    /// lists: the built-in tools `--tools` names and the tools its `--mcp-config` servers serve,
+    /// as `mcp__<server>__<tool>`, so the brain's tool check accepts it. A server that does not
+    /// start is "failed" and serves nothing; a scenario that names MCP tools keeps its own line.
+    #[cfg(unix)]
+    #[test]
+    fn the_brains_flags_give_the_init_line_its_mcp_tools() {
+        let home = Home::with(&HomeSpec::bare());
+        let cwd = home.project("app").root.clone();
+        let names: Vec<String> = crate::mcp::tools(crate::mcp::Profile::Manager).iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+        let listed = home.top().join("tools.json");
+        std::fs::write(&listed, serde_json::to_string(&names).unwrap()).unwrap();
+        let server = home.top().join("mcp-server.py");
+        std::fs::write(
+            &server,
+            "import json, sys\nnames = json.load(open(sys.argv[1]))\nfor line in sys.stdin:\n    m = json.loads(line)\n    if m.get('id') == 1:\n        print(json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'glasscode', 'version': '1'}}}), flush=True)\n    elif m.get('id') == 2:\n        print(json.dumps({'jsonrpc': '2.0', 'id': 2, 'result': {'tools': [{'name': n} for n in names]}}), flush=True)\n",
+        )
+        .unwrap();
+        let config = |command: &str| json!({ "mcpServers": { "glasscode": { "type": "stdio", "command": command, "args": [server.to_string_lossy(), listed.to_string_lossy()], "env": {} } } }).to_string();
+        let init = |config: String, scenario: Option<&Scenario>| -> Value {
+            // The prompt first: `--mcp-config` takes every word after it, as Claude's parser does.
+            let args = ["-p", "hello", "--output-format", "stream-json", "--verbose", "--tools", "ToolSearch", "--strict-mcp-config", "--mcp-config", config.as_str()];
+            let ran = run(&home, "claude", &args, scenario, &cwd, "", &[]);
+            assert!(ran.status.success(), "{}", ran.stderr);
+            let text = String::from_utf8(ran.stdout).unwrap();
+            text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["subtype"] == "init").expect("an init line")
+        };
+        let scenario = claude(Mode::Print, &[Ending::Completed]);
+        let line = init(config("python3"), Some(&scenario));
+        let tools: Vec<String> = line["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
+        assert_eq!(tools[0], "ToolSearch");
+        assert!(crate::mcp::init_tools_ok(&tools, crate::mcp::Profile::Manager), "{tools:?}");
+        assert!(crate::runtime::claude_expected(&tools).is_ok());
+        assert_eq!(line["mcp_servers"], json!([{ "name": "glasscode", "status": "connected" }]));
+        // A server that cannot start: failed, and only the built-in tool.
+        let failed = init(config("glasscode-no-such-server"), Some(&scenario));
+        assert_eq!((failed["tools"].clone(), failed["mcp_servers"][0]["status"].clone()), (json!(["ToolSearch"]), json!("failed")));
+        // A scenario that names its MCP tools keeps them.
+        let mut own = scenario.clone();
+        for step in own.start.iter_mut() {
+            if let What::Stdout { text } = &mut step.what
+                && text.contains("\"init\"")
+            {
+                let mut value: Value = serde_json::from_str(text).unwrap();
+                value["tools"] = json!(["mcp__glasscode__status"]);
+                *text = value.to_string();
+            }
+        }
+        assert_eq!(init(config("python3"), Some(&own))["tools"], json!(["mcp__glasscode__status"]));
+    }
+
     /// `claude -p` prints the answer's text, `--output-format json` the result line; `codex exec`
     /// prints the last message, `--json` every event (what the one-process brain and auto-review
     /// read).
