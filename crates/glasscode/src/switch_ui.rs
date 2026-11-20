@@ -110,6 +110,7 @@ impl Workspace {
                                     .then(|| self.activity.get(id).copied())
                                     .flatten()
                             },
+                            &self.mirror.local_only,
                         ),
                         None => Vec::new(),
                     };
@@ -227,7 +228,8 @@ impl Workspace {
     /// Worktrees with uncommitted work and no open session join the list, unticked (git status
     /// runs in the background).
     fn switch_find_idle(&mut self, cx: &mut Context<Self>) {
-        let idle = switch::idle_worktrees(&self.state, &self.worktrees);
+        // A project that stays on this Mac leaves no copy on the server either.
+        let idle: Vec<Unit> = switch::idle_worktrees(&self.state, &self.worktrees).into_iter().filter(|u| !self.mirror.local_only.contains(&u.project_id)).collect();
         if idle.is_empty() {
             return;
         }
