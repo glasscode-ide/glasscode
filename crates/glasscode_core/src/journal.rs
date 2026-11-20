@@ -1107,6 +1107,41 @@ pub fn activity_lines_of(events: &[Event]) -> Vec<ActivityLine> {
         .collect()
 }
 
+// ----- usage and the server link (M41, M58) ------------------------------------------------------
+
+/// The share of a usage window at which an account counts as near its limit (the usage-handoff
+/// built-in's `usage.threshold`).
+pub const USAGE_NEAR: f64 = 85.0;
+
+/// The windows of an account that crossed [`USAGE_NEAR`] since the last report: `usage.threshold`
+/// once per crossing. `near` keeps which (account id, window) are over it; one that falls below is
+/// said again when it crosses again. `label` is the account's name as the person reads it.
+pub fn usage_events(near: &mut BTreeSet<(String, u64)>, account: &str, label: &str, limits: &[crate::usage::Limit]) -> Vec<Event> {
+    let mut out = Vec::new();
+    for limit in limits {
+        let key = (account.to_string(), limit.window_minutes);
+        if limit.used_percent < USAGE_NEAR {
+            near.remove(&key);
+            continue;
+        }
+        if near.insert(key) {
+            let percent = limit.used_percent.round() as u64;
+            out.push(Event::new(kinds::USAGE_THRESHOLD, Source::App, format!("{label} is at {percent}% of {}", limit.label().to_lowercase())).severity(Severity::Warn).data(json!({ "account": label, "account_id": account, "window": limit.label(), "window_minutes": limit.window_minutes, "percent": percent, "resets_at": limit.resets_at })));
+        }
+    }
+    out
+}
+
+/// The link to the server went (it answered before, and does not now), at `since_ms`.
+pub fn link_lost(server: &str, since_ms: u64) -> Event {
+    Event::new(kinds::LINK_LOST, Source::App, format!("the link to {server} is lost")).severity(Severity::Warn).data(json!({ "server": server, "since": since_ms }))
+}
+
+/// The link to the server is back, `after_ms` after it went.
+pub fn link_back(server: &str, after_ms: u64) -> Event {
+    Event::new(kinds::LINK_BACK, Source::App, format!("the link to {server} is back after {} s", after_ms / 1000)).data(json!({ "server": server, "after": after_ms }))
+}
+
 // ----- the clocks ------------------------------------------------------------------------------
 
 /// The wall clock and the monotonic clock at the last look: a gap between the two is a sleep
@@ -1158,6 +1193,23 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    /// An account's window over the threshold says so once, and again only after it fell below;
+    /// the server link's loss and return are events of their own.
+    #[test]
+    fn usage_crossings_and_the_link_are_said_once() {
+        let limit = |percent: f64| crate::usage::Limit { window_minutes: 300, used_percent: percent, resets_at: Some(1_800_000_000) };
+        let mut near = BTreeSet::new();
+        assert!(usage_events(&mut near, "a1", "Claude (work)", &[limit(40.0)]).is_empty());
+        let crossed = usage_events(&mut near, "a1", "Claude (work)", &[limit(91.4)]);
+        assert_eq!(crossed.len(), 1);
+        assert_eq!((crossed[0].kind.as_str(), crossed[0].data["account"].clone(), crossed[0].data["percent"].clone()), ("usage.threshold", json!("Claude (work)"), json!(91)));
+        assert!(usage_events(&mut near, "a1", "Claude (work)", &[limit(95.0)]).is_empty(), "once while over");
+        assert!(usage_events(&mut near, "a1", "Claude (work)", &[limit(10.0)]).is_empty());
+        assert_eq!(usage_events(&mut near, "a1", "Claude (work)", &[limit(88.0)]).len(), 1, "again after it fell below");
+        assert_eq!(link_lost("devbox", 5).kind.as_str(), "link.lost");
+        assert_eq!(link_back("devbox", 61_000).data["after"], 61_000);
+    }
 
     /// Activity's lines: a line per turn (its report's), the work's events, newest first, and
     /// nothing of the other kinds.

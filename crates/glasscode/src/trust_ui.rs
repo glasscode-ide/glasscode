@@ -31,6 +31,9 @@ pub struct TrustUi {
     loaded_at: Option<Instant>,
     /// What a new condition says, typed once for any project.
     condition: OnceCell<Entity<TextInput>>,
+    /// A new delegated decision (M61) and a new site (M23), typed the same way.
+    delegation: OnceCell<Entity<TextInput>>,
+    site: OnceCell<Entity<TextInput>>,
 }
 
 impl Workspace {
@@ -136,6 +139,8 @@ impl Workspace {
         }
         let mut out = Vec::new();
         let condition = self.trust.condition.get_or_init(|| cx.new(|cx| TextInput::new("not on main · never secrets/** · hours 09:00-18:00 weekdays · only Sam", cx))).clone();
+        let delegation = self.trust.delegation.get_or_init(|| cx.new(|cx| TextInput::new("run the tests: proceed for cargo test => Yes", cx))).clone();
+        let site = self.trust.site.get_or_init(|| cx.new(|cx| TextInput::new("docs.rs", cx))).clone();
         let policy = self.trust_policy();
         let mut rows: Vec<Div> = Vec::new();
         if policy.is_none() || self.control.authority.live_differs {
@@ -167,8 +172,36 @@ impl Workspace {
                 }
             }));
             rows.push(row("    Add a condition", "Typed in the field below; it is previewed before it counts.", Some(add.into_any_element())));
+            // M61: the questions the manager may answer by itself on Autopilot.
+            for (index, d) in current.delegate.iter().enumerate() {
+                let key = key.clone();
+                let remove = crate::ui::button(format!("trust-undelegate-{}-{index}", project.id), "Take back").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::RemoveDelegation { project: key.clone(), index }, cx)));
+                rows.push(row(format!("    {}", d.describe()), "", Some(remove.into_any_element())));
+            }
+            let (key_delegate, input) = (key.clone(), delegation.clone());
+            let add = crate::ui::button(format!("trust-delegate-{}", project.id), "Delegate a decision").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                match glasscode_core::delegation::parse(&input.read(cx).text()) {
+                    Ok(delegation) => this.trust_change(Change::AddDelegation { project: key_delegate.clone(), delegation }, cx),
+                    Err(why) => this.show_toast(why, cx),
+                }
+            }));
+            rows.push(row("    Delegate a decision", "Typed in its field below: on Autopilot the manager answers it by itself; any other answer is a card.", Some(add.into_any_element())));
+            // M23: the sites its sessions the person does not drive may open.
+            for host in &current.browser_hosts {
+                let (key, gone) = (key.clone(), host.clone());
+                let remove = crate::ui::button(format!("trust-unsite-{}-{host}", project.id), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::RemoveBrowserSite { project: key.clone(), host: gone.clone() }, cx)));
+                rows.push(row(format!("    Its sessions may open {host}"), "", Some(remove.into_any_element())));
+            }
+            let (key_site, input) = (key.clone(), site.clone());
+            let add = crate::ui::button(format!("trust-site-{}", project.id), "Add the site").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let host = input.read(cx).text();
+                this.trust_change(Change::AddBrowserSite { project: key_site.clone(), host }, cx);
+            }));
+            rows.push(row("    Add a site", "Typed in its field below: one its sessions you do not drive may open, in a browser with no sign-ins.", Some(add.into_any_element())));
         }
         rows.push(row("A new condition", "not on <branches> · never <paths> · hours <from>-<to> [weekdays] · only <people>", Some(div().w(px(360.)).child(condition).into_any_element())));
+        rows.push(row("A new delegated decision", "<name>: <words of the question> [for <command> | <command>] [=> <answer> | <answer>]", Some(div().w(px(360.)).child(delegation).into_any_element())));
+        rows.push(row("A new site", "its host: docs.rs (its subdomains too)", Some(div().w(px(360.)).child(site).into_any_element())));
         out.push(group("Trust level", "What the manager may do in each project. A change shows what it does first, and counts only once you confirm it.", rows));
 
         // What each level allows: the gate's own table.

@@ -269,11 +269,25 @@ fn trust_set(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let project = ws.state.projects.iter().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| error(ErrorCode::NotFound, format!("No project “{word}”. `glasscode project list` lists them.")))?;
             let key = ws.control.project_keys.get(&project.id).cloned().ok_or_else(|| failed(format!("{} has no project key yet, so its policy cannot change.", project.name)))?;
             let intake = op.args.get("intake_linear").is_some() || op.args.get("intake_github").is_some() || op.on("intake_off");
-            let given = [op.text("level").is_some(), op.text("condition").is_some(), op.number("remove_condition").is_some(), intake].iter().filter(|g| **g).count();
+            let (delegate, remove_delegate, site, remove_site) = (op.text("delegate"), op.number("remove_delegate"), op.text("browser_site"), op.text("remove_browser_site"));
+            let given = [op.text("level").is_some(), op.text("condition").is_some(), op.number("remove_condition").is_some(), intake, delegate.is_some(), remove_delegate.is_some(), site.is_some(), remove_site.is_some()].iter().filter(|g| **g).count();
             if given != 1 {
-                return Err(usage("Say one change: --level, --condition, --remove-condition, or the intake's --intake-linear, --intake-github and --intake-off."));
+                return Err(usage("Say one change: --level, --condition, --remove-condition, the intake's --intake-linear, --intake-github and --intake-off, --delegate, --remove-delegate, --browser-site or --remove-browser-site."));
             }
-            if intake {
+            if let Some(words) = delegate {
+                // M61: a question the manager may answer by itself on Autopilot.
+                Change::AddDelegation { project: key, delegation: glasscode_core::delegation::parse(words).map_err(usage)? }
+            } else if let Some(n) = remove_delegate {
+                if n == 0 {
+                    return Err(usage("Delegated decisions count from 1."));
+                }
+                Change::RemoveDelegation { project: key, index: n as usize - 1 }
+            } else if let Some(host) = site {
+                // M23: a site its sessions the person does not drive may open.
+                Change::AddBrowserSite { project: key, host: host.to_string() }
+            } else if let Some(host) = remove_site {
+                Change::RemoveBrowserSite { project: key, host: host.to_string() }
+            } else if intake {
                 // M60: what the project picks up by itself on Autopilot.
                 let label = |name: &str| op.args.get(name).and_then(serde_json::Value::as_str).map(str::to_string);
                 Change::Intake { project: key, linear: label("intake_linear"), github: label("intake_github"), off: op.on("intake_off") }
