@@ -96,10 +96,19 @@ impl KeptBack {
         // What names them in the other stores. A store that cannot be read stops the export.
         let mut needles: Vec<String> = memory.needles().to_vec();
         let projects = <Projects as crate::store::Store>::load().map_err(|e| anyhow::anyhow!("the projects' keys could not be read, so nothing is exported: {e}"))?;
+        let machine = crate::paths::MachineId::this().map_err(|e| anyhow::anyhow!("this machine's id could not be read, so nothing is exported: {e}"))?;
         let mut ids: Vec<String> = Vec::new();
+        let mut folders: Vec<String> = Vec::new();
+        // A project that stays here but that this machine cannot tell by its app ids (no key
+        // record, or none of its ids here) is in doubt: then every project of the app's state
+        // that no key claims is taken to be it, and stays out.
+        let mut doubt = false;
         for key in left_out {
             needles.push(key.as_str().to_string());
-            let Some(entry) = projects.keys.get(key) else { continue };
+            let Some(entry) = projects.keys.get(key) else {
+                doubt = true;
+                continue;
+            };
             for remote in &entry.remotes {
                 needles.push(remote.clone());
                 if let Some((_, slug)) = remote.split_once('/') {
@@ -107,16 +116,33 @@ impl KeptBack {
                     needles.push(slug.replace('/', "-").to_lowercase());
                 }
             }
-            needles.extend(entry.roots.iter().cloned());
+            folders.extend(entry.roots.iter().cloned());
             for local in entry.machines.values() {
-                needles.extend(local.paths.iter().chain(&local.pinned).map(|p| p.to_string_lossy().into_owned()));
+                folders.extend(local.paths.iter().chain(&local.pinned).map(|p| p.to_string_lossy().into_owned()));
                 ids.extend(local.project_ids.iter().cloned());
             }
+            if entry.machines.get(&machine).is_none_or(|local| local.project_ids.is_empty()) {
+                doubt = true;
+            }
         }
-        // Their sessions, by the app's state.
+        // The app's state: its projects that are these (by id, by folder, by the key that claims
+        // them, and when in doubt every one no key claims), and their sessions.
+        let same_folder = |a: &str, b: &str| !a.is_empty() && a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\']);
         if let Ok(text) = std::fs::read_to_string(paths::state_file())
             && let Ok(state) = serde_json::from_str::<serde_json::Value>(&text)
         {
+            for project in state["projects"].as_array().into_iter().flatten() {
+                let Some(id) = project["id"].as_str() else { continue };
+                let root = project["root"].as_str().unwrap_or_default();
+                let claimed = projects.key_of(&machine, id);
+                let stays = ids.iter().any(|i| i == id) || folders.iter().any(|f| same_folder(f, root)) || claimed.is_some_and(|k| left_out.contains(k)) || (doubt && claimed.is_none());
+                if stays {
+                    ids.push(id.to_string());
+                    if !root.is_empty() {
+                        folders.push(root.to_string());
+                    }
+                }
+            }
             for session in state["sessions"].as_array().into_iter().flatten() {
                 if session["project_id"].as_str().is_some_and(|id| ids.iter().any(|i| i == id)) {
                     needles.extend(session["id"].as_str().map(str::to_string));
@@ -124,6 +150,7 @@ impl KeptBack {
                 }
             }
         }
+        needles.extend(folders);
         needles.extend(ids);
         // A short word names too much to be told from other text: keys and ids are longer.
         needles.retain(|needle| needle.chars().count() >= 4);
@@ -1089,6 +1116,34 @@ mod tests {
         let _second = Scratch::new();
         let imported = import(&file).unwrap();
         assert!(imported.memory_files >= 2 && imported.project_keys == 1, "{imported:?}");
+    }
+
+    /// ux-m2, when in doubt: a project that stays on this Mac but that this machine cannot tell by
+    /// its app ids (no key record here) still stays out of the export: every project of the app's
+    /// state that no key claims is taken to be it, with its sessions. A project a key claims goes.
+    #[test]
+    fn export_leaves_out_an_unbound_project_when_in_doubt() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        remember(&memory, &MemFile::Decisions(key("open-222222")), "the open project builds with cargo");
+        let (secret, open) = (key("secret-111111"), key("open-222222"));
+        let machine = crate::paths::MachineId::this().unwrap();
+        let (heron_id, open_id, session_id) = ("6f1c2d3e-0000-4000-8000-00000000d4d4", "6f1c2d3e-0000-4000-8000-00000000e5e5", "6f1c2d3e-0000-4000-8000-00000000f6f6");
+        Projects::update(|p| p.keys.entry(open.clone()).or_default().machines.entry(machine.clone()).or_default().project_ids.push(open_id.into())).unwrap();
+        std::fs::write(paths::state_file(), serde_json::to_string(&serde_json::json!({
+            "projects": [{ "id": heron_id, "name": "heron", "root": "/src/heronunbound" }, { "id": open_id, "name": "open", "root": "/src/openbound" }],
+            "sessions": [{ "id": session_id, "project_id": heron_id, "worktree": "/wt/heronsession", "name": "heron login" }],
+        })).unwrap()).unwrap();
+        let file = scratch.at("out/export.tar");
+        export(&file, std::slice::from_ref(&secret), &[]).unwrap();
+        let out = scratch.at("untar");
+        std::fs::create_dir_all(&out).unwrap();
+        run_tar(&["-xf", &file.to_string_lossy(), "-C", &out.to_string_lossy()]).unwrap();
+        let state = std::fs::read_to_string(out.join("data").join("state.json")).unwrap();
+        for word in ["heronunbound", heron_id, session_id, "heronsession"] {
+            assert!(!state.contains(word), "{word} goes: {state}");
+        }
+        assert!(state.contains("openbound") && state.contains(open_id), "{state}");
     }
 
     #[test]
