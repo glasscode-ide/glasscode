@@ -7,10 +7,12 @@
 //! - **Ops.** The Core reads that need no window run here (`ops::core_reads`: work, journal,
 //!   memory), each within the projects the asking wake holds (trust-9): a project named outside
 //!   them is refused, and memory is read for one of them.
-//! - **Acting** here is typing into a session that runs on this server (`session.send`,
-//!   `session.keys`), through the gate with the Mac's approved policy (`daemon::server_gate`):
-//!   allowed runs, an ask is a card, never is refused. Every other op is the Mac's
-//!   (`Unavailable`, not queued).
+//! - **Acting** here is on the sessions of this server: typing into one (`session.send`, `keys`,
+//!   `interrupt`, `answer` against the prompt on its screen now), and `rename`, `close` and `new`
+//!   (in a project of this server). Each goes through the gate with the Mac's approved policy
+//!   (`daemon::server_gate`): allowed runs, an ask is a card, never is refused. What the manager
+//!   types is recorded in the words ledger first, as its own (never a person's). Every other op is
+//!   the Mac's (`Unavailable`, not queued).
 //! - **Cards.** A proposal is a pending action in the server's store, asked on the server; the
 //!   sync shows it on the Mac as a card, and the person's answer comes back (no authority).
 //! - **Notices** are kept, one a matter, until the next sync takes them to the Mac.
@@ -59,6 +61,13 @@ impl DaemonHost {
         if !op.name().starts_with("session.") {
             return Ok(targets);
         }
+        // A new session: the project it names, as the Mac's gate knows it.
+        if op.name() == "session.new" {
+            let word = op.text("project").unwrap_or_default().trim();
+            let key = self.projects.iter().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).and_then(|p| ProjectKey::parse(&p.id)).ok_or_else(|| format!("No project “{word}” the manager knows of."))?;
+            targets.projects.push(key);
+            return Ok(targets);
+        }
         let id = op.text("session").unwrap_or_default().trim().to_string();
         let shared = self.shared.as_ref().ok_or("no sessions here")?;
         let name = {
@@ -74,10 +83,10 @@ impl DaemonHost {
         Ok(targets)
     }
 
-    /// Type into a session here: `session.send` or `session.keys`, through the gate unless the
-    /// person `approved` it (a card answered on the Mac); none for any other op.
+    /// Act on a session here (see the module's words), through the gate unless the person
+    /// `approved` it (a card answered on the Mac); none for any other op.
     pub fn act(&self, op: &Op, caller: &caller::Caller, approved: bool) -> Option<OpReply> {
-        if !matches!(op.name(), "session.send" | "session.keys") {
+        if !matches!(op.name(), "session.send" | "session.keys" | "session.interrupt" | "session.answer" | "session.rename" | "session.close" | "session.new") {
             return None;
         }
         let refuse = |code: ErrorCode, text: String| Some(OpReply::Failed(OpError::new(code, text)));
@@ -106,23 +115,90 @@ impl DaemonHost {
                 }
             }
         }
-        let id = targets.sessions.first().cloned().unwrap_or_default();
         let shared = self.shared.as_ref()?;
-        let Some((tmux, name)) = crate::daemon::lock(shared).running_in(&id) else { return refuse(ErrorCode::NotFound, format!("Session {id} is not running here.")) };
-        let done = if op.name() == "session.send" {
-            tmux.send(&name, op.text("message").unwrap_or_default(), true).map(|()| "Typed into the session.".to_string())
-        } else {
-            const ALLOWED: [&str; 14] = ["Escape", "Enter", "Up", "Down", "Left", "Right", "Tab", "BTab", "C-c", "1", "2", "3", "y", "n"];
-            let keys = op.texts("keys");
-            if let Some(bad) = keys.iter().find(|k| !ALLOWED.contains(&k.as_str())) {
-                return refuse(ErrorCode::Usage, format!("The key {bad} is not one the manager may press."));
-            }
-            tmux.keys(&name, &keys.iter().map(String::as_str).collect::<Vec<_>>()).map(|()| "Pressed the keys.".to_string())
+        let machine_caller = caller::Caller::Machine { id: self.machine.clone() };
+        let done = |result: anyhow::Result<String>| -> Option<OpReply> {
+            Some(match result {
+                Ok(text) => OpReply::Done { text, data: serde_json::Value::Null },
+                Err(err) => OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{err:#}"))),
+            })
         };
-        Some(match done {
-            Ok(text) => OpReply::Done { text, data: serde_json::Value::Null },
-            Err(err) => OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{err:#}"))),
-        })
+        // A new session, in this server's project of the name the Mac knows.
+        if op.name() == "session.new" {
+            let word = op.text("project").unwrap_or_default().trim();
+            let project = self.projects.iter().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).map(|p| p.name.clone()).unwrap_or_else(|| word.to_string());
+            let Some(project_id) = crate::daemon::lock(shared).project_named(&project) else { return refuse(ErrorCode::NotFound, format!("This server has no project “{project}”.")) };
+            let agent = match op.text("agent").map(str::to_lowercase).as_deref() {
+                Some("codex") => glasscode_core::model::AgentKind::Codex,
+                Some("shell") => glasscode_core::model::AgentKind::Shell,
+                _ => glasscode_core::model::AgentKind::Claude,
+            };
+            let message = op.text("message").map(str::to_string).filter(|m| !m.trim().is_empty());
+            if let Some(message) = &message {
+                glasscode_core::words::record(glasscode_core::words::command_origin(caller), message, None, None);
+            }
+            let create = serde_json::json!({ "project_id": project_id, "new_branch": op.text("branch"), "agent": agent, "title": op.text("title"), "initial_prompt": message });
+            return done(crate::daemon::dispatch(shared, &machine_caller, "sessions.create", create).map(|made| format!("Started the session{}.", made.get("id").and_then(serde_json::Value::as_str).map(|id| format!(" {id}")).unwrap_or_default())));
+        }
+        let id = targets.sessions.first().cloned().unwrap_or_default();
+        match op.name() {
+            "session.rename" => return done(crate::daemon::dispatch(shared, &machine_caller, "sessions.rename", serde_json::json!({ "session_id": id, "title": op.text("name").unwrap_or_default() })).map(|_| "Renamed the session.".to_string())),
+            "session.close" => return done(crate::daemon::dispatch(shared, &machine_caller, "sessions.close", serde_json::json!({ "session_id": id })).map(|_| "Closed the session.".to_string())),
+            _ => {}
+        }
+        let Some((tmux, name)) = crate::daemon::lock(shared).running_in(&id) else { return refuse(ErrorCode::NotFound, format!("Session {id} is not running here.")) };
+        match op.name() {
+            "session.send" => {
+                let text = op.text("message").unwrap_or_default();
+                // Recorded before it is typed: the manager's words, never a person's.
+                glasscode_core::words::record(glasscode_core::words::command_origin(caller), text, Some(&id), None);
+                done(tmux.send(&name, text, true).map(|()| "Typed into the session.".to_string()))
+            }
+            "session.interrupt" => {
+                let shell = crate::daemon::lock(shared).session_brief(&id).is_some_and(|(_, agent, _)| agent == glasscode_core::model::AgentKind::Shell);
+                done(tmux.keys(&name, &[if shell { "C-c" } else { "Escape" }]).map(|()| "Interrupted the session.".to_string()))
+            }
+            "session.answer" => {
+                let (prompt_id, label) = (op.text("prompt").unwrap_or_default(), op.text("option").unwrap_or_default().trim());
+                let screen = match tmux.screen(&name) {
+                    Ok(screen) => screen,
+                    Err(err) => return refuse(ErrorCode::Failed, format!("{err:#}")),
+                };
+                let (now, option) = match glasscode_core::prompt::answer_on(&screen, &id, prompt_id, label) {
+                    Ok(found) => found,
+                    Err(glasscode_core::prompt::Refused::Stale) => return refuse(ErrorCode::StalePrompt, format!("The prompt is not the one read ({prompt_id}); nothing was sent.")),
+                    Err(glasscode_core::prompt::Refused::NoOption(labels)) => return refuse(ErrorCode::Usage, format!("The prompt has no option “{label}”; it has: {}.", labels.join("; "))),
+                };
+                // An option that allows something for good is the person's to choose (in the session).
+                if glasscode_core::prompt::grants_for_good(&option) {
+                    return refuse(ErrorCode::NeedsPerson, format!("“{}” allows it for good: only the person chooses that.", option.label));
+                }
+                let extra = op.text("text").map(str::to_string).filter(|t| !t.trim().is_empty());
+                if option.wants_text && extra.is_none() {
+                    return refuse(ErrorCode::Usage, format!("“{}” asks what to do instead: give it with --text.", option.label));
+                }
+                let Some(keys) = glasscode_core::prompt::keys_for(&now, option.number) else { return refuse(ErrorCode::Failed, "The option cannot be reached with the keys.".into()) };
+                if let Err(err) = tmux.keys(&name, &keys) {
+                    return refuse(ErrorCode::Failed, format!("{err:#}"));
+                }
+                if let Some(extra) = extra {
+                    glasscode_core::words::record(glasscode_core::words::command_origin(caller), &extra, Some(&id), None);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(err) = tmux.send(&name, &extra, true) {
+                        return refuse(ErrorCode::Failed, format!("{err:#}"));
+                    }
+                }
+                done(Ok(format!("Answered “{}”.", option.label)))
+            }
+            _ => {
+                const ALLOWED: [&str; 14] = ["Escape", "Enter", "Up", "Down", "Left", "Right", "Tab", "BTab", "C-c", "1", "2", "3", "y", "n"];
+                let keys = op.texts("keys");
+                if let Some(bad) = keys.iter().find(|k| !ALLOWED.contains(&k.as_str())) {
+                    return refuse(ErrorCode::Usage, format!("The key {bad} is not one the manager may press."));
+                }
+                done(tmux.keys(&name, &keys.iter().map(String::as_str).collect::<Vec<_>>()).map(|()| "Pressed the keys.".to_string()))
+            }
+        }
     }
 
     /// The projects `caller` may reach: a wake's own (trust-9); nothing for anyone else here.
