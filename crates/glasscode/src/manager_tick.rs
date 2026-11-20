@@ -835,7 +835,8 @@ impl Workspace {
             let day = now / 86_400_000;
             // The record keeps a hash of the message, not the message.
             let subject = format!("{day}:{}", glasscode_core::effects::short_hash(&line));
-            let delivery = glasscode_core::delivery_session::Delivery::new(&session, &line, glasscode_core::words::InjectKind::SessionSend, now);
+            // One step from what the manager saw (events-13).
+            let delivery = glasscode_core::delivery_session::Delivery { depth: 1, ..glasscode_core::delivery_session::Delivery::new(&session, &line, glasscode_core::words::InjectKind::SessionSend, now) };
             let intent = glasscode_core::effects::Intent {
                 origin: "manager".into(),
                 subject: subject.clone(),
@@ -1549,7 +1550,7 @@ mod tests {
     }
 
     fn pull() -> PullRequest {
-        PullRequest { number: 41, title: "Add the export".into(), url: "https://example.test/pr/41".into(), base_ref_name: "main".into(), head_ref_name: "feat/export".into(), is_draft: false, state: "OPEN".into() }
+        PullRequest { number: 41, title: "Add the export".into(), url: "https://example.test/pr/41".into(), base_ref_name: "main".into(), head_ref_name: "feat/export".into(), is_draft: false, state: "OPEN".into(), ..Default::default() }
     }
 
     #[test]

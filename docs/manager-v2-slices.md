@@ -1087,6 +1087,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
     - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
     - glasscoded reports a turn whose session is gone, from what its end said.
+  - **Review facts (leftovers sweep).** The status rounds read each pull request's author, its review requests and its reviewers' newest reviews (GitHub's `reviewRequests` and `latestReviews`, and `gh`'s `--json` alike). A pull-request session's review is asked for when a review is requested, or someone other than its author reviewed it. A review session's review is posted when its own GitHub account reviewed after the session started. Each is journaled once as `review.requested` or `review.posted` (`work::review_facts`, `review_events`), so `ReviewRequested` and `ReviewPosted` now have their source.
   - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)

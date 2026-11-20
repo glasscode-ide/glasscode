@@ -755,9 +755,13 @@ mod tests {
         env.insert("GLASSCODE_TEST_CLI_HELP".into(), scripts_dir().join("..").join("cli-help").to_string_lossy().into_owned());
         let spec = BrainSpec {
             program: scripts_dir().join("claude"),
-            // The manager's own folders, in the scratch home.
-            cwd: crate::paths::manager_work_dir(),
-            run_dir: crate::paths::manager_run_dir(),
+            // A brain runs only in the manager's own folder (exec-24).
+            cwd: {
+                let work = crate::paths::manager_work_dir();
+                std::fs::create_dir_all(&work).unwrap();
+                work
+            },
+            run_dir: dir.path().join("run"),
             env: env.into_iter().collect(),
             ..super::tests::spec()
         };
