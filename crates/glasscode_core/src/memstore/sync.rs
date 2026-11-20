@@ -120,10 +120,11 @@ pub fn outgoing(memory: &Memory, since: Option<&str>, left: &LeftOut, machine: &
     for ((file, now), before) in files.iter().zip(now).zip(before) {
         let doc = now.as_deref().map(Doc::parse).unwrap_or_default();
         let mut sent = skeleton(&doc, left);
-        // Entries that left the file with no tombstone go as one.
+        // Entries that left the file with no tombstone go as one: only those that went before (an
+        // entry about what stays here never did, so neither does its id).
         if let Some(before) = before.as_deref().map(Doc::parse) {
             let still = doc.ids();
-            let gone: Vec<String> = before.entries().map(|e| e.header.id.clone()).filter(|id| !still.contains(id)).collect();
+            let gone: Vec<String> = before.entries().filter(|e| left.keeps_line(&Line::Entry((*e).clone()))).map(|e| e.header.id.clone()).filter(|id| !still.contains(id)).collect();
             if !gone.is_empty() {
                 let stamps = crate::identity::next_stamps(machine, gone.len()).map_err(|err| MemoryError::Git(err.to_string()))?;
                 sent.lines.extend(gone.into_iter().zip(stamps).map(|(id, at)| Line::Tombstone { id, at }));
@@ -176,6 +177,26 @@ fn admit(ours: &Doc, theirs: Doc, from_server: bool, taken: &mut Taken) -> Doc {
 }
 
 impl Memory {
+    /// Remove the files below `folders` (a project that stays on the Mac now: the Mac asks the
+    /// server to let its folder go, M57), in one commit. Only memory's files are touched. Gives how
+    /// many went. It reads and writes the disk and runs git.
+    pub fn drop_folders(&self, folders: &[String]) -> Result<usize> {
+        let folders: Vec<&String> = folders.iter().filter(|f| (f.starts_with("projects/") || f.starts_with("org/")) && !f.contains("..") && f.matches('/').count() == 1).collect();
+        if folders.is_empty() {
+            return Ok(0);
+        }
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let edits: Vec<(MemFile, Option<String>)> = snap.files()?.into_iter().filter(|file| synced(file) && folders.iter().any(|f| file.rel().starts_with(&format!("{f}/")))).map(|file| (file, None)).collect();
+        if edits.is_empty() {
+            return Ok(0);
+        }
+        let count = edits.len();
+        self.commit(&head, &edits, &Who::Manager, "Stays on the Mac now", &[])?;
+        Ok(count)
+    }
+
     /// Take the other home's files in (`from_server`: the Mac takes the server's), merged by entry in
     /// one commit. A file that is not memory's, or stays on this Mac (`left`), is refused; a file with
     /// a pending edit is left out (in [`Taken::skipped`]). It reads and writes the disk and runs git.
@@ -275,6 +296,25 @@ mod tests {
         for word in &private.open_words {
             assert!(all.contains(word.as_str()), "{word} goes");
         }
+
+        // Later syncs from a cursor: the proposal for the local-only project is accepted (it
+        // leaves the inbox), and no tombstone of it goes, as it never did.
+        at_home(&scratch.at("glasscode"));
+        let memory = Memory::open();
+        memory.accept_proposal(&private.proposal).unwrap();
+        let (later, _) = outgoing(&memory, head.as_deref(), &LeftOut::of(private.excluded.clone()), &machine).unwrap();
+        let payload = serde_json::to_string(&later).unwrap();
+        assert!(!payload.contains(&private.proposal), "the id of what stays here");
+        for word in &private.secret_words {
+            assert!(!payload.contains(word.as_str()), "{word} is in what goes later");
+        }
+
+        // A project that stays here now: the server lets its folder go.
+        at_home(&scratch.at("server"));
+        let server = Memory::open();
+        assert!(server.snapshot().unwrap().files().unwrap().iter().any(|f| f.rel().starts_with("projects/open-222222/")));
+        assert!(server.drop_folders(&["projects/open-222222".into(), "../etc".into()]).unwrap() > 0);
+        assert!(!server.snapshot().unwrap().files().unwrap().iter().any(|f| f.rel().starts_with("projects/open-222222/")));
     }
 
     /// M57: entries both ways by stamp and tombstone. A forgotten entry goes as its tombstone, an
