@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod auto_review;
 mod backdrop;
+mod brain_host;
 mod capabilities;
 mod browser_ui;
 mod center;
@@ -18,8 +19,10 @@ mod files_ui;
 mod first_run;
 mod github_accounts_ui;
 mod github_ui;
+mod home_ui;
 mod icons;
 mod keymap;
+mod lifetime;
 mod kit;
 mod glasscode_ui;
 mod manager_cmd;
