@@ -37,7 +37,16 @@ pub enum Ended {
     RemovedOutside,
     /// Its project was removed from Glasscode.
     ProjectRemoved,
+    /// Its worktree was removed on the server (glasscoded's own `worktrees.remove`).
+    RemovedOnServer,
+    /// Its pull request was merged or closed, and no session ran in it for [`CLOSED_DAYS`] days;
+    /// its worktree is still there.
+    Closed,
 }
+
+/// How long a merged or closed pull request's work waits, with no session open in it, before it is
+/// archived.
+pub const CLOSED_DAYS: u64 = 7;
 
 impl Ended {
     fn word(self) -> &'static str {
@@ -45,6 +54,8 @@ impl Ended {
             Ended::Removed => "removed",
             Ended::RemovedOutside => "removed-outside",
             Ended::ProjectRemoved => "project-removed",
+            Ended::RemovedOnServer => "removed-on-server",
+            Ended::Closed => "closed",
         }
     }
 
@@ -53,6 +64,8 @@ impl Ended {
             Ended::Removed => "Its worktree was removed in Glasscode.",
             Ended::RemovedOutside => "Its worktree was removed outside Glasscode; its review notes were lost.",
             Ended::ProjectRemoved => "Its project was removed from Glasscode.",
+            Ended::RemovedOnServer => "Its worktree was removed on the server.",
+            Ended::Closed => "Its pull request was merged or closed, and no session ran in it for seven days.",
         }
     }
 }
@@ -82,6 +95,10 @@ pub struct ArchiveInput {
     /// "PR acme/app#42" → "merged", "ticket ENG-42" → "Done".
     pub links: Vec<(String, String)>,
     pub last_reply: Option<String>,
+    /// The last turn report of its sessions (M30), as one line.
+    pub last_turn: Option<String>,
+    /// Its sessions' ids, newest last: what the last turn report is looked up by.
+    pub sessions: Vec<String>,
     /// The handoff notes: file and the developer's note in it.
     pub handoff: Vec<(PathBuf, String)>,
     pub conversations: Vec<Conversation>,
@@ -89,12 +106,12 @@ pub struct ArchiveInput {
 
 impl ArchiveInput {
     pub fn new(project: ProjectKey, ended: Ended, at_ms: u64) -> ArchiveInput {
-        ArchiveInput { project, work: None, worktree: None, branch: None, ended, at_ms, review_notes: Vec::new(), links: Vec::new(), last_reply: None, handoff: Vec::new(), conversations: Vec::new() }
+        ArchiveInput { project, work: None, worktree: None, branch: None, ended, at_ms, review_notes: Vec::new(), links: Vec::new(), last_reply: None, last_turn: None, sessions: Vec::new(), handoff: Vec::new(), conversations: Vec::new() }
     }
 
     /// Whether there is anything to keep beyond a work file.
     fn has_more(&self) -> bool {
-        !self.review_notes.is_empty() || !self.links.is_empty() || self.last_reply.is_some() || !self.handoff.is_empty() || !self.conversations.is_empty()
+        !self.review_notes.is_empty() || !self.links.is_empty() || self.last_reply.is_some() || self.last_turn.is_some() || !self.handoff.is_empty() || !self.conversations.is_empty()
     }
 }
 
@@ -282,7 +299,76 @@ pub fn before_removal(mut input: ArchiveInput) -> Result<Archived, MemoryError> 
     if input.last_reply.is_none() {
         input.last_reply = input.conversations.iter().rev().find_map(|c| crate::transcript::last_reply(c.agent, &c.path));
     }
+    if input.last_turn.is_none() {
+        input.last_turn = last_turn(&input.sessions);
+    }
     Memory::open().archive(&input)
+}
+
+/// The newest turn report of these sessions (M30's `turn.ended`), as its one line. It reads the
+/// journal.
+pub fn last_turn(sessions: &[String]) -> Option<String> {
+    sessions.iter().rev().find_map(|session| {
+        let filter = crate::journal::Filter { session: Some(session.clone()), kind: Some(crate::journal::kinds::TURN_ENDED.as_str().to_string()), ..Default::default() };
+        crate::journal::query(&filter, &crate::journal::Scope::All, 1).pop().map(|event| event.summary)
+    })
+}
+
+/// When the work of each worktree with a merged or closed pull request was first seen so with no
+/// session open in it (`manager/closed-work.json`), and the worktrees archived for it: GitHub's
+/// own closing time is not read, so the seven days count from when Glasscode saw it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ClosedWork {
+    pub seen: std::collections::BTreeMap<String, u64>,
+    pub archived: std::collections::BTreeSet<String>,
+}
+
+impl crate::store::Store for ClosedWork {
+    const NAME: &'static str = "manager/closed-work";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> PathBuf {
+        crate::paths::root().join("manager").join("closed-work.json")
+    }
+}
+
+/// How a worktree's work stands at a reconcile: its pull request merged or closed, and whether a
+/// session is open in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkNow {
+    pub worktree: PathBuf,
+    pub closed: bool,
+    pub open: bool,
+}
+
+impl ClosedWork {
+    /// Note how each worktree stands at `now_ms`, and say which are due for their archive: closed,
+    /// with no session open, for [`CLOSED_DAYS`] days, and not archived for it yet. An open session
+    /// or a pull request open again starts the count again; a worktree no longer listed is dropped.
+    pub fn due(&mut self, now: &[WorkNow], now_ms: u64) -> Vec<PathBuf> {
+        let listed: std::collections::BTreeSet<String> = now.iter().map(|w| w.worktree.to_string_lossy().into_owned()).collect();
+        self.seen.retain(|k, _| listed.contains(k));
+        self.archived.retain(|k| listed.contains(k));
+        let mut due = Vec::new();
+        for work in now {
+            let key = work.worktree.to_string_lossy().into_owned();
+            if !work.closed || work.open {
+                self.seen.remove(&key);
+                if !work.closed {
+                    self.archived.remove(&key);
+                }
+                continue;
+            }
+            let since = *self.seen.entry(key.clone()).or_insert(now_ms);
+            if now_ms.saturating_sub(since) >= CLOSED_DAYS * 86_400_000 && !self.archived.contains(&key) {
+                self.archived.insert(key);
+                due.push(work.worktree.clone());
+            }
+        }
+        due
+    }
 }
 
 /// The archive file of `input`, with the work files' entries kept as they were (ids and headers).
@@ -332,6 +418,7 @@ fn render(input: &ArchiveInput, work_docs: &[(MemFile, Doc)], env: &[String]) ->
     };
     bullets(&mut doc, "Review notes", input.review_notes.iter().flat_map(|(name, text)| text.lines().filter(|l| !l.trim().is_empty()).map(move |l| format!("{name}: {}", l.trim()))).map(|l| kept_line(&l, env)).collect());
     bullets(&mut doc, "Links", input.links.iter().map(|(what, state)| kept_line(&format!("{what}: {state}"), env)).collect());
+    bullets(&mut doc, "Last turn", input.last_turn.iter().map(|r| kept_line(r, env)).collect());
     bullets(&mut doc, "Last reply", input.last_reply.iter().map(|r| kept_line(r, env)).collect());
     bullets(&mut doc, "Handoff notes", input.handoff.iter().map(|(path, note)| kept_line(&format!("{}: {}", path.display(), if note.is_empty() { "(no note)" } else { note }), env)).collect());
     for conversation in &input.conversations {
@@ -471,6 +558,64 @@ mod tests {
         for kept in ["the reset link is still missing", "review.md: Ask Sam about the session timeout.", "First prompt: Build the login form", "Reply: The login form uses useAuthForm now.", "Last reply"] {
             assert!(text.contains(kept), "{kept:?} not in:\n{text}");
         }
+    }
+
+    #[test]
+    fn the_archive_keeps_the_last_turn_report() {
+        let scratch = Scratch::new();
+        // The journal runs in a v2 home only.
+        struct V2;
+        impl Drop for V2 {
+            fn drop(&mut self) {
+                // SAFETY: the core tests run one at a time (`--test-threads=1`).
+                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
+                crate::journal::reset();
+            }
+        }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
+        crate::journal::reset();
+        let _v2 = V2;
+        assert!(crate::journal::init());
+        let turn = crate::journal::Event::new(crate::journal::kinds::TURN_ENDED, crate::journal::Source::App, "completed in 42 s: 2 tools, 1 files").session(Some("s-9"));
+        crate::journal::append(turn);
+        crate::journal::flush();
+        let memory = Memory::open();
+        let worktree = scratch.at("wt-retry");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let w = work("fix/retry");
+        memory.note_in(&Who::Session("s-9".into()), &w, Some(&worktree), "the retry waits 30 s").unwrap();
+        let mut input = ArchiveInput::new(key("app-3f9a1c"), Ended::Closed, crate::clock::now_ms());
+        input.work = Some(w);
+        input.worktree = Some(worktree);
+        input.sessions = vec!["s-9".into()];
+        let archived = before_removal(input).unwrap();
+        let text = memory.snapshot().unwrap().text(archived.file.as_ref().unwrap()).unwrap().unwrap();
+        for kept in ["## Last turn", "completed in 42 s: 2 tools, 1 files", "merged or closed, and no session ran in it for seven days", "ended=closed"] {
+            assert!(text.contains(kept), "{kept:?} not in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn closed_work_waits_seven_days_with_no_session_open() {
+        let mut work = ClosedWork::default();
+        let wt = PathBuf::from("/wt/feat-x");
+        let closed = |open: bool| vec![WorkNow { worktree: wt.clone(), closed: true, open }];
+        let start = 1_795_000_000_000;
+        assert!(work.due(&closed(false), start).is_empty(), "the count starts");
+        assert!(work.due(&closed(false), start + 6 * DAY).is_empty());
+        // A session opened there: the count starts again when it closes.
+        assert!(work.due(&closed(true), start + 6 * DAY + 1).is_empty());
+        assert!(work.due(&closed(false), start + 7 * DAY).is_empty());
+        assert_eq!(work.due(&closed(false), start + 14 * DAY), [wt.clone()]);
+        assert!(work.due(&closed(false), start + 20 * DAY).is_empty(), "once");
+        // Open again, then closed again: archived again after seven more days.
+        assert!(work.due(&[WorkNow { worktree: wt.clone(), closed: false, open: false }], start + 21 * DAY).is_empty());
+        assert!(work.due(&closed(false), start + 22 * DAY).is_empty());
+        assert_eq!(work.due(&closed(false), start + 29 * DAY), [wt.clone()]);
+        // A worktree no longer there is dropped.
+        assert!(work.due(&[], start + 30 * DAY).is_empty());
+        assert!(work.seen.is_empty() && work.archived.is_empty());
     }
 
     #[test]

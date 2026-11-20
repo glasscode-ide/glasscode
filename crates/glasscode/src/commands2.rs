@@ -197,6 +197,7 @@ impl Workspace {
             if let Some(path) = &s.transcript_path {
                 input.conversations.push(Conversation { agent: s.agent, path: path.clone(), digest: None });
             }
+            input.sessions.push(s.id.clone());
         }
         input.links.dedup();
         Some(input)

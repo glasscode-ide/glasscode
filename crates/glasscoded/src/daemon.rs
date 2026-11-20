@@ -145,6 +145,33 @@ fn kick_prs() {
 
 pub type Shared = Arc<Mutex<Daemon>>;
 
+/// What the archive of a worktree's work needs from this server (M24): its project's key here,
+/// its sessions' work and conversations. None when the engine is v1 here, or the project has no
+/// key on this machine.
+fn archive_input(daemon: &Daemon, project_id: &str, worktree: &git::Worktree) -> Option<glasscode_core::memstore::archive::ArchiveInput> {
+    use glasscode_core::memstore::archive::{ArchiveInput, Conversation, Ended};
+    use glasscode_core::store::{Engine, EngineSwitch};
+    if EngineSwitch::current().engine != Engine::V2 {
+        return None;
+    }
+    let key = daemon.journal.keys.get(project_id)?.clone();
+    let sessions: Vec<&glasscode_core::model::Session> = daemon.state.sessions.iter().filter(|s| s.worktree == worktree.path).collect();
+    let mut input = ArchiveInput::new(key.clone(), Ended::RemovedOnServer, glasscode_core::clock::now_ms());
+    input.worktree = Some(worktree.path.clone());
+    input.branch = (!worktree.branch.is_empty()).then(|| worktree.branch.clone());
+    input.work = match sessions.first() {
+        Some(s) => Some(daemon.state.work_key(&key, s)),
+        None => input.branch.clone().map(|id| glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Branch, id }),
+    };
+    for s in &sessions {
+        if let Some(path) = &s.transcript_path {
+            input.conversations.push(Conversation { agent: s.agent, path: path.clone(), digest: None });
+        }
+        input.sessions.push(s.id.clone());
+    }
+    Some(input)
+}
+
 pub fn log(message: impl AsRef<str>) {
     let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     eprintln!("[{secs}] {}", message.as_ref());
@@ -1260,10 +1287,13 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             let path: PathBuf = param(&params, "path")?;
             let force: bool = param(&params, "force").unwrap_or(false);
             let delete_branch: bool = param(&params, "delete_branch").unwrap_or(false);
-            let (root, worktree) = {
+            let (root, worktree, archive) = {
                 let mut daemon = lock(shared);
                 let root = daemon.state.project(&project_id).map(|p| p.root.clone()).ok_or_else(|| anyhow!("no project {project_id}"))?;
                 let worktree = daemon.worktrees.get(&project_id).and_then(|l| l.iter().find(|w| w.path == path)).cloned().ok_or_else(|| anyhow!("no worktree {}", path.display()))?;
+                // Its work is archived first, in this server's memory (M24, with M57's entries): read
+                // here, before its sessions go.
+                let archive = archive_input(&daemon, &project_id, &worktree);
                 // Sessions in it end first; their terminals hold the folder open.
                 let doomed: Vec<String> = daemon.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.clone()).collect();
                 for id in doomed {
@@ -1271,8 +1301,13 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     daemon.state.sessions.retain(|s| s.id != id);
                 }
                 daemon.save();
-                (root, worktree)
+                (root, worktree, archive)
             };
+            if let Some(input) = archive
+                && let Err(err) = glasscode_core::memstore::archive::before_removal(input)
+            {
+                log(format!("memory: the work of {} was not archived: {err}", worktree.path.display()));
+            }
             git::remove_worktree(&root, &worktree, force)?;
             if delete_branch && !worktree.is_detached() {
                 git::delete_branch(&root, &worktree.branch)?;

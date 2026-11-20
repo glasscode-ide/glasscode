@@ -774,6 +774,11 @@ impl Workspace {
             journal::append(event);
         }
         self.journal.reconciler = Some(reconciler);
+        // A pull request merged or closed with no session open in its worktree for seven days: its
+        // work is archived, the worktree left as it is (M24).
+        if self.control.engine_v2 {
+            self.archive_closed_work();
+        }
         // A worktree that went outside Glasscode: memory archives the work that names it (M24).
         if self.control.engine_v2 && !gone.is_empty() {
             std::thread::spawn(move || {
@@ -784,6 +789,50 @@ impl Workspace {
                 }
             });
         }
+    }
+
+    /// The worktrees whose sessions' pull request is merged or closed, with whether a session is
+    /// open there; those closed for seven days with none open are archived ([`Ended::Closed`]) in
+    /// the background. What the window holds is read here; the store and the archive are IO.
+    fn archive_closed_work(&mut self) {
+        use glasscode_core::memstore::archive::{ClosedWork, Ended, WorkNow};
+        let mut now: Vec<WorkNow> = Vec::new();
+        let mut inputs = Vec::new();
+        for project in &self.state.projects {
+            for wt in self.worktrees.get(&project.id).into_iter().flatten().filter(|w| !w.is_main) {
+                let sessions: Vec<&glasscode_core::model::Session> = self.state.sessions.iter().filter(|s| s.worktree == wt.path).collect();
+                let states: Vec<String> = sessions.iter().filter_map(|s| self.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|pr| pr.state.to_uppercase())).collect();
+                if states.is_empty() {
+                    continue;
+                }
+                let closed = states.iter().all(|s| s == "MERGED" || s == "CLOSED");
+                let open = sessions.iter().any(|s| self.terminals.contains_key(&s.id));
+                now.push(WorkNow { worktree: wt.path.clone(), closed, open });
+                if closed
+                    && !open
+                    && let Some(mut input) = self.archive_input(&project.root, wt)
+                {
+                    input.ended = Ended::Closed;
+                    inputs.push(input);
+                }
+            }
+        }
+        if now.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let at = glasscode_core::clock::now_ms();
+            let due = match glasscode_core::store::update::<ClosedWork, _>(|work| work.due(&now, at)) {
+                Ok(due) => due,
+                Err(err) => return log::warn!("memory: the closed work could not be counted: {err}"),
+            };
+            for input in inputs.into_iter().filter(|i| i.worktree.as_ref().is_some_and(|w| due.contains(w))) {
+                let worktree = input.worktree.clone().unwrap_or_default();
+                if let Err(err) = glasscode_core::memstore::archive::before_removal(input) {
+                    log::warn!("memory: could not archive the closed work of {}: {err}", worktree.display());
+                }
+            }
+        });
     }
 
     /// What is true now, from what the window holds in memory (no IO).
