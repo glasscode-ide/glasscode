@@ -456,7 +456,7 @@ fn child_env(agent: AgentKind, config: &BrainConfig) -> HashMap<String, String> 
 
 /// `claude`'s arguments. `stream`: the long-lived process with JSON lines in and out; else one
 /// question on stdin and the answer as text (only options every version knows).
-fn claude_args(prompt: &str, model: Option<&str>, stream: bool) -> Vec<String> {
+pub(crate) fn claude_args(prompt: &str, model: Option<&str>, stream: bool) -> Vec<String> {
     let mut args: Vec<String> = vec!["-p".into()];
     if stream {
         args.extend(["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"].map(String::from));
@@ -480,7 +480,7 @@ fn claude_args(prompt: &str, model: Option<&str>, stream: bool) -> Vec<String> {
 /// `codex exec`'s arguments: in its sandbox (it may write in its own folder only), with the
 /// network on because the `glasscode` command reaches the app through a socket, the manager's
 /// instructions as developer instructions, the question on stdin and the answer in `answer`.
-fn codex_args(prompt: &str, model: Option<&str>, answer: &str) -> Vec<String> {
+pub(crate) fn codex_args(prompt: &str, model: Option<&str>, answer: &str) -> Vec<String> {
     let mut args: Vec<String> = ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--skip-git-repo-check", "--ephemeral", "--color", "never"].map(String::from).to_vec();
     args.extend(["-c".to_string(), format!("developer_instructions={}", serde_json::to_string(prompt).unwrap_or_default())]);
     if let Some(model) = model {

@@ -38,6 +38,9 @@ pub struct ProjectFiles {
     loading: bool,
     /// The warnings shown (folder, text): each one once while Glasscode runs.
     warned: HashSet<(PathBuf, String)>,
+    /// Who can write to each project's repository (M22, D27): public, a fork. By project folder,
+    /// asked of GitHub with the files, in the background.
+    pub exposure: HashMap<PathBuf, glasscode_core::github_api::Exposure>,
     /// By session.
     setups: HashMap<String, Setup>,
 }
@@ -141,16 +144,25 @@ impl Workspace {
         }
         self.project_files.loading = true;
         let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        // With session profiles on (M22), whether each repository is public or a fork, as well.
+        let repos: Vec<(PathBuf, String)> = if self.control.profiles { self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo))).collect() } else { Vec::new() };
+        let env = self.env.clone();
         let task = cx.background_spawn(async move {
-            roots
+            let files = roots
                 .into_iter()
                 .map(|root| (project_settings::load(&root), root))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let exposure: HashMap<PathBuf, glasscode_core::github_api::Exposure> = repos.into_iter().filter_map(|(root, repo)| glasscode_core::github_api::exposure(&repo, &env).map(|e| (root, e))).collect();
+            (files, exposure)
         });
         cx.spawn(async move |this, cx| {
-            let read = task.await;
+            let (read, exposure) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.project_files.loading = false;
+                if exposure != this.project_files.exposure {
+                    this.project_files.exposure = exposure;
+                    cx.notify();
+                }
                 let read: HashMap<PathBuf, Loaded> = read
                     .into_iter()
                     .map(|(loaded, root)| (root, loaded))

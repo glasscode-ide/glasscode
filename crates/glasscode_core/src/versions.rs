@@ -379,6 +379,86 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
     out
 }
 
+
+// ----- the argument contract (M22, alt-m4) -------------------------------------------------------
+
+/// Every argument list Glasscode builds for `agent`'s CLI, each a call site's (its id in
+/// `cli-flags.json`) with the arguments it passes: sessions in every mode, under no profile and
+/// under each origin's, the headless run, and the manager's brain. The values are stand-ins; the
+/// options and subcommands are what Glasscode passes.
+pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<String>)> {
+    use crate::model::{AgentKind, Session};
+    use crate::profile::{ProfileFacts, SessionOrigin};
+    let modes: &[Option<&str>] = match agent {
+        AgentKind::Claude => &[None, Some("default"), Some("acceptEdits"), Some("plan"), Some("auto"), Some("bypassPermissions")],
+        AgentKind::Codex => &[None, Some("full-auto"), Some("read-only")],
+        AgentKind::Shell => return Vec::new(),
+    };
+    let session = |mode: Option<&str>, resume: bool| -> Session {
+        serde_json::from_value(serde_json::json!({
+            "id": "contract", "project_id": "p", "worktree": std::env::temp_dir(), "branch": "b", "title": "t", "agent": agent,
+            "agent_session_id": resume.then_some("00000000-0000-4000-8000-000000000000"), "model": "m", "mode": mode, "initial_prompt": "hi", "created_at": 0
+        }))
+        .expect("a session")
+    };
+    let facts = ProfileFacts { worktree: std::env::temp_dir(), ..ProfileFacts::default() };
+    let profiles = [None, Some(SessionOrigin::Person), Some(SessionOrigin::Automation), Some(SessionOrigin::Quarantine)];
+    let env = HashMap::new();
+    let mut out = Vec::new();
+    let site = match agent {
+        AgentKind::Claude => "agents::launch claude",
+        _ => "agents::launch codex",
+    };
+    for mode in modes {
+        for resume in [false, true] {
+            for origin in profiles {
+                let profile = origin.map(|o| crate::profile::session_profile(o, agent, &crate::gate::ProjectPolicy::default(), &facts));
+                let launch = crate::agents::launch_with(&session(*mode, resume), None, &env, profile.as_ref());
+                out.push((site, launch.args));
+            }
+        }
+    }
+    match agent {
+        AgentKind::Claude => {
+            out.push(("agents::headless claude", crate::agents::headless_args(agent, "hi")));
+            out.push(("brain::claude_args stream", crate::manager::brain::claude_args("p", Some("m"), true)));
+            out.push(("brain::claude_args once", crate::manager::brain::claude_args("p", Some("m"), false)));
+        }
+        _ => {
+            out.push(("agents::headless codex", crate::agents::headless_args(agent, "hi")));
+            out.push(("brain::codex_args", crate::manager::brain::codex_args("p", Some("m"), "/tmp/answer")));
+        }
+    }
+    out
+}
+
+/// The words a CLI is asked to check an argument list with, ending it: Claude's `--version`,
+/// Codex's `--help` (each parses every option before it answers). What comes after `--` (a
+/// first message) is left out, so nothing starts.
+fn probe_of(agent: crate::model::AgentKind, args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().take_while(|a| *a != "--").cloned().collect();
+    // A first message without `--` (`codex exec <prompt>`, `-p <prompt>`) stays: it is a value.
+    out.push(if agent == crate::model::AgentKind::Codex { "--help".into() } else { "--version".into() });
+    out
+}
+
+/// alt-m4's contract: every argument list Glasscode can build, run against the candidate binary
+/// `program`, each ending in `--version` (Claude) or `--help` (Codex), must exit 0. While any
+/// fails, the version cannot be approved. The failures: each list, and what the CLI said.
+pub fn argument_contract(agent: crate::model::AgentKind, program: &std::path::Path, env: &HashMap<String, String>) -> Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+    for (site, args) in argument_lists(agent) {
+        let probe = probe_of(agent, &args);
+        let out = crate::sys::command(program).args(&probe).envs(env).stdin(std::process::Stdio::null()).output();
+        match out {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => failures.push(format!("{site}: {} → {}", probe.join(" "), String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("failed"))),
+            Err(err) => failures.push(format!("{site}: {err}")),
+        }
+    }
+    if failures.is_empty() { Ok(()) } else { Err(failures) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

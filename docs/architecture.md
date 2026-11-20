@@ -283,6 +283,33 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - `let-go` entries are archived after 30 active days.
 - **A project's key** is bound only to a folder that exists (`bind_project`).
 
+### Memory: brief, search and ops (M20.2)
+
+- **Search** (`memstore::search`) is BM25 over heading sections of Glasscode's last commit, with no model.
+  - Words are folded (case, accents); identifiers and paths are split while kept whole, so `retryBackoffMs`, `retry_backoff_ms` and "retry backoff" find each other. The employer's `glossary.md` adds synonyms.
+  - The index of a commit is built once (about 0.6 s for 10 MB in a release build) and kept; a query on 10 MB takes 1.6 ms p95.
+  - A session reads its project, its employer's folder and the person's profile. The boosts run from its own work file, to the project, to the person and the org, to the archive. The manager reads every project.
+  - Results are a data block (`<memory-results>`), not instructions.
+  - Recall at 5 on the retrieval set is 0.977 (`floor.json`).
+- **The brief** (`memstore::brief`) is built in one read of the commit (8 ms p95), within 8,000 characters. Its order:
+  1. the policy header;
+  2. the person's profile;
+  3. `PROJECT.md`;
+  4. the work file;
+  5. the project's `INDEX.md` lines;
+  6. a pointer to the repository's own `AGENTS.md` and `CLAUDE.md`.
+
+  Only confirmed entries are given as what memory holds. Work notes, unconfirmed entries and index lines sit in one `<notes>` data block. Agent notes are never read. The manager's brief lists one line per project.
+- **`INDEX.md`** is regenerated with every commit, from the files that changed.
+- **Ops** (`ops/table_memory.rs`, `v2_only`): `memory.search`, `show`, `brief`, `note`, `propose`, `accept`, `reject`, `merge`, `let_go`, `rewrite`, `forget` and `pending`.
+  - `accept`, `reject`, `forget` and `pending` are the person's only.
+  - With v2, the v1 words `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search).
+  - Only the app's window is the person to memory; a session reaches only its own session and project; a change by anyone else to what the person confirmed is a proposal.
+- **Delivery** happens with v2 and the engine switch `brief` on (rule 2: with v1 nothing changes).
+  - A Claude session gets a second `SessionStart` hook, `"<glasscode>" memory brief --hook`. It prints the fixed memory instructions and the current brief as `additionalContext` at start, on resume and after a compaction (P03).
+  - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
+  - An auto-review run gets its project's brief, read-only, ahead of its task.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
@@ -543,6 +570,41 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
+- **Session profiles** (`glasscode_core::profile`, M22) apply with the v2 engine and the
+  "profiles" switch on; otherwise a session launches as before. A session the person started
+  runs under the person profile. Claude runs in its sandbox with the credentials and Glasscode's
+  own files denied (sandbox `denyRead` and `permissions.deny` with `//` paths), and `gh` runs
+  outside the sandbox. Codex runs as today.
+  - **Automation.** A session that a playbook, the manager or another session started, or sent
+    text to (`authority/origins.json`, marked before its terminal starts) runs under it:
+    - the sandbox cannot be left;
+    - bypass is disabled;
+    - cross-session messages are refused;
+    - claude.ai connectors are off, with `--strict-mcp-config`;
+    - WebFetch and WebSearch are denied;
+    - the other worktrees are denied one by one;
+    - a `PreToolUse` gate hook (`glasscode hook gate`) refuses `gh pr merge`, force or
+      default-branch pushes, reads of credentials and of Glasscode's files, peer messages, other
+      agents and outside MCP tools;
+    - Codex gets the narrowed permission profile of O16 (its own git metadata only), no
+      pre-trust, and the network off.
+  - **Quarantine** is automation with the forge as the only network.
+  - **Every origin** gets:
+    - a `PermissionRequest` hook (`glasscode hook permission`) that answers from the approved
+      allow-commands, with allow, deny or nothing;
+    - `disableAllHooks: false`;
+    - absolute hook commands, with the events file as an argument;
+    - Claude's auto-memory redirected to the project's agent notes, after a one-time copy;
+    - Codex's memories off in Careful and local-only projects;
+    - no GitHub token in the environment.
+  - **Other parts.**
+    - The hooks' decisions go to the session's spool, and so to the journal.
+    - The app's own git calls pass `-c core.hooksPath=/dev/null -c core.fsmonitor= -c
+      core.sshCommand=ssh` (`sys::use_safe_git`).
+    - A session the person started, which the manager then types into, keeps its person
+      profile until it starts again, so that send asks.
+    - `versions::argument_contract` runs every argument list against a candidate CLI.
+    - glasscoded launches with the same profiles.
 - **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
   data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
   hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.

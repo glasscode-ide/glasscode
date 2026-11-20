@@ -389,6 +389,11 @@ const LAYOUT: &[LayoutRow] = &[
     row(H, ".aws", Credentials),
     row(H, ".config/gh", Credentials),
     row(H, ".netrc", Credentials),
+    // Its encrypted and other forms, which the same programs read (the review of M10).
+    row(H, ".netrc.gpg", Credentials),
+    row(H, ".authinfo", Credentials),
+    row(H, ".authinfo.gpg", Credentials),
+    row(H, ".git-credentials", Credentials),
     row(H, ".gnupg", Credentials),
     // Keychain files: macOS, the Linux keyring, and Windows' credential and key folders.
     row(H, "Library/Keychains", Credentials),
@@ -1160,6 +1165,9 @@ mod tests {
             (home.join(".config").join("gh").join("hosts.yml"), class(Credentials)),
             (home.join(".config").join("other"), Classified::Outside),
             (home.join(".netrc"), class(Credentials)),
+            (home.join(".netrc.gpg"), class(Credentials)),
+            (home.join(".authinfo.gpg"), class(Credentials)),
+            (home.join(".git-credentials"), class(Credentials)),
             (home.join("Library").join("Keychains").join("login.keychain-db"), class(Credentials)),
             // A relative path is not known.
             (PathBuf::from("worktrees").join("x"), Classified::Outside),

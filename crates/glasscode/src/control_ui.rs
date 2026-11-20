@@ -270,6 +270,11 @@ pub struct ControlUi {
     pub pending_high: u64,
     /// The cards whose full payload is open.
     pub expanded: HashSet<u64>,
+    /// Session profiles (M22): the v2 engine with the "profiles" switch on.
+    pub profiles: bool,
+    /// The profile each session's agent runs under now (M22): a session the manager sends text to
+    /// gets the automation profile at its next start, not while it runs.
+    pub profile_running: HashMap<String, gate::SessionOrigin>,
 }
 
 impl ControlUi {
@@ -301,6 +306,8 @@ impl ControlUi {
             started: std::time::Instant::now(),
             pending_high: 0,
             expanded: HashSet::new(),
+            profiles: false,
+            profile_running: HashMap::new(),
         }
     }
 
@@ -461,10 +468,13 @@ impl Workspace {
         // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
         // With it, at v2, the projects' keys (the same folder).
         let engine = cx.background_spawn(async {
-            let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
+            let switch = glasscode_core::store::EngineSwitch::current();
+            let v2 = switch.engine == glasscode_core::store::Engine::V2;
+            // M22: the app's own git calls on worktrees ignore what a session can configure.
+            glasscode_core::sys::use_safe_git(v2);
             // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
             let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
+            (v2, switch.is_on("profiles"), if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -485,9 +495,10 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, keys, authority, machine) = engine.await;
+            let (v2, profiles, keys, authority, machine) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                this.control.profiles = v2 && profiles;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
                     this.brain_host = Some(std::sync::Arc::new(crate::brain_host::AppHost::new(machine, calls)));
@@ -800,7 +811,7 @@ impl Workspace {
 
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
-    fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
+    pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
         if !self.control.engine_v2 || caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
             return;
         }
@@ -1217,6 +1228,16 @@ impl Workspace {
             && self.control.short.covers(session, &op, &targets, glasscode_core::clock::now_ms(), self.control.started.elapsed().as_millis() as u64)
         {
             decision = Decision::Allow;
+        }
+        // A session that runs under the person's profile, typed into by the manager or a session
+        // it drives: it takes the automation profile only at its next start, so this asks (M22).
+        if self.control.profiles
+            && decision == Decision::Allow
+            && op.spec.group == ops::OpGroup::SessionInput
+            && !caller.channel.is_person()
+            && targets.sessions.iter().any(|id| self.control.profile_running.get(id) == Some(&gate::SessionOrigin::Person))
+        {
+            decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
         }
         let mut responder = Responder {
             sinks,

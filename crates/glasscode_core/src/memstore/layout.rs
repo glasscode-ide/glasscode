@@ -110,7 +110,7 @@ pub enum MemFile {
     /// `work/<stem>.md`: the stem is [`WorkKey::file_name`], with `-2`, `-3`… after it when another
     /// work's name collides (M20.1 step 9).
     Work(ProjectKey, String),
-    /// `archive/<yyyy-mm>/<name>.md`.
+    /// `archive/<yyyy-mm>/<name>.md`; the name may hold one folder (`work/<stem>`).
     Archive(ProjectKey, String, String),
     Proposals,
     /// Text a write could not save. Only ever in the working tree, never committed, never a
@@ -173,6 +173,8 @@ impl MemFile {
                     ["knowhow", name] => md(name).map(|topic| MemFile::Knowhow(key, topic)),
                     ["work", name] => md(name).map(|stem| MemFile::Work(key, stem)),
                     ["archive", month, name] if is_month(month) => md(name).map(|name| MemFile::Archive(key, month.to_string(), name)),
+                    // An archived work file keeps its folder: `archive/<yyyy-mm>/work/<stem>.md` (M24).
+                    ["archive", month, folder, name] if is_month(month) && name_ok(folder) => md(name).map(|name| MemFile::Archive(key, month.to_string(), format!("{folder}/{name}"))),
                     _ => None,
                 }
             }
@@ -288,6 +290,7 @@ mod tests {
             MemFile::Knowhow(key("app-3f9a1c"), "deploy".into()),
             MemFile::Work(key("app-3f9a1c"), "feat-login-3f9a1c".into()),
             MemFile::Archive(key("app-3f9a1c"), "2026-11".into(), "feat-login-3f9a1c".into()),
+            MemFile::Archive(key("app-3f9a1c"), "2026-11".into(), "work/feat-login-3f9a1c".into()),
             MemFile::Proposals,
             MemFile::Rejected,
             MemFile::Index,

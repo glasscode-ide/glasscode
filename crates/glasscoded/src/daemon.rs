@@ -412,7 +412,12 @@ impl Daemon {
         if let Some(dir) = account.as_ref().and_then(Account::config_dir) {
             std::fs::create_dir_all(&dir)?;
         }
-        let mut launch = agents::launch(&session, account.as_ref(), &self.env);
+        // The same session profiles as on the Mac (M22), with the engine at v2 and "profiles" on.
+        let profile = server_profile(&session, &self.state);
+        let mut launch = agents::launch_with(&session, account.as_ref(), &self.env, profile.as_ref());
+        if let Some(profile) = &profile {
+            agents::apply_profile_env(&mut launch, profile);
+        }
         // The `glasscode` command: which session it runs in (signed), and where to leave
         // requests when a sandbox keeps it from the socket.
         launch.env.insert("GLASSCODE_SESSION_SIG".into(), crate::today::signature(&session.id));
@@ -1853,6 +1858,45 @@ pub fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A server session's profile (M22): None with the engine at v1 or "profiles" off, and for a
+/// shell. Its origin is this machine's record (`authority/origins.json`; a session nobody marked
+/// is the person's); its policy the Mac's approved default (the server has no project keys yet).
+/// Linux runs Claude's sandbox through bubblewrap.
+fn server_profile(session: &Session, state: &State) -> Option<glasscode_core::profile::SessionProfile> {
+    use glasscode_core::profile::{self, GitFacts, HookProgram, ProfileFacts};
+    use glasscode_core::store::Store as _;
+    let switch = glasscode_core::store::EngineSwitch::current();
+    if session.agent == AgentKind::Shell || !switch.is_on("profiles") {
+        return None;
+    }
+    let origin = glasscode_core::gate::SessionOrigins::load().map(|o| o.origin(&session.id)).unwrap_or(glasscode_core::gate::SessionOrigin::Automation);
+    let policy = glasscode_core::gate::FromMac::load().map(|copy| copy.effective(glasscode_core::clock::now_ms()).0.default).unwrap_or_default();
+    let other_worktrees = state.sessions.iter().filter(|s| s.project_id == session.project_id && s.worktree != session.worktree).map(|s| s.worktree.clone()).collect();
+    let env_files = std::fs::read_dir(&session.worktree)
+        .map(|entries| entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".env") && e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let facts = ProfileFacts {
+        worktree: session.worktree.clone(),
+        other_worktrees,
+        git: GitFacts::of(&session.worktree, &session.branch),
+        notes: None,
+        env_files,
+        hook: std::env::current_exe().ok().map(|program| HookProgram { program, prefix: vec!["cli".into()] }),
+        events: agents::events_file(&session.id),
+        permission_file: paths::settings_dir().join(format!("{}.permission.json", session.id)),
+        registries: ["registry.npmjs.org", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org"].map(String::from).to_vec(),
+        forge: vec!["github.com".into(), "api.github.com".into()],
+        default_branch: None,
+        socket: glasscode_core::control::socket_path(),
+    };
+    let made = profile::session_profile(origin, session.agent, &policy, &facts);
+    if let Ok(bytes) = serde_json::to_vec(&made.permission) {
+        let _ = std::fs::create_dir_all(paths::settings_dir());
+        let _ = std::fs::write(&facts.permission_file, bytes);
+    }
+    Some(made)
+}
+
 /// Keep the Mac's approved authority that came with its sync (`authority/from-mac.json`), as
 /// one-way cache: glasscoded decides its own sessions by it ([`server_gate`]) and never sends it
 /// back to the Mac. A copy that does not match its hash is left out, and the old one stays.
@@ -2015,18 +2059,46 @@ mod tests {
         }
     }
 
+    /// The tests that set the process's folders (`HOME`, `GLASSCODE_HOME`) run one at a time, even
+    /// when the others run in parallel, and put them back when they end, so no test reads
+    /// another's folder (a session that should be refused then went on to start tmux).
+    struct Scratch {
+        before: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            for (name, value) in self.before.drain(..) {
+                // SAFETY: as in `scratch_home`.
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    fn scratch_home() -> (tempfile::TempDir, Scratch) {
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let lock = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let before = ["HOME", "GLASSCODE_HOME"].iter().map(|name| (*name, std::env::var_os(name))).collect();
+        // SAFETY: the tests that change these hold `ONE_AT_A_TIME`; the others do not read them.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+        }
+        (home, Scratch { before, _one_at_a_time: lock })
+    }
+
     /// A new agent starts only where this server may run it: never in a worktree another machine
     /// owns (and a new session there is refused with words for the person), never while held for
     /// a move, and a step of a move that is not under way is refused. (The owner records are
     /// read once per process, so this is the only test here that uses them.)
     #[test]
     fn a_session_starts_only_in_a_worktree_this_server_owns() {
-        let home = tempfile::tempdir().unwrap();
-        // SAFETY: the daemon's tests run one at a time (`--test-threads=1` in CI).
-        unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
-        }
+        let (home, _scratch) = scratch_home();
         let worktree = home.path().join(".glasscode/worktrees/app/fix");
         std::fs::create_dir_all(&worktree).unwrap();
         let key = WorktreeKey::of(&worktree, home.path(), "app", Some("fix"));
@@ -2056,12 +2128,7 @@ mod tests {
     #[test]
     fn server_never_sends_authority() {
         use glasscode_core::gate::{FromMac, Level, Policy, ProjectPolicy};
-        let home = tempfile::tempdir().unwrap();
-        // SAFETY: the daemon's tests run one at a time (`--test-threads=1` in CI).
-        unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
-        }
+        let (home, _scratch) = scratch_home();
         let mut policy = Policy::default();
         policy.projects.insert(glasscode_core::paths::ProjectKey::parse("app-3f9a1c").unwrap(), ProjectPolicy { level: Level::Standard, ..ProjectPolicy::default() });
         let copy = FromMac { from: MachineId::parse("0123456789abcdef"), hash: policy.hash(), policy: policy.clone(), ..FromMac::default() };

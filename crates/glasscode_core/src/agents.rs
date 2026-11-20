@@ -62,7 +62,7 @@ pub fn remove_session_files(session_id: &str) {
 /// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and
 /// `PostCompact` (M30). Each exists in the approved versions; an event a version does not know
 /// would stop an interactive start on a dialog, so they stay behind the switch.
-fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool) -> String {
+fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, brief: bool) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
@@ -96,6 +96,18 @@ fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool) -> String {
         // A project's own settings cannot turn the reporting hooks off (P08).
         settings["disableAllHooks"] = Value::Bool(false);
     }
+    if brief {
+        // The memory brief (M20.2, P03): on start, resume and after a compaction, the current brief
+        // is this hook's `additionalContext`, by the absolute path of the command (D11).
+        let brief_command = if cfg!(windows) {
+            "glasscode memory brief --hook".to_string()
+        } else if let Some(program) = v2 {
+            format!("{} cli memory brief --hook", crate::remote::shell_quote(&program.to_string_lossy()))
+        } else {
+            format!("{} memory brief --hook", crate::remote::shell_quote(&crate::cli::command_file().to_string_lossy()))
+        };
+        settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [hook[0]["hooks"][0].clone(), { "type": "command", "command": brief_command, "timeout": 20 }] }]);
+    }
     settings.to_string()
 }
 
@@ -111,8 +123,12 @@ fn v2_hook_program() -> Option<PathBuf> {
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
-fn claude_settings_arg(session_id: &str) -> String {
-    let settings = claude_hook_settings(v2_hook_program().as_deref(), crate::journal::feature_on("turn_hooks"));
+fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>) -> String {
+    let settings = claude_hook_settings(v2_hook_program().as_deref(), crate::journal::feature_on("turn_hooks"), brief_on());
+    let settings = match profile {
+        Some(profile) => with_profile(&settings, &profile.claude_settings),
+        None => settings,
+    };
     if !cfg!(windows) {
         return settings;
     }
@@ -212,6 +228,13 @@ pub fn claude_mode(mode: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether sessions get v2's memory brief: the engine is v2 and its "brief" switch is on (rule 2:
+/// with v1, nothing of it reaches a session). As the journal read the switch at the start: no disk
+/// read here.
+fn brief_on() -> bool {
+    crate::journal::feature_on("brief")
+}
+
 /// What tells an agent about the `glasscode` command (when the app has written it, and the
 /// person has not turned it off): Claude's skill as a plugin, allowed to run `glasscode`
 /// without asking (the app asks itself for what needs the person); Codex's instructions.
@@ -230,10 +253,15 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
             }
             // An override replaces the account's own instructions, so theirs come first.
             let own = config_dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).and_then(|t| toml_string(&t, "developer_instructions"));
-            let text = match own {
+            let mut text = match own {
                 Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::CODEX_INSTRUCTIONS),
                 _ => crate::cli::CODEX_INSTRUCTIONS.to_string(),
             };
+            // v2's memory (M20.2): fixed text only, as Codex keeps a thread's first instructions on
+            // resume (P03); the brief itself it asks for, until its SessionStart hook is trusted.
+            if brief_on() {
+                text = format!("{text}\n\n{}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK);
+            }
             vec!["-c".into(), format!("developer_instructions={}", serde_json::to_string(&text).unwrap_or_default())]
         }
         AgentKind::Shell => Vec::new(),
@@ -324,11 +352,67 @@ fn codex_projects(text: &str) -> Vec<String> {
     keys
 }
 
+/// Glasscode's own `--settings` with a session profile's over them (M22): the profile's hooks are
+/// added to the reporting hooks, every other key of the profile is set.
+pub fn with_profile(settings: &str, profile: &Value) -> String {
+    let mut out: Value = serde_json::from_str(settings).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(base), Value::Object(over)) = (out.as_object_mut(), profile) {
+        for (key, value) in over {
+            match (key.as_str(), base.get_mut(key), value) {
+                ("hooks", Some(Value::Object(hooks)), Value::Object(more)) => {
+                    for (event, entries) in more {
+                        match (hooks.get_mut(event), entries) {
+                            (Some(Value::Array(have)), Value::Array(add)) => have.extend(add.iter().cloned()),
+                            _ => {
+                                hooks.insert(event.clone(), entries.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    out.to_string()
+}
+
+/// Claude's own memory folder of a repository in an account folder (the vendor's layout, D19):
+/// `projects/<the path with every character but letters and digits as ->/memory`.
+pub fn claude_memory_dir(account_dir: &Path, repo_root: &Path) -> PathBuf {
+    let slug: String = repo_root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    account_dir.join("projects").join(slug).join("memory")
+}
+
+/// A profile's environment, after everything else the caller adds (the project's GitHub
+/// account's token included): what it sets, and what it takes out.
+pub fn apply_profile_env(launch: &mut Launch, profile: &crate::profile::SessionProfile) {
+    for key in &profile.env_remove {
+        launch.env.remove(key);
+    }
+    for (key, value) in &profile.env_set {
+        launch.env.insert(key.clone(), value.clone());
+    }
+}
+
 pub fn launch(
     session: &Session,
     account: Option<&Account>,
     base_env: &HashMap<String, String>,
 ) -> Launch {
+    launch_with(session, account, base_env, None)
+}
+
+/// [`launch`] under a session profile (M22, the v2 engine with "profiles" on): its settings, flags
+/// and environment. With none, the launch is today's, byte for byte.
+pub fn launch_with(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+) -> Launch {
+    let restricted = profile.is_some_and(|p| p.origin != crate::profile::SessionOrigin::Person);
     let mut env = base_env.clone();
     env.insert("GLASSCODE_SESSION_ID".into(), session.id.clone());
     // Note: the fork injects no vendored CLI onto PATH — sessions run with the user's own PATH only.
@@ -386,12 +470,16 @@ pub fn launch(
             }
             // The mode it was started with; later the person changes it there (Shift-Tab), so a
             // resumed conversation starts in Claude's own default again.
-            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists) {
+            // A session the manager drives never starts in bypass (its settings disable it too).
+            if let Some(mode) = session.mode.as_deref().and_then(claude_mode).filter(|_| !exists).filter(|m| !(restricted && *m == "bypassPermissions")) {
                 args.push("--permission-mode".into());
                 args.push(mode.into());
             }
+            if let Some(profile) = profile {
+                args.extend(profile.claude_args.iter().cloned());
+            }
             args.push("--settings".into());
-            args.push(claude_settings_arg(&session.id));
+            args.push(claude_settings_arg(&session.id, profile));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -414,13 +502,24 @@ pub fn launch(
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
             // prompt is easy to miss in chat view.
-            ensure_codex_trusts(&codex_home, &session.worktree);
+            // Not for automation and quarantine sessions (trust-19): what a repository carries for
+            // Codex gets its prompt there.
+            if profile.is_none_or(|p| p.pretrust) {
+                ensure_codex_trusts(&codex_home, &session.worktree);
+            }
             args.extend(cli_args(AgentKind::Codex, Some(&codex_home)));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
                 args.push("--model".into());
                 args.push(model.to_string());
             }
-            args.extend(codex_mode_args(session.mode.as_deref()));
+            // The person's mode as before; a session the manager drives runs in its profile's
+            // permission profile instead, never with danger-full-access or the bypass.
+            if !restricted {
+                args.extend(codex_mode_args(session.mode.as_deref()));
+            }
+            if let Some(profile) = profile {
+                args.extend(profile.codex_args.iter().cloned());
+            }
             match &session.agent_session_id {
                 Some(id) => {
                     args.push("resume".into());
@@ -461,6 +560,17 @@ fn codex_headless_args(prompt: &str) -> Vec<String> {
 /// read-only work: the agent may read files and run `gh`/`git`, and is given no session,
 /// hooks or browser. `config_dir` is the account's login folder, so it runs as the right
 /// account, exactly as a normal session does. The run is bounded to five minutes.
+/// The arguments of a headless run (after the program's own first words).
+pub fn headless_args(agent: AgentKind, prompt: &str) -> Vec<String> {
+    match agent {
+        // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's diff,
+        // nothing that writes. Tools not listed are denied, never prompted.
+        AgentKind::Claude => ["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"].map(String::from).to_vec(),
+        AgentKind::Codex => codex_headless_args(prompt),
+        AgentKind::Shell => Vec::new(),
+    }
+}
+
 pub fn headless(
     agent: AgentKind,
     config_dir: Option<&Path>,
@@ -478,9 +588,7 @@ pub fn headless(
             if let Some(dir) = config_dir {
                 cmd.env("CLAUDE_CONFIG_DIR", dir);
             }
-            // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's
-            // diff, nothing that writes. Tools not listed are denied, never prompted.
-            cmd.args(["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"]);
+            cmd.args(headless_args(AgentKind::Claude, prompt));
             cmd
         }
         AgentKind::Codex => {
@@ -491,7 +599,7 @@ pub fn headless(
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
             }
-            cmd.args(codex_headless_args(prompt));
+            cmd.args(headless_args(AgentKind::Codex, prompt));
             cmd
         }
         AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
@@ -1079,8 +1187,28 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_brief_is_a_second_session_start_hook_only_when_on() {
+        let off: Value = serde_json::from_str(&claude_hook_settings(None, false, false)).unwrap();
+        assert_eq!(off["hooks"]["SessionStart"][0]["hooks"].as_array().map(Vec::len), Some(1), "v1: as before");
+        let on: Value = serde_json::from_str(&claude_hook_settings(None, false, true)).unwrap();
+        let hooks = on["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0], off["hooks"]["SessionStart"][0]["hooks"][0]);
+        assert!(hooks[1]["command"].as_str().unwrap().ends_with("memory brief --hook"));
+        for event in ["UserPromptSubmit", "Stop", "Notification"] {
+            assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
+        }
+        // In a v2 home, by this program's path, as the other hooks.
+        let v2: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, true)).unwrap();
+        let brief = v2["hooks"]["SessionStart"][0]["hooks"][1]["command"].as_str().unwrap().to_string();
+        if !cfg!(windows) {
+            assert_eq!(brief, "'/opt/Glass code/glasscode' cli memory brief --hook");
+        }
+    }
+
+    #[test]
     fn in_a_v2_home_every_hook_is_one_write_of_glasscode_hook() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false)).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false)).unwrap();
         let hooks = settings["hooks"].as_object().unwrap();
         assert_eq!(hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["Notification", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].into_iter().collect());
         for (event, hook) in hooks {
@@ -1094,7 +1222,7 @@ mod tests {
         }
         assert_eq!(settings["disableAllHooks"], false);
         // With "turn_hooks", P05's hooks too; never without the v2 engine.
-        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true)).unwrap();
+        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true, false)).unwrap();
         assert_eq!(turns["hooks"].as_object().unwrap().len(), 5 + TURN_HOOKS.len());
         assert!(TURN_HOOKS.iter().all(|event| turns["hooks"][event][0]["hooks"][0]["command"] == turns["hooks"]["Stop"][0]["hooks"][0]["command"]));
         assert_eq!(hooks.len(), 5, "not without turn_hooks");
@@ -1102,7 +1230,7 @@ mod tests {
 
     #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true)).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true, false)).unwrap();
         assert!(settings.get("disableAllHooks").is_none());
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();

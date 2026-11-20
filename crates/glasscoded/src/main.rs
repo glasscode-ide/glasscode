@@ -88,7 +88,12 @@ fn main() {
         std::process::exit(glasscode_core::cli::main(args[1..].to_vec()));
     }
     let result = match args.first().map(String::as_str) {
-        Some("serve") => daemon::serve(),
+        Some("serve") => {
+            // M22: with the engine at v2, the daemon's own git calls ignore what a session can
+            // configure in its worktree (hooks, fsmonitor, ssh command).
+            glasscode_core::sys::use_safe_git(glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2);
+            daemon::serve()
+        }
         Some("rpc") => rpc(),
         Some("gate") => gate(&args[1..]),
         Some("relay") => relay_cmd(&args[1..]),

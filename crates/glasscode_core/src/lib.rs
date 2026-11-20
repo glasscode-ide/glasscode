@@ -53,6 +53,7 @@ pub mod paths;
 pub mod playbooks;
 pub mod prefs;
 pub mod project_settings;
+pub mod profile;
 pub mod prompt;
 pub mod reconcile;
 pub mod relay;

@@ -243,7 +243,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 | `bin/` (the `glasscode` command), `agent/` (Claude's plugin, `--plugin-dir`), `pasted/` (files pasted into a terminal), `control.sock` | Session tools | read, never write | read and run, never write; `control.sock`: connect only | the app |
 | `cache/`, `github-cache.json`, `usage-cache.json`, `linear.json`, `browser/`, `mirrors/`, `usage/`, `updates/` | Cache | deny | deny | the app, or glasscoded (`mirrors/`) |
 | `unsaved/` | Cache | deny | deny | the app (editor text it could not save when quitting; it has a data-map row, as it is not rebuilt) |
-| `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.gnupg`, keychain files (`~/Library/Keychains`, `~/.local/share/keyrings`, Windows' `Microsoft/Credentials` and `Microsoft/Protect` folders), a file (never a folder) whose name starts with `.env` anywhere: `.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc` | Credentials | deny read | deny read | not Glasscode |
+| `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc` (and `~/.netrc.gpg`, `~/.authinfo`, `~/.authinfo.gpg`, `~/.git-credentials`), `~/.gnupg`, keychain files (`~/Library/Keychains`, `~/.local/share/keyrings`, Windows' `Microsoft/Credentials` and `Microsoft/Protect` folders), a file (never a folder) whose name starts with `.env` anywhere: `.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc` | Credentials | deny read | deny read | not Glasscode |
 
 The table is `paths::layout()`, and `paths::class_of` reads a path by it (M10):
 - **No class means denied.** A path inside the Glasscode folder with no row (`class_of` returns `Classified::InsideUnlisted`) is denied to sessions. M22 relies on this. A path outside it with no row is `Classified::Outside`.
@@ -514,6 +514,18 @@ pub fn visible(entry: &Entry, employer: Option<&Employer>) -> bool;
 pub fn active_days(project: &ProjectKey) -> BTreeSet<u64>;   // UTC days with a journal event for it
 pub fn code_holds(repo: &Path, code: &CodeRef) -> bool;
 pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;   // only a folder that exists
+// memstore::search (M20.2)
+pub struct Scope { pub project: Option<ProjectKey>, pub employer: Option<Employer>, pub work: Option<MemFile>, pub history: bool }  // project None: the manager
+pub struct Hit { pub section: String /* <file>#<heading> */, pub file: MemFile, pub score: f32, pub entries: Vec<Entry>, pub prose: Vec<String> }
+pub fn search(snap: &Snapshot, query: &str, scope: &Scope, limit: usize) -> Result<Vec<Hit>, MemoryError>;   // the index of a commit is kept
+pub fn scope_for(snap: &Snapshot, project: Option<&ProjectKey>, work: Option<&WorkKey>) -> Result<Scope, MemoryError>;
+pub fn as_data(hits: &[Hit], commit: Option<&str>) -> String;   // <memory-results>: data, not instructions
+// memstore::brief (M20.2)
+pub struct BriefFor<'a> { pub project: Option<&'a ProjectKey>, pub work: Option<&'a WorkKey>, pub folder: Option<&'a Path>, pub policy: Option<String>, pub projects: Vec<ProjectLine>, pub today: String }
+pub const BUDGET: usize = 8_000;
+pub fn build(snap: &Snapshot, what: &BriefFor, holds: &dyn Fn(&CodeRef) -> bool) -> Result<Brief, MemoryError>;   // Brief { text, commit }
+// memstore::index (M20.2): INDEX.md, one line per file, regenerated with each commit
+pub fn lines_of(index: &str, scope: &str) -> Vec<String>;
 // memstore::scan
 pub fn scan(text: &str, env_values: &[String]) -> Vec<Finding>; pub fn env_values(folders: &[PathBuf]) -> Vec<String>;  // Finding { rule: Rule, what }
 // memstore::caps (the table in section 4)
@@ -910,6 +922,15 @@ pub trait Host: Send + Sync {
 pub enum SessionOrigin { Person, Automation, Quarantine }
 pub struct SessionProfile { pub claude_settings: serde_json::Value, pub claude_args: Vec<String>, pub codex_args: Vec<String>, pub env_set: Vec<(String, String)>, pub env_remove: Vec<String>, pub label: &'static str }
 pub fn session_profile(origin: SessionOrigin, agent: AgentKind, policy: &ProjectPolicy, worktree: &Path, account_dir: Option<&Path>, cli: &CliVersion) -> SessionProfile;
+// M22 as built: `session_profile(origin, agent, policy, facts: &ProfileFacts)`, where ProfileFacts holds what the app knows at
+// launch: the worktree, the project's other worktrees (denied one by one), its GitFacts (common dir, own git dir, branch), the
+// agent notes, the `.env` files at launch, the hook program (absolute), the events file and the permission file (arguments of
+// the hooks, crit-15), the registries and the forge's hosts, the default branch and the control socket. SessionProfile adds
+// `origin`, `permission: PermissionFile` (what `glasscode hook permission` answers from) and `pretrust` (Codex's folder trust,
+// person only). `SessionOrigin` is `gate::SessionOrigin`, re-exported here. `agents::launch_with(.., Some(&profile))` applies it;
+// `None` launches as before. `gate_tool(ctx, tool, input) -> Result<(), String>` is the PreToolUse gate; `permission_answer`
+// the PermissionRequest hook's (allow, deny or nothing; never updatedPermissions; compound commands declined).
+pub fn trusted_author(login: &str, association: Option<&str>, person: &[String], confirmed: &[String]) -> bool;  // gate, D27
 pub enum HeadlessKind { BrainChat, BrainWake, AutoReview, Study }
 pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path, cli: &CliVersion) -> SessionProfile;
 ```
