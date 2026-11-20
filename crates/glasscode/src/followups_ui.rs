@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use glasscode_core::manager::handover::Owner;
-use glasscode_core::manager::{Action, FollowKind, FollowUp, MsgState, Show, Snapshot, Tier, followups, gh};
+use glasscode_core::manager::{Action, Data, FollowKind, FollowUp, MsgState, Show, Snapshot, Tier, followups, gh};
 use gpui::{AppContext as _, Context};
 
 use crate::workspace::Workspace;
@@ -34,8 +34,20 @@ pub struct FollowUpsUi {
     prev: Option<Snapshot>,
     reviews_at: Option<Instant>,
     reviews_running: bool,
-    /// v1's follow-ups were taken in this run (or are being read).
-    taken: bool,
+    /// v1's follow-ups, taken in once a run before the first round (see [`Take`]).
+    take: Take,
+}
+
+/// v1's follow-ups in `data.json`, taken in before the first round and the first reviews read,
+/// so neither acts on a ledger that has not got them yet. Read again at each start: nothing
+/// removes a follow-up or its keys, and the newer state wins (`WorkLedger::take_follow_ups`), so a
+/// follow-up closed at v2 stays closed, and one v1 changed after a switch back comes over.
+#[derive(Default, PartialEq)]
+enum Take {
+    #[default]
+    Unread,
+    Reading,
+    Done,
 }
 
 impl Workspace {
@@ -58,25 +70,62 @@ impl Workspace {
         Some(out)
     }
 
+    /// v1's `Data` with the follow-ups where the engine keeps them, for what still reads them on
+    /// `Data` (the brief and the tour, until they read v2's stores: M56.2 t5, part 3).
+    pub(crate) fn data_with_follow_ups(&self) -> std::borrow::Cow<'_, Data> {
+        if !self.control.engine_v2 {
+            return std::borrow::Cow::Borrowed(&self.manager.harness.data);
+        }
+        let mut data = self.manager.harness.data.clone();
+        data.followups = self.follow_ups().to_vec();
+        std::borrow::Cow::Owned(data)
+    }
+
+    /// v1's chat rules ("what am I waiting on?", "done with #1111") on the follow-ups where the
+    /// engine keeps them: at v2 the ledger's are lent to the harness for the call, and what the
+    /// call changed goes back to the ledger (v1's copy is left as it was).
+    pub(crate) fn with_follow_ups_lent<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
+        if !self.control.engine_v2 {
+            return call(self);
+        }
+        let lent = self.follow_ups().to_vec();
+        let v1 = std::mem::replace(&mut self.manager.harness.data.followups, lent.clone());
+        let out = call(self);
+        let back = std::mem::replace(&mut self.manager.harness.data.followups, v1);
+        if back != lent {
+            self.follow_ups_edit(|list| *list = back);
+        }
+        out
+    }
+
     /// The round, from the workspace's tick.
     pub fn followups_tick(&mut self, cx: &mut Context<Self>) {
         if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.work_ledger().is_none() {
             return;
         }
-        if !self.followups.taken {
-            self.followups.taken = true;
-            let task = cx.background_spawn(async move { glasscode_core::manager::migrate_v2::v1_follow_ups() });
-            cx.spawn(async move |this, cx| {
-                let found = task.await;
-                let _ = this.update(cx, |ws, _| match found {
-                    Ok((list, seen)) if !list.is_empty() || !seen.is_empty() => {
-                        ws.work_ledger_edit(|ledger| ledger.take_follow_ups(list, seen));
-                    }
-                    Ok(_) => {}
-                    Err(why) => log::warn!("follow-ups: v1's could not be read: {why}"),
-                });
-            })
-            .detach();
+        match self.followups.take {
+            Take::Done => {}
+            Take::Reading => return,
+            Take::Unread => {
+                self.followups.take = Take::Reading;
+                let task = cx.background_spawn(async move { glasscode_core::manager::migrate_v2::v1_follow_ups() });
+                cx.spawn(async move |this, cx| {
+                    let found = task.await;
+                    let _ = this.update(cx, |ws, _| {
+                        ws.followups.take = Take::Done;
+                        match found {
+                            Ok((list, seen)) if !list.is_empty() || !seen.is_empty() => {
+                                ws.work_ledger_edit(|ledger| ledger.take_follow_ups(list, seen));
+                            }
+                            Ok(_) => {}
+                            // The round goes on with what the ledger has.
+                            Err(why) => log::warn!("follow-ups: v1's could not be read: {why}"),
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
         }
         if self.manager_owned_v2().follow_ups != Owner::V2 {
             return;

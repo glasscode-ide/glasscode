@@ -1155,4 +1155,48 @@ mod tests {
         snapshot_on(&mut data.book(), Some(&s1), &snap(3000, s1.sessions.clone()), 3000, true);
         assert!(open(&data.follow_ups).is_empty());
     }
+
+    /// v2's entry points on the ledger alone (M56.2), with what they say written out: a quiet
+    /// follow-up is a draft to the teammate (a notification when the teammate is not known), not
+    /// again until it is quiet again; "fixed" is told once, and not after a restart either.
+    #[test]
+    fn the_v2_round_on_the_ledger_nudges_and_tells_fixed_once() {
+        const T0: u64 = 1_800_000_000;
+        let s = settings();
+        let mut ledger = Data::default();
+        let mut stranger = review(vec![blocker("t1", false)]);
+        stranger.number = 1200;
+        stranger.author = "stranger".into();
+        let quiet = Snapshot::default();
+        assert!(given(&mut ledger.book(), &s, &[review(vec![blocker("t1", true), blocker("t2", false), blocker("t3", false)]), stranger], None, T0).is_empty());
+        assert!(round(&mut ledger.book(), &s, None, &quiet, T0).is_empty(), "a start's first round only records");
+        assert!(round(&mut ledger.book(), &s, Some(&quiet), &quiet, T0 + STALE_AFTER - 10).is_empty());
+        let nudges = vec![
+            Action::Draft { to: "Sam".into(), body: "#1111: 2 of the 3 points from my review are still open. Could you take a look?".into(), why: "Nothing happened on #1111 for 2 days.".into(), about: Some("fu-acme/app#1111".into()) },
+            Action::Notify { title: "Quiet for 2 days".into(), body: "Stranger has 1 open blocker on #1200.".into(), session: None },
+        ];
+        assert_eq!(round(&mut ledger.book(), &s, Some(&quiet), &quiet, T0 + STALE_AFTER), nudges);
+        assert!(round(&mut ledger.book(), &s, Some(&quiet), &quiet, T0 + STALE_AFTER + 60).is_empty(), "nudged once");
+        assert_eq!(round(&mut ledger.book(), &s, Some(&quiet), &quiet, T0 + 2 * STALE_AFTER), nudges, "quiet again");
+
+        let fixed = [review(vec![blocker("t1", true), blocker("t2", true), blocker("t3", true)])].map(|mut r| {
+            r.head = "bbb".into();
+            r
+        });
+        assert_eq!(
+            given(&mut ledger.book(), &s, &fixed, None, T0 + 2 * STALE_AFTER + 100),
+            vec![
+                Action::Notify { title: "#1111 is ready for you to look again".into(), body: "Sam fixed all 3 blockers on #1111: ready for you to look again.".into(), session: None },
+                Action::Say { text: "Sam fixed all 3 blockers on PR 1111: ready for you to look again.".into(), show: Some(Show { view: Some("manager".into()), section: Some("followups".into()), ..Show::default() }) },
+            ]
+        );
+        assert!(given(&mut ledger.book(), &s, &fixed, None, T0 + 2 * STALE_AFTER + 200).is_empty());
+        // The ledger as it is kept, read back: still told.
+        let mut again: Data = serde_json::from_value(serde_json::to_value(&ledger).unwrap()).unwrap();
+        assert!(given(&mut again.book(), &s, &fixed, None, T0 + 2 * STALE_AFTER + 300).is_empty());
+        assert_eq!(again, ledger);
+        // A ledger kept before the follow-ups came over reads as one without them.
+        let old: Data = serde_json::from_str(r#"{"items":[]}"#).unwrap();
+        assert!(old.follow_ups.is_empty() && old.follow_seen.is_empty());
+    }
 }
