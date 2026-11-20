@@ -149,7 +149,7 @@ They are plain commands, the same for Git Bash, which Claude Code prefers, and P
 uses when there is no Git Bash. They were tried with the real `claude.exe` (against a stand-in for
 its API) and Git Bash; the PowerShell case and a real conversation are not yet checked.
 
-In a Manager v2 home every hook is `glasscode hook --stamp` (each payload written in one go,
+Every hook is `glasscode hook --stamp` (each payload written in one go,
 stamped, with a timeout) and `SessionEnd` reports too; Claude's `StopFailure` reports as well when
 the Claude on the session's PATH is at least the manager's minimum version
 (`versions::MIN_CLAUDE`). The memory brief's hook is `glasscode memory brief --hook`, the same
@@ -173,11 +173,11 @@ on the owner's Windows machine are still to come.
 | The `glasscode` command | `.glasscode\bin\glasscode.exe` |
 | The agent browser's profile and MCP config | `.glasscode\browser` |
 | The Linear key | Windows Credential Manager, generic credential `Glasscode Linear/api-key` |
-| Manager v2 (a v2 home only): the engine switch | `.glasscode\authority\engine.json` |
-| Manager v2: the journal, a file per UTC day (30 kept) | `.glasscode\journal` |
-| Manager v2: the project memory (a git repository) | `.glasscode\memory` |
-| Manager v2: the effect ledger | `.glasscode\effects` |
-| Manager v2: the brain's folder, the only one it runs in | `.glasscode\manager\work` |
+| The manager's feature switches | `.glasscode\authority\engine.json` |
+| The journal, a file per UTC day (30 kept) | `.glasscode\journal` |
+| The project memory (a git repository) | `.glasscode\memory` |
+| The effect ledger | `.glasscode\effects` |
+| The manager's brain's folder, the only one it runs in | `.glasscode\manager\work` |
 | The installed programs | `%LOCALAPPDATA%\Programs\Glasscode` |
 
 ## Shortcuts
@@ -331,7 +331,7 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
   plan (decision P4 of the UI redesign, open). The microphone button of the Chat view stays: it is
   Claude's own `/voice`.
 - **The self-hosted relay** is not configured in this build (the same on the Mac).
-- **Manager v2** is client only on Windows: its server parts come with the server (slices S14 to
+- **The manager** is client only on Windows: its server parts come with the server (slices S14 to
   S16 above). Session profiles have no sandbox on Windows; a profile carries only file-tool
   deny rules and hooks, and Settings says so. The voice of the manager is not on Windows (no
   voice helper).

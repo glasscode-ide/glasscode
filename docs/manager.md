@@ -1,9 +1,11 @@
 # The manager
 
 The manager is one agent above all your sessions. You give it a name. It watches every
-session, tells you what needs you, keeps track of what you asked of teammates in pull-request
-reviews, tells a session when its pull request was reviewed, drafts short messages to
-teammates, keeps a memory, and answers when you type or talk to it.
+session, tells you what needs you, tells a session when its pull request was reviewed, keeps
+track of what you asked of teammates in reviews, drafts short messages to teammates, and answers
+when you type or talk to it. It keeps one memory per project that every agent shares, and it
+follows each project's level: what it may do there without asking, and what waits for you on a
+card.
 
 It is off until you switch it on.
 
@@ -14,26 +16,36 @@ Open **Settings › Manager** and switch it on. There you also choose:
 - **Its name and yours.** Its name is how you call it; yours is used in the signature of a
   message ("AI Alex, on behalf of Alex").
 - **The agent that thinks for it.** Claude Code or Codex, with one of your accounts.
-- **The projects it manages.** All of them unless you take one out. It never touches a
-  project it does not manage.
+- **The projects it manages, and each one's level.** All of them unless you take one out. Each
+  project is Careful, Standard or Autopilot (below). It never touches a project it does not
+  manage.
 - **Teammates.** A name, a GitHub login, and how your messenger knows them.
 - **Messages.** Whether every message waits for your OK, or routine pings may go by
   themselves. And the messenger program (see below).
-- **Where it runs.** On this Mac or on your server.
+- **Where it runs.** Automatic (this Mac while you use it, your server while the Mac sleeps),
+  always on the server, or always this Mac.
 - **The daily update.** The time of day it tells you what is going on.
+- **Memory, Move in and Learning.** What memory keeps and where it came from; bringing in what
+  is already on your computer; and the hourly upkeep of memory, off until you switch it on.
 
 Then open the Manager screen and ask it anything: "what needs me?", "what is blocked?",
 "walk me through today".
 
 ## What it does
 
-- **Watches sessions.** It tells you when a session needs you, finished, or has failing
-  checks.
+- **Watches sessions.** It tells you when a session needs you, finished, is stuck, or has
+  failing checks, and hands a session on when its account runs out of usage.
 - **Follows reviews.** When you ask for changes on a teammate's pull request, it keeps that
-  as a follow-up and tells you when they pushed a fix. When someone reviews a pull request of
-  one of your sessions, it tells that session to read the review.
+  as a follow-up and tells you when they pushed a fix. When someone you trust reviews a pull
+  request of one of your sessions, it tells that session to read the review.
 - **Drafts messages.** Short messages to teammates, signed with its name and yours.
-- **Remembers.** Facts you tell it, and facts it learns that still matter next week.
+- **Remembers.** One memory per project, shared by every agent. A fact about you, your people
+  or your decisions comes from your own typed words, or waits in the inbox for your tick.
+- **Gives every turn one report.** Each turn of each session ends with exactly one report: how
+  it ended (done, failed, stopped, crashed…) and the question it stopped on, if any. What a
+  session says about its own work is a hint the manager checks against what it sees.
+- **Runs your playbooks and schedules.** Small rules ("when CI fails on a draft, tell me") and
+  checks at a time, each approved by you before it runs.
 - **Shows and draws.** It takes you to the session or the part of the window it talks
   about, and draws small pictures while it explains.
 
@@ -43,87 +55,90 @@ everything, for example:
 ```
 glasscode manager status
 glasscode manager ask "what is blocked?"
-glasscode manager remember "Sam owns the billing service"
+glasscode memory search "how do we deploy"
+glasscode memory propose "Sam owns the billing service"
 glasscode manager follow-up add "the retry fix on #42" --person Sam
 glasscode manager message list
+glasscode approvals
 ```
 
-## What it will not do
+## Levels: what it may do
 
-- It never approves, merges, closes or comments on a pull request, and never posts anything
-  on GitHub. Its agent may use `gh` and `git` only to read.
+- **Careful.** It asks before anything but reading, the board and its own notes.
+- **Standard.** It starts and drives sessions, and asks before anything that leaves the Mac or
+  removes work.
+- **Autopilot.** It may also act on the forge, and only where the forge's own rules (branch
+  protection, required reviews) hold. Settings › Projects says whether they do.
+
+Anything a level does not allow waits on a card in Today and in the manager's conversation,
+with Allow and Deny. Settings › Manager shows each level's table and previews any change before
+it is made.
+
+## What it cannot do
+
+- It cannot approve, decide a pending card, or change its own level, playbooks or settings.
+  Only you can, in the app (a paired phone may confirm an approval).
 - It never sends a message you have not allowed. Every message waits for your OK. If you
   allow routine pings, a short plain fact about work ("PR #42 is ready for another look")
   goes by itself; anything with a promise, a date, an opinion or a decision still waits.
 - A message that would approve, merge, close or accept something in your name is never sent,
   whatever you allow.
 - It does not change code. Work goes to a session.
-- Everything it does to sessions goes through the `glasscode` command, so Settings ›
-  Automation applies to it as to any agent.
-- In its first round after you switch it on it says nothing about what was already there.
-
-## Manager v2
-
-The manager is Manager v2 (since M56, every home runs it). It keeps one memory per project
-that every agent shares, gives every turn of every session one report, follows each project's
-level (Careful, Standard or Autopilot), and asks you on a card before anything the level does not
-allow. [`architecture.md`](architecture.md#manager-v2) says how it is built.
-
-### What Manager v2 cannot do
-
-- It cannot act on a project beyond its level. In a Careful project it asks before anything but
-  reading, the board and its own notes. In Standard it starts and drives sessions, and asks
-  before anything that leaves the Mac or removes work. Only in Autopilot does it act on the
-  forge, and only where the forge's own rules (branch protection, required reviews) hold.
-- It cannot approve, decide a pending card, or change its own level, playbooks or settings.
-  Only you can, in the app (a paired phone may confirm an approval).
 - Its brain has no shell and no file tools beyond its own folder. It runs in
   `~/.glasscode/manager/work`, never in a repository, so a cloned repository's hooks and MCP
   servers never run as you. It reads code through Glasscode's tools only.
-- It cannot remember what nobody said. A fact about you, your people or your decisions comes from
-  your own typed words, or waits in the inbox for your tick. Text from a pull request, a tool's
-  output or a pasted block is never a fact by itself, and what a session learns about code holds
-  only while the lines it cites stay the same.
+- It cannot remember what nobody said. Text from a pull request, a tool's output or a pasted
+  block is never a fact by itself, and what a session learns about code holds only while the
+  lines it cites stay the same.
 - It cannot send anything of a project marked "stays on this Mac" to the server: not its memory,
   sessions, words, journal or cards.
 - It cannot run past its budget: at most six routine wakes an hour, a daily token cap, and
   nothing on paid overage unless you allow it. With no budget left, or signed out, it answers
-  from what it knows and says why.
+  from what it knows and says why. When its plan's limit is used up, it holds your question and
+  answers when the limit resets, or you ask the other agent (Claude or Codex) instead.
 - It cannot start on a Claude Code older than 2.1.322 or a Codex older than 0.167.0. It says
   which version it needs.
 - It cannot do the same thing twice. Each effect (a message, a report, a push) is done once,
   under its key, also after a crash or a restart.
+- In its first round after you switch it on it says nothing about what was already there.
 
 ## Where its data lives
 
 | What | Where |
 | --- | --- |
-| Follow-ups, messages, memory, the conversation | `~/.glasscode/manager/data.json` |
-| In a Manager v2 home: the conversation, by topic | `~/.glasscode/manager/conversation/` |
+| The conversation, by topic | `~/.glasscode/manager/conversation/` |
+| Memory (a git repository of Markdown files) | `~/.glasscode/memory/` |
+| The journal: what happened, a file per UTC day (30 kept) | `~/.glasscode/journal/` |
+| Effects, each done once | `~/.glasscode/effects/` |
+| Work items and follow-ups | `~/.glasscode/manager/work.json` |
+| Messages to teammates, and the ones that came in | `~/.glasscode/manager/outbox.json`, `inbox.json` |
+| The daily brief; questions held until a limit resets | `~/.glasscode/manager/brief.json`, `held.json` |
+| Levels, playbooks, schedules and the cards that wait | `~/.glasscode/authority/` |
 | The folder its agent runs in | `~/.glasscode/manager/work/` |
-| On the server: what waits for the Mac | `~/.glasscode/manager/server.json` |
 | Its settings | `~/.glasscode/state.json`, with your other settings |
 | The voice keys | the macOS Keychain |
+| The first manager's data, already moved into the files above | `~/.glasscode/manager/data.json` and its copy `data.v1.json` |
 
 The files in `~/.glasscode/manager` are readable by you only. Nothing is sent to anyone but the agent you chose (Claude
-Code or Codex, as in any session), GitHub through your own `gh`, and your messenger program.
+Code or Codex, as in any session), GitHub through your own `gh`, your messenger program, and your
+own server when you pair one.
 
 ## Running it on your server
 
 On the Mac the manager stops when the Mac sleeps. If you have a server with `glasscoded`
-(see the README), choose **Server** as its home in Settings › Manager. Then its rounds run
-there; the Mac shows, speaks and types into its own sessions. The two copies of its data are kept in step; only
-the copy at its home sends messages. When the server cannot be reached, the Mac takes over.
+(see the README), choose where it runs in Settings › Manager. Automatic hands it to the server
+while the Mac sleeps or you switch to Server mode, and back when you use the Mac again; only one
+of them is its home at a time. On the server it watches and drives the sessions there, follows
+up on reviews, and makes cards the Mac shows. What only the Mac can do (moving the window,
+sending a message through your messenger) waits for the Mac.
 
 **Test** in Settings › Manager checks what the server needs: a folder it can write, `gh`
-signed in, Claude Code or Codex signed in, your messenger program (when you set one), and
-that the Mac and the server are in step.
+signed in, Claude Code or Codex signed in, and what decides whether the manager runs there.
 
 On the server itself:
 
 ```
 glasscoded manager status
-glasscoded manager ask "what needs me?"
 ```
 
 ## Voice
@@ -240,5 +255,5 @@ you again; it is not retried by itself, because it may have gone out after all.
 
 ### On your server
 
-When the manager's home is the server, the messenger program runs there. Install it on the
-server too (same name, on the PATH of your login shell) and sign it in there.
+The messenger program runs on the Mac. While the server is the manager's home, a message to a
+teammate waits in the outbox until the Mac is home again.

@@ -137,7 +137,7 @@ click outside or Esc closes one, and the click does not reach what is below.
 | Syntax colours | `file_view.rs`, `editor.rs`, `theme.rs` (code colours) | U21 |
 | Project settings, the setup question | `project_setup.rs`, `settings_ui.rs` | U22 |
 | Programs outside Glasscode (folders, files, editors), started from a task | `center.rs` (`start_outside`, `open_url`) | U17, U23 |
-| The manager: page, sidebar row, bubble, Settings › Manager, its round, its view (says, points, walks) | `manager_ui.rs`, `manager_settings.rs`, `manager_round.rs`, `manager_view.rs`, `manager_tick.rs` (v1's round, until M56's final removal), `manager_voice.rs`, `scenes_ui.rs` | from `main` |
+| The manager: page, sidebar row, bubble, Settings › Manager, its round, its view (says, points, walks) | `manager_ui.rs`, `manager_settings.rs`, `manager_round.rs`, `manager_view.rs`, `manager_voice.rs`, `scenes_ui.rs` | from `main` |
 
 ### Core modules of the redesign
 
@@ -165,10 +165,10 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 **`store::Store`** is the base of every new store. Each store's file is an envelope, `{"store", "version", "data"}`, with these rules:
 - **Saving** holds `<file>.lock` and goes into a temporary file, which is synced and then renamed over the file (`MoveFileExW` on Windows). The file before it is kept as `<file>.prev` when it loads, and as `<file>.broken` when it does not. A failed write, sync or rename is an error.
 - **A damaged file** is copied to `<file>.broken` and left in place. Glasscode then reads `.prev`. Only when `.prev` cannot be read does the store's rule apply: `Refuse` stops the feature that needs it (it never starts empty), and `Empty` starts fresh. A refusing store whose file is gone beside its `.prev` refuses too.
-- **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
+- **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The feature switches are one: damaged, every feature is off, never an older generation.
 - **A newer schema** is never read and never written over. The version is read before anything else in the file.
 - **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
-- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the engine switch (v1 until a home switches, M56; each v2 feature off until it is switched on), and `authority/projects.json`, the project keys (M11, below).
+- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the feature switches (each off until it is switched on; a new home starts with `brief` and `turn_hooks` on, M56), and `authority/projects.json`, the project keys (M11, below).
 - **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
 
 **`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
@@ -211,8 +211,6 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 
 ### Effects and delivery to sessions (M31)
 
-These run in a Manager v2 home only. With the engine at v1 every send is typed as before.
-
 - **The effect ledger** (`glasscode_core::effects`, `effects/<yyyy-mm>.jsonl`) is how an effect happens once. An agent, a rule or the manager claims the effect's key before it acts; the claim is synced to disk. The result is written after. The same key again gives the stored record. Claims of an earlier run with no result are settled at the first tick by the op's probe, with no model. An at-most-once effect with no probe is left uncertain for the person. `ops_run::claimed` wraps every effect op of a non-person caller. Each request has a subject of its own, so the ledger records it and repeats nothing.
 - **Delivery to a session** (`glasscode_core::delivery_session`, run from `ci_fix.rs`) gives each session one queue that is the only writer of its terminal. It is used by `session send` from any caller, the CI fix and the manager's messages. A message waits until:
   - the session is idle;
@@ -253,9 +251,9 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - a global breaker.
 
   The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
-- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there.
-- **The manager's own built-ins** (`native`) are needs-you, review-tell (only `trusted_author` reviews reach a session), stuck-session and usage-handoff, as state machines over journal events. `parity_with_harness_step` holds them to v1's harness. They run with the v2 manager (M51); until then v1's harness does it.
-- **The runner.** In a v2 home, `ci_fix.rs` reads the journal's new events every 2 s off the main thread and runs the person's live playbooks through the engine.
+- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. `ci_fix.rs` takes its subject, group and key from there.
+- **The manager's own built-ins** (`native`) are needs-you, review-tell (only `trusted_author` reviews reach a session), stuck-session and usage-handoff, as state machines over journal events. They replaced the first manager's rules in M56; `parity_with_v1s_harness_frozen` holds them to what v1's harness said on four recorded scenarios, frozen as JSON. They run with the manager (M51).
+- **The runner.** `ci_fix.rs` reads the journal's new events every 2 s off the main thread and runs the person's live playbooks through the engine.
   - **watch** records, and **tell** shows a toast.
   - **ask** and **act** claim the effect and run the op through the gate as the manager's wake.
   - The playbooks that gave way are recorded for their limits.
@@ -279,7 +277,7 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
 
 ### Telling the person (M42)
 
-In a v2 home every notification goes through `glasscode_core::delivery` first. The rules:
+Every notification goes through `glasscode_core::delivery` first. The rules:
 
 - Each notification belongs to a **matter**: its session, approval, PR or ticket.
 - **The same words** are never said twice, answered or not. Only new evidence is news.
@@ -290,21 +288,22 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **The brief** (`manager brief`) ends with what was told and still waits, with its age.
 - **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
 
-### v1's data, moved (M44)
+### The first manager's data, moved (M44)
 
-`manager::migrate_v2::run` moves the rest of v1's `manager/data.json` into the v2 stores, on the home, in a v2 home. It copies the file to `data.v1.json` once and leaves `data.json` in place. v1's manager still writes that file in a v2 home, so the app runs the migration at each start, off the main thread. A run of an unchanged file does nothing; a run after v1 changed it takes the changes by v1's own merge rule. A file that does not parse stops it.
+`manager::migrate_v2::run` moves what the first manager kept in `manager/data.json` into the v2 stores, on the home. It copies the file to `data.v1.json` once and leaves `data.json` in place, so an older build loses nothing. Since M56 it holds the only reader of `data.json`. The app runs it at each start, off the main thread (`lifetime::Migration`, #248). A run of an unchanged file does nothing. A file that does not parse stops it; a run that fails is tried again every minute, the person is told after the third, and the manager takes over on what did move.
 
-- **Follow-ups** become work items (`WorkItem::from_follow_up`; a repository with no checkout gets the key its checkout would, `identity::key_for_remote`). The manager's built-ins get their entries, switched as v1's manager was.
+- **Follow-ups** become the work ledger's follow-ups (`WorkLedger::follow_ups`, taken in by the app at each start: `migrate_v2::v1_follow_ups`, M56.2) and work items (`WorkItem::from_follow_up`; a repository with no checkout gets the key its checkout would, `identity::key_for_remote`). The manager's built-ins get their entries, switched as the first manager was.
 - **The outbox** moves to `manager/outbox.json` with the same ids and states. A sent message's send is a settled effect, so it is never sent again.
-- **Checks** become schedules `v1-check-<id>`, proposed by the v1 manager: off until the person approves them.
+- **Checks** become schedules `v1-check-<id>`, proposed by "the v1 manager": off until the person approves them.
+- **The last daily brief** goes to `manager/brief.json`, so the day the first manager briefed is not briefed again (M56.2).
 - **The conversation** goes to M43's store, as "v1, origin unknown" lines.
-- **`seen` keys** become settled effects (`seen_key`) and the built-ins' state (`manager/builtins.json`). A session v1 told about is not told again in that stop, and a review v1 had not told yet is still told.
+- **`seen` keys** become settled effects (`seen_key`) and the built-ins' state (`manager/builtins.json`). A session the first manager told about is not told again in that stop, and a review it had not told yet is still told.
 
-`manager/migrated.json` marks the version and the hash of the file it read. Every step is idempotent besides. Records of v1's `seen` keys stay out of Activity.
+`manager/migrated.json` marks the version and the hash of the file it read. Every step is idempotent besides. Records of its `seen` keys stay out of Activity.
 
 ### Memory (M20.1)
 
-`glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
+`glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). The memory ops and the brief came in M20.2.
 
 - **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief. A Codex session gets its brief from a `SessionStart` hook too, once Codex trusts it (M22, P06; `codex_hooks`). At the start, in the background, the app does three things for each Codex account:
 - adds memory's brief hook to the account's `hooks.json`, keeping the person's own hooks;
@@ -361,9 +360,9 @@ A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no 
 - **`INDEX.md`** is regenerated with every commit, from the files that changed.
 - **Ops** (`ops/table_memory.rs`, `v2_only`): `memory.search`, `show`, `brief`, `note`, `propose`, `accept`, `reject`, `merge`, `let_go`, `rewrite`, `forget` and `pending`.
   - `accept`, `reject`, `forget` and `pending` are the person's only.
-  - With v2, the v1 words `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search).
+  - The first manager's words `manager remember`, `forget` and `memory` reach memory (a proposal, a forget, a search).
   - Only the app's window is the person to memory; a session reaches only its own session and project; a change by anyone else to what the person confirmed is a proposal.
-- **Delivery** happens with v2 and the engine switch `brief` on (rule 2: with v1 nothing changes).
+- **Delivery** happens with the feature switch `brief` on.
   - A Claude session gets a second `SessionStart` hook, `"<glasscode>" memory brief --hook`. It prints the fixed memory instructions and the current brief as `additionalContext` at start, on resume and after a compaction (P03).
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
   - An auto-review run gets its project's brief, read-only, ahead of its task.
@@ -388,11 +387,10 @@ A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no 
   - glasscoded's own `worktrees.remove` archives in the server's memory before `git worktree remove` (`Ended::RemovedOnServer`). Memory is v2 there too, and M57's sync brings the archive to the Mac.
   - A session moved to the server is not archived. Since M57 its work file goes on there through the sync, and its archive comes when that worktree is removed on the server.
 - **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
-- **v2 only:** with the engine at v1, removals are as before.
 
 ### Moving in (M35)
 
-`glasscode_core::movein` turns what is already on the computer into memory proposals, with no model and only after the person ticks it. `movein_ui.rs` is its dialog: Settings › Manager › Move in, and an offer at the end of the first run. Both exist only with the v2 engine.
+`glasscode_core::movein` turns what is already on the computer into memory proposals, with no model and only after the person ticks it. `movein_ui.rs` is its dialog: Settings › Manager › Move in, and an offer at the end of the first run.
 
 - **Look** (names and paths only; nothing is opened). It finds:
   - Claude's memory folders, matched by the exact folder name Claude makes of each project folder and worktree;
@@ -451,16 +449,16 @@ A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no 
 
 ### Memory in the app
 
-With the v2 engine, the Manager page's Memory is memory's own page (`memstore::overview`, `memory_ui.rs`). It opens from Settings › Manager › Memory, from the Manager page's Memory tile, and with the manager off from the "manager is off" card too: memory is v2's, not the manager's.
+The Manager page's Memory is memory's own page (`memstore::overview`, `memory_ui.rs`). It opens from Settings › Manager › Memory, from the Manager page's Memory tile, and with the manager off from the "manager is off" card too: memory is every agent's, not the manager's.
 
 - **Waiting for you:** the inbox's proposals, from moving in, sessions, the manager and learning. Each shows where it goes, where it came from and why it waits, with Accept and Reject, plus Accept all. Edits made by hand in the memory folder are held back and shown with Keep and Discard. They are read under memory's write lock (`Memory::pending_settled`), so a write under way never shows as an edit by hand.
 - **What memory keeps,** file by file: the person first, then each project's PROJECT.md, POLICY.md, decisions and know-how. Each entry shows its standing ("Confirmed", "Learned", "Learned (v1)" for a migrated v1 note, "Mentioned once") and where it came from, with Forget. Entries let go are counted, not shown.
 - **Freshness:** the page reads memory again every 10 s while it is shown. Every change runs in the background as the person's click.
-- **v1's notes** come into memory at each start on the home, beside M44's migration (`memstore::migrate::run`, #196). Each becomes a "learned (v1)" entry of the profile.
+- **The first manager's notes** come into memory at each start on the home, beside M44's migration (`memstore::migrate::run`, #196). Each becomes a "learned (v1)" entry of the profile.
 
 ### Memory's learning (M62)
 
-`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home, so a Mac and a server that share memory never both learn. On the Mac, `learning_host.rs` runs it once an hour in the background, starting five minutes after launch, while the Mac is home (`home_here`). On the server, glasscoded's `learning.rs` runs it while the server is home: at most every five minutes it checks, and each part keeps its own hour or week. It reads every machine's words kept there, since the Mac's come with the sync (`words::since`). It uses the server's checkouts and the brain's account signed in there (the name the Mac chose), on Claude's cheapest model. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
+`glasscode_core::learning` keeps memory in shape and learns. It runs only when the feature switch `learning` is on: Settings › Manager › Learning, off at first. It runs only on the manager's home, so a Mac and a server that share memory never both learn. On the Mac, `learning_host.rs` runs it once an hour in the background, starting five minutes after launch, while the Mac is home (`home_here`). On the server, glasscoded's `learning.rs` runs it while the server is home: at most every five minutes it checks, and each part keeps its own hour or week. It reads every machine's words kept there, since the Mac's come with the sync (`words::since`). It uses the server's checkouts and the brain's account signed in there (the name the Mac chose), on Claude's cheapest model. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
 
 - **Repair, hourly, no model.** It applies memory's ages (`Memory::tidy_skipping`):
   - a mentioned or learned entry never confirmed is let go after its active days, and what was let go is archived;
@@ -628,12 +626,12 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   `--no-wait`, `--timeout`) and the help text, which the registry makes (`ops::help`). A failure's `data` says
   which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
   its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
-  (with the v2 engine an object also gets `op`).
+  (an object also gets `op`).
 - **The registry** (`glasscode_core::ops`, Manager v2's M12) is the one list of what the command
   can do: an `OpSpec` for each of the 78 commands, with its words and their other words, its
   arguments and where each is on the line, its effect class, retry class, undo, host and the v1
   kind of Settings › Permissions. `ops::parse` reads the words with no IO, against a `ParseCtx`
-  (the day, who calls, the sessions a word may name, the engine); `ops::json_schema` gives an
+  (the day, who calls, and the sessions a word may name); `ops::json_schema` gives an
   op's arguments to typed callers (M34). In the app, `ops_run.rs` keys a handler by op name: it
   builds the plan (its kind, a sentence for the approval and the log, and what it does, the same
   functions the buttons call) from the `Op`. Projects, worktrees and tasks are found in an
@@ -665,7 +663,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
   rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
-- **Dry runs, undo and long ops** (M33.2, v2 engine). An op that changes something takes
+- **Dry runs, undo and long ops** (M33.2). An op that changes something takes
   `--dry-run` (`dry_run` for a typed caller): its plan is made and checked, and the answer says
   what it would do, what it touches, whether it would ask the person, and what takes it back; it
   runs nothing, leaves no card or claim, and is no record of an effect (a gate "never" still
@@ -720,8 +718,8 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   act (`under_playbook`). While the person's chat turn runs, the wake lane takes no wake and the
   gate refuses its actions; one lane at a time works on a session or a repository (claims per
   work key, "busy: who, what"). What the manager asks is a card in its conversation too. The
-  app's worker is `manager_lanes.rs`, with the engine at v2 and the manager on.
-- **The manager's chat** (`manager_chat.rs`, M52.1) with the engine at v2: every way to ask
+  app's worker is `manager_lanes.rs`, with the manager on.
+- **The manager's chat** (`manager_chat.rs`, M52.1): every way to ask
   comes through `mtick_ask`; answers from code come at once; anything else goes to the chat lane
   on a thread of its own, which resumes the brain conversation of the newest rollover link. One
   writer thread posts to the conversation store and loads it again when another writer changed
@@ -750,7 +748,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   refuses that brain's calls until it has checked the tools of its first turn
   (`mcp::init_tools_ok`, `control_brain_checked`). `claude_config` and `codex_flags` are what the
   brain's launch (M50) passes each CLI.
-- **The v2 engine's ops** (M33.2; handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
+- **The ops of M33.2** ( handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
   what the window shows by ids and counts (never screen text: a prompt is its `prompt_id`, a
   draft its length); `ui.open <place>` shows a place without taking the keyboard, clearing a
   "needs you" mark or dismissing a notice, and while the person is busy in the window it tells
@@ -763,11 +761,10 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   credential or Glasscode's own files, at most 200 KB. `settings.get` and `settings.set` go through
   one table (`glasscode_core::settings`) with a tier for each key: the gate, outward automation
   and programs to run are the person's alone, and secrets are never shown. Who is the person is
-  read from the channel a request came in on, never from v1's trust. Only the person names a session, a project or a task by the
-  start of its name or words from its title; with the v1 engine every caller still may, as
-  before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
-  handler yet.
-- **Op ids, progress and cancel** (M33.2, ops-10, v2 engine). The wire keeps its shape: `Request` gains an optional `op_id`, and `Reply` gains no kind.
+  read from the channel a request came in on. Only the person names a session, a project or a task by the
+  start of its name or words from its title. The server-sync plan's switch ops are in the table,
+  with no handler yet.
+- **Op ids, progress and cancel** (M33.2, ops-10). The wire keeps its shape: `Request` gains an optional `op_id`, and `Reply` gains no kind.
   - **The op id is the caller's own id for a call** of an op that changes something. It is the idempotency key, so a call made again with the same id gets the first call's answer and never runs twice.
     - The command takes it as `--op-id <id>`. A typed tool takes it as `op_id`, which the MCP server moves out of the arguments into the request (`mcp::take_op_id`).
     - The app keeps each call by whose it is (`Caller::origin`) and the id, with a hash of the op and its arguments (`ops::job::Calls`, the newest 1,000).
@@ -780,7 +777,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
   - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
 - **`journal query --actions [--pr 42]`** (land-21) answers from the effect ledger, kept a year, not from the journal's 30 days. It lists what Glasscode did for a caller other than the person (who, why, what came of it), within the caller's scope (`core_reads::actions_query`). glasscoded answers it from its own copy.
-- **Taking an op back** (M33.2, ops-18, v2 engine).
+- **Taking an op back** (M33.2, ops-18).
   - **The record.** An op whose answer carries `data.undo` (the inverse call, `ops::undo_of`) is kept with a number (`data.undo_id`), whose it was (`Caller::origin`), and a version of what it touched as it left it (`ops_v2::undo_version`). The app keeps the last 200 until it quits.
   - **`undo [<id>]`** (`ops.undo`; none means the caller's last) runs that inverse as the caller's own call, through the gate under the caller's own rule and never as the person's. The card, the claim and the journal therefore name the real op.
   - **When it is refused.** It refuses another caller's op (the person may take back any). It refuses an op taken back already, and one whose target changed since. The version is compared when `undo` is asked, and again when its card is approved.
@@ -809,7 +806,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   request says: a valid signature is its session; a command from a Glasscode shell tab is the
   person's when that tab's terminal view saw them press Enter on a `glasscode` line in the last
   15 s (only the time is kept, never the line); the manager's brain is the manager by the token
-  its MCP server carries (M34; v1's rule, a process under v1's brain, went with it in M56);
+  its MCP server carries (M34);
   anything else is a `Terminal`, which may read and asks for the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
   stays on the wire and only names a terminal ("A terminal outside Glasscode"); v1's rule that
   took such a terminal for the person went with M56 row 7, as did v1's `Trust`: the app's
@@ -821,12 +818,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   keys (a shell's keys are never kept), and everything Glasscode types into a session, recorded
   before it is typed (`session send`, CI fix, review comments, first prompts at launch,
   handoffs); glasscoded's gate records what a phone types. A hook's prompt only counts when one
-  record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
-  `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
+  record is the whole prompt (`match_prompt`). `GLASSCODE_WORDS_MEASURE=1` counts origins and keeps
+  no text. `glasscode words recent` shows it, to
   the person only.
 - **The gate** (`glasscode_core::gate`, Manager v2's M21.1) decides every op, the command's and
-  the app's own (`run_op`); v1's runner, which decided by Settings › Permissions' kind alone
-  (`control_run`, `control_rule`), went with M56 row 7. `gate::decide(caller, op, targets, policy, grant)` is
+  the app's own (`run_op`); Settings › Permissions is its rules for the sessions the person
+  started. v1's runner, which decided by Settings › Permissions' kind alone (`control_run`,
+  `control_rule`), went with M56 row 7. `gate::decide(caller, op, targets, policy, grant)` is
   pure: a hard limit (a project that stays on this Mac never goes to the server, for the person
   too), then `never` (the project's list, its one model account (D17), a path it keeps out of
   reach, a pause), then the level's ceiling, then an explicit ask (the list, the branch, hours and
@@ -847,8 +845,8 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
-- **Session profiles** (`glasscode_core::profile`, M22) apply with the v2 engine and the
-  "profiles" switch on; otherwise a session launches as before. A session the person started
+- **Session profiles** (`glasscode_core::profile`, M22) apply with the feature switch
+  `profiles` on; otherwise a session launches as before. A session the person started
   runs under the person profile. Claude runs in its sandbox with the credentials and Glasscode's
   own files denied (sandbox `denyRead` and `permissions.deny` with `//` paths), and `gh` runs
   outside the sandbox. Codex runs as today.
@@ -884,7 +882,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - glasscoded launches with the same profiles.
 - **Headless runs, the browser and the forge wall** (M23).
   - **Every non-interactive run** that reads outside text uses `profile::headless_profile`: Claude `-p --restricted --tools "" --strict-mcp-config --permission-mode dontAsk --disable-slash-commands --no-session-persistence --output-format json --json-schema <schema>`, Codex `exec --sandbox read-only` (no network) with `--output-schema`. No GitHub token reaches it, and its input comes on stdin as labelled data.
-  - **Auto-review**, in both engines (an owner-approved security fix):
+  - **Auto-review** (an owner-approved security fix):
     - Glasscode reads the pull request's title, description, author and diff itself (`review::PullRequest`), and the run answers with JSON.
     - The comment is Glasscode's fixed template with the model's text clipped and tamed (no mentions, no slash commands).
     - It is posted at once only when the author passes `gate::trusted_author` and the repository opted in. Otherwise it is `pr.comment` from auto-review, which waits on a card.
@@ -898,9 +896,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 
     Careful takes the list away, with the other permissions.
   - **The DevTools port** is a random one per launch, read from the profile's `DevToolsActivePort` with its secret path.
-  - **The forge wall (D29).** With the v2 engine, the default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
+  - **The forge wall (D29).** The default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
   - **`pr open-draft`** asked by anyone but the person pushes only commits the session's own turn reports list (the journal's `turn.ended`). Brokered push (D13) is not built, because P14 did not pass (O7).
-- **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
+- **Pending actions** (`gate::Pending`, M21.2) are what waits for the person. Each one is
   data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
   hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.
   An expiry is a UTC instant that a clock set back never extends. Approving runs exactly the
@@ -916,9 +914,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     A pasted or spoken yes never binds.
   - Chat grants (`gate::ChatGrants`) take a quote only from the person's typed words and targets
     only from those Rust resolved from that message. They are used once and end with their turn.
-  - With v1, approvals stay in memory, as below.
-- **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
-  runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
+- **Approvals** (`control_ui.rs`): every one is a pending action (above); v1's approvals kept only
+  in memory went with M56 row 7. While the request's connection stays open, a decision runs the op
+  and answers it there; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.
 - **Agents learn it**: Claude gets `--plugin-dir ~/.glasscode/agent/claude-plugin` (a plugin with
   the `glasscode` skill) and `--allowedTools Bash(glasscode:*)`; Codex
@@ -1057,7 +1055,7 @@ kept until the new agent has started its conversation, so a quit in between does
 
 ## Updating the CLIs (compatibility checklist)
 
-With the v2 engine, each built-in CLI's installed version gets the argument contract (alt-m4, M22: `versions::argument_contract`) in the background, once per version. Every argument list Glasscode can start it with, ending in `--version` (Claude) or `--help` (Codex), must be taken. A version that refuses one is said once, and its row in Settings › Updates names the first refusal. Approving happens before the install, so the contract runs on the version installed, not on a candidate.
+Each built-in CLI's installed version gets the argument contract (alt-m4, M22: `versions::argument_contract`) in the background, once per version. Every argument list Glasscode can start it with, ending in `--version` (Claude) or `--help` (Codex), must be taken. A version that refuses one is said once, and its row in Settings › Updates names the first refusal. Approving happens before the install, so the contract runs on the version installed, not on a candidate.
 
 Before adding a new version to `cli-versions.json`:
 
@@ -1115,17 +1113,24 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
     10 to 15 were checked). Instead it says which version it needs. Raise them only after items 10
     to 15 pass on the newer version, and raise `cli-versions.example.json` with them.
 
-## Manager v2
+## The manager
 
-Every home runs Manager v2 (M56). The engine switch (`store::EngineSwitch`,
-`~/.glasscode/authority/engine.json`) holds its features, each off until switched on: `brief`,
-`profiles`, `turn_hooks`, `learning`.
+The manager is Manager v2: every home runs it since M56, and the table of what existed and
+where it went is M56's Result in [`manager-v2-slices.md`](manager-v2-slices.md).
+`authority/engine.json` (`store::EngineSwitch`) holds its feature switches, each off until
+switched on: `brief`, `turn_hooks`, `profiles` and `learning`. Its `engine` field stays only so
+older files read; nothing decides by it.
 
-**The switch from the first manager (M56, `manager::migrate_v2`).**
-- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): a switch still written by a build before M56 gets the features `brief` and `turn_hooks`. A feature switched off before stays off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
-- **The first ticks** then move v1's data into the v2 stores, off the main thread and on the home only: the notes into memory (M20.3), and the rest of `data.json` (M44, with `data.v1.json` kept). A move that fails runs again every minute; after three it is told, and v2 takes over on what moved (`lifetime::Migration`).
+**Coming from the first manager (M56, `manager::migrate_v2`).**
+- **At the start, before the window** (`switch_at_start`), a switch file written by a build
+  before M56 gets the features `brief` and `turn_hooks`. A feature switched off before stays off.
+  `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
+- **The first ticks** then move the first manager's data into the stores, off the main thread
+  and on the home only: the notes into memory (M20.3), and the rest of `data.json`
+  ([above](#the-first-managers-data-moved-m44)). A move that fails runs again every minute;
+  after three it is told, and the manager takes over on what moved (`lifetime::Migration`).
 - **A switch file that does not read** has every feature off: it fails closed.
-- **The server** takes the Mac's switch with the next sync (`Sync.engine`, `keep_engine`, #149).
+- **The server** takes the Mac's switches with the next sync (`Sync.engine`, `keep_engine`, #149).
 
 The plan is
 [`manager-v2-design.md`](manager-v2-design.md) and [`manager-v2-slices.md`](manager-v2-slices.md).
@@ -1179,8 +1184,8 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
 - **Accounts** sign in on the server through the CLI's own login in a server terminal. Nothing
   copies credentials; the dialog shows only whether a credential file exists.
 - **The setup of a project** (U22) runs only locally, not on the server.
-- **The manager on the server (M57)**, with the engine at v2 (the Mac's engine switch is kept
-  here, one way, like its approved authority). While the server is the manager's home (the Mac
+- **The manager on the server (M57)** (the Mac's feature switches are kept here, one way, like
+  its approved authority). While the server is the manager's home (the Mac
   asleep, Server mode, or "Always on the server"), `glasscoded` runs the same wake worker as the
   app (`runtime::worker`) and a chat lane beside it, against `DaemonHost` (`brain_host.rs`,
   `brain.rs`). Its brains run as the server's own account the Mac named, and reach Glasscode
@@ -1191,11 +1196,10 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   (`manager/window-queue.json`). What the Mac says of the manager (on, brain, model, account,
   the projects as a wake sees them) is in `manager/from-mac.json`. A second Mac is an observer:
   it reads and answers approvals, never becomes home, and takes back only its own worktrees.
-  Settings › Manager › Test says what decides whether it runs here. v1's copy of the manager
-  (its rounds, its brain, `manager.sync` of `data.json`) no longer runs on the server (M56 row 6).
-  `glasscoded`'s `manager.rs` keeps the server test (`manager.test`, also `glasscoded manager
-  status`) and the brain's account. The Mac stopped calling `manager.sync` with M56 row 4; an older
-  Mac that still does is answered with no heartbeat, so its manager stays at home.
+  Settings › Manager › Test says what decides whether it runs here. The first manager's copy on
+  the server went in M56 (#227, #257). `glasscoded`'s `manager.rs` keeps the server test
+  (`manager.test`, also `glasscoded manager status`) and the brain's account; an older Mac that
+  still calls `manager.sync` is answered with no heartbeat, so its manager stays at home.
 - **The follow-ups on the server (M56.2)**: while the server is home, `glasscoded`'s
   `followups.rs` follows them, with the `follow-ups` built-in on (the Mac sends the person's
   GitHub login and the teammates' names and logins, `ManagerFromMac::follow_ups`). They live in
