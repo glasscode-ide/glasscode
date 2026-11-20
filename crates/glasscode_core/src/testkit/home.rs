@@ -12,7 +12,8 @@
 //! - `user/`: a home folder for the programs a test starts (`HOME`), with planted credentials that
 //!   are not credentials;
 //! - `scenarios/`: the stand-ins' default scenarios; `gitconfig`: the only git configuration the
-//!   kit's git calls read; `gh-calls.jsonl`: what the `gh` stand-in was asked.
+//!   kit's git calls read; `gh-calls.jsonl`: what the `gh` stand-in was asked; `hook-runs.jsonl`:
+//!   what the agents' hooks printed to them (the Claude stand-in's, a SessionStart brief say).
 //!
 //! [`Home::new`] makes the folder this process's Glasscode folder (`paths::root`) until it is
 //! dropped. A test of the core gets it through `GLASSCODE_HOME`; a test of the `testkit` feature
@@ -609,6 +610,7 @@ pub fn agent_env(built: &Built) -> HashMap<String, String> {
         ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
         (agents::SCENARIOS_VARIABLE.to_string(), text(&built.scenarios)),
         ("GLASSCODE_TEST_GH_LOG".to_string(), text(&built.gh_log)),
+        ("GLASSCODE_TEST_HOOK_LOG".to_string(), text(&built.top.join("hook-runs.jsonl"))),
         // The person's own home, which the stand-ins refuse as well as the one they find themselves.
         ("GLASSCODE_TEST_PERSON_HOME".to_string(), text(&paths::home())),
     ]);
