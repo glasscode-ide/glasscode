@@ -124,7 +124,16 @@ impl Workspace {
         tx
     }
 
+    /// The manager, as the brain runtime names it (its lane and wake): never the person, whatever
+    /// channel it is handed (with v1's `Trust` gone, the channel says who it is, M56 row 7).
     pub(crate) fn brain_caller(&self, channel: caller::Caller) -> Caller {
+        let channel = match channel {
+            channel @ caller::Caller::Manager { .. } => channel,
+            other => {
+                log::warn!("manager: the brain's runtime named {other:?} as its caller; it is the manager's chat");
+                caller::Caller::Manager { lane: caller::Lane::Chat, wake: None, project: None }
+            }
+        };
         Caller { who: self.state.manager.name.clone(), channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None, drive: None }
     }
 

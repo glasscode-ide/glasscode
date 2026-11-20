@@ -258,6 +258,22 @@ fn a_child_session_is_decided_by_the_start_rule() {
     assert_eq!(rule(&session("s-work"), &child, &Targets::default(), &set), Rule::Ask);
     set.person_rules.set(Kind::Start, Rule::Never);
     assert_eq!(rule(&session("s-work"), &child, &Targets::default(), &set), Rule::Never);
+    // For every caller and every Start rule it decides as `session.new` would: the
+    // person, a person's session, a session the manager drives, the manager, a terminal, in a
+    // Careful and in an Autopilot project.
+    let new = op(&SESSION_NEW, json!({}));
+    let callers = [Caller::Ui, session("s-work"), session("s-side"), session("s-auto"), session("s-work-auto"), manager(Lane::Wake), manager(Lane::Chat), Caller::Terminal { pid: None }];
+    for start in [Rule::Allow, Rule::Ask, Rule::Never] {
+        set.person_rules.set(Kind::Start, start);
+        for caller in &callers {
+            for targets in [Targets::default(), on(&[careful()]), on(&[autopilot()])] {
+                // (The same rule; an ask's words name the op.)
+                assert_eq!(rule(caller, &child, &targets, &set), rule(caller, &new, &targets, &set), "{caller:?} at Start {start:?} on {targets:?}");
+            }
+        }
+    }
+    // The person's own ops in the app, before the approved authority is read: allowed.
+    assert_eq!(rule(&Caller::Ui, &op(&BOARD_ADD, json!({})), &Targets::default(), &PolicySet::default()), Rule::Allow);
 }
 
 #[test]
