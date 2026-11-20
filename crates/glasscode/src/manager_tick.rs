@@ -11,14 +11,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use gpui::{AnyElement, AppContext as _, Context, Div, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{AppContext as _, Context};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Rule, code};
-use glasscode_core::github::{self, CheckState, CiStatus, PrDetails, PrSummary, PreviewConfig, PullRequest};
+use glasscode_core::github::{CheckState, CiStatus, PrDetails, PrSummary, PullRequest};
 use glasscode_core::manager::messenger::{self, MessengerError};
-use glasscode_core::manager::{
-    Action, ChatLine, FollowKind, MsgState, OutMessage, PanelTab, PrInfo, ReviewAsk, ReviewerInfo, Scene, SessionInfo, SessionState, Show, Snapshot, Tier, TourStop, Who, gh, memory, messages, scene,
-};
+use glasscode_core::manager::{Action, FollowKind, MsgState, OutMessage, PrInfo, ReviewAsk, ReviewerInfo, SessionInfo, SessionState, Show, Snapshot, Tier, Who, gh, memory, messages};
 use glasscode_core::model::{AgentKind, Session, now};
 use glasscode_core::prompt::{self, PendingPrompt};
 use glasscode_core::transcript::{self, ItemKind};
@@ -26,10 +24,9 @@ use glasscode_core::transcript::{self, ItemKind};
 use crate::center::Center;
 use crate::commands::NewSpec;
 use crate::control_ui::Responder;
-use crate::manager_state::{Done, Highlight, ScenePlay, Stage, Tour};
-use crate::scenes_ui::{gold, gold_bg};
+use crate::manager_view::Done;
 use crate::shell::View;
-use crate::workspace::{RightTab, Workspace};
+use crate::workspace::Workspace;
 
 /// How often the rules look at everything.
 const ROUND: Duration = Duration::from_secs(3);
@@ -37,27 +34,13 @@ const ROUND: Duration = Duration::from_secs(3);
 const REVIEWS_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the messenger is asked for new messages.
 const INBOX_EVERY: Duration = Duration::from_secs(2 * 60);
-/// How often the pull requests of managed sessions are read in full (reviewers, threads).
-const PRS_EVERY: Duration = Duration::from_secs(3 * 60);
-/// At most this many pull requests are read in one go.
-const PRS_AT_ONCE: usize = 12;
-/// The conversation keeps this many lines.
-const CHAT_MAX: usize = 400;
-/// How long it points at something when no walk says otherwise.
-const POINT_FOR: Duration = Duration::from_secs(8);
-/// The caption stays this long after it stopped speaking.
-const CAPTION_STAYS: Duration = Duration::from_secs(6);
 /// A message for a session that could not be typed for this long is dropped.
 const TELL_KEEP: Duration = Duration::from_secs(24 * 3600);
 /// At least this long between two messages typed into the same session.
 const TELL_GAP: Duration = Duration::from_secs(20);
-/// A walk waits this long at most for the voice to finish a sentence.
-const VOICE_WAIT: Duration = Duration::from_secs(20);
 /// How much of a session's last reply the manager is shown.
 const REPLY_CHARS: usize = 400;
 
-/// Called with the manager's answer to a question, or why there is none.
-pub type OnAnswer = Box<dyn FnOnce(&mut Workspace, Result<String, String>, &mut Context<Workspace>)>;
 
 /// A message for a session that waits until it can be typed.
 pub struct Tell {
@@ -96,16 +79,7 @@ pub struct TickUi {
     /// The end of each session's last reply, by session id.
     pub replies: HashMap<String, ReplyEnd>,
     pub replies_running: bool,
-    /// When the pull requests of managed sessions are read in full next.
-    pub next_prs: Option<Instant>,
-    pub prs_running: bool,
-    /// Where the next read of pull requests starts (they take turns, a few at a time).
-    pub prs_from: usize,
     pub later: Vec<Later>,
-    /// Whether it was speaking and had a caption at the last tick (to redraw when that ends).
-    pub shown: (bool, bool),
-    /// A walk was started while it was still speaking: its first stop comes when that is over.
-    pub tour_waits: bool,
 }
 
 // ----- the rounds -------------------------------------------------------------------------------
@@ -176,51 +150,7 @@ impl Workspace {
         if !v2_reads_inbox && !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
             self.mtick_fetch_inbox(cx);
         }
-        if !self.manager.tick.prs_running && self.manager.tick.next_prs.is_none_or(|t| at >= t) {
-            self.mtick_fetch_prs(cx);
-        }
 
-        // A walk moves on when its sentence is over (and the voice has finished saying it).
-        let voice_busy = self.manager.live && self.manager.voice.state == "speaking";
-        let held = |next_at: Instant| at < next_at || (voice_busy && at < next_at + VOICE_WAIT);
-        let waits = self.manager.tick.tour_waits;
-        if let Some((next_at, next, stops)) = self.manager.tour.as_ref().map(|t| (t.next_at, if waits { t.index } else { t.index + 1 }, t.stops.len())) {
-            if !held(next_at) {
-                if next < stops {
-                    self.manager_tour_go(next, cx);
-                } else {
-                    self.manager.tour = None;
-                    changed = true;
-                }
-            }
-        }
-        if self.manager.highlight.as_ref().is_some_and(|h| at >= h.until) {
-            self.manager.highlight = None;
-            changed = true;
-        }
-        // A picture moves to its next step the same way.
-        let step = self.manager.scene.as_mut().and_then(|play| {
-            let next_at = play.next_at?;
-            if held(next_at) || play.step + 1 >= play.scene.steps.len() {
-                return None;
-            }
-            play.step += 1;
-            Some((play.scene.steps[play.step].say.clone(), play.step + 1 < play.scene.steps.len()))
-        });
-        if let Some((say, more)) = step {
-            let spoken = self.mtick_say(&say, None, cx);
-            if let Some(play) = self.manager.scene.as_mut() {
-                play.next_at = more.then(|| Instant::now() + stop_time(&say, spoken));
-            }
-            changed = true;
-        }
-
-        // It stopped speaking, or its caption has been up long enough: draw that.
-        let shown = (self.manager.speaking_until.is_some_and(|t| at < t), self.manager.caption_until.is_some_and(|t| at < t));
-        if shown != self.manager.tick.shown {
-            self.manager.tick.shown = shown;
-            changed = true;
-        }
         if changed {
             cx.notify();
         }
@@ -336,56 +266,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Who reviewed the pull requests of managed sessions, and what is unresolved: the app
-    /// only reads that for the pull request on screen, so the manager keeps the rest fresh
-    /// (read-only, into the same cache the Pull request tab uses).
-    fn mtick_fetch_prs(&mut self, cx: &mut Context<Self>) {
-        let mut open: Vec<(String, u64, PathBuf)> = Vec::new();
-        for s in &self.state.sessions {
-            if s.agent == AgentKind::Shell || s.review.is_some() || !self.mtick_manages(&s.project_id) {
-                continue;
-            }
-            // Only what GitHub confirmed in this run and still says (see `PrStatus::acts`).
-            let Some(status) = self.prs.map.get(&s.id).filter(|s| s.acts()) else { continue };
-            let (Some(repo), Some(pr)) = (&status.repo, &status.pr) else { continue };
-            let over = |state: &str| matches!(state.to_uppercase().as_str(), "MERGED" | "CLOSED");
-            if over(&pr.state) || status.ci.as_ref().is_some_and(|c| over(&c.state)) || open.iter().any(|(r, n, _)| r == repo && *n == pr.number) {
-                continue;
-            }
-            open.push((repo.clone(), pr.number, s.worktree.clone()));
-        }
-        // A few at a time, taking turns: the next read goes on where this one stops.
-        let (from, count) = turn(open.len(), self.manager.tick.prs_from, PRS_AT_ONCE);
-        self.manager.tick.prs_from = from + count;
-        let jobs: Vec<(String, u64, PathBuf)> = open.iter().cycle().skip(from).take(count).cloned().collect();
-        // Nothing yet (the app is still finding the pull requests): look again soon.
-        // More than one turn's worth: the rest follows a minute later, not three.
-        let wait = if jobs.is_empty() { Duration::from_secs(20) } else if open.len() > PRS_AT_ONCE { Duration::from_secs(60) } else { PRS_EVERY };
-        self.manager.tick.next_prs = Some(Instant::now() + wait);
-        if jobs.is_empty() {
-            return;
-        }
-        self.manager.tick.prs_running = true;
-        let env = (*self.env).clone();
-        let task = cx.background_spawn(async move {
-            jobs.into_iter()
-                .filter_map(|(repo, number, worktree)| {
-                    let preview = PreviewConfig::load(&worktree);
-                    github::pr_details(&repo, number, &preview, &env).ok().map(|details| ((repo, number), details))
-                })
-                .collect::<Vec<_>>()
-        });
-        cx.spawn(async move |this, cx| {
-            let found = task.await;
-            let _ = this.update(cx, |ws, _| {
-                ws.manager.tick.prs_running = false;
-                if ws.state.manager.enabled {
-                    ws.gh.details.extend(found);
-                }
-            });
-        })
-        .detach();
-    }
 
     /// Keep the end of each managed session's last reply at hand: the question on its screen
     /// while it needs the person, and its transcript's end, read in the background whenever
@@ -394,7 +274,7 @@ impl Workspace {
         let mut questions: Vec<(String, Option<String>)> = Vec::new();
         let mut jobs: Vec<(String, AgentKind, PathBuf, (u64, Option<SystemTime>))> = Vec::new();
         for s in &self.state.sessions {
-            if s.agent == AgentKind::Shell || !self.mtick_manages(&s.project_id) {
+            if s.agent == AgentKind::Shell || !self.manager_manages(&s.project_id) {
                 continue;
             }
             let state = self.session_state(s);
@@ -434,10 +314,6 @@ impl Workspace {
         .detach();
     }
 
-    /// A project the manager looks at: managed, and not switched off in Settings › Projects.
-    fn mtick_manages(&self, project_id: &str) -> bool {
-        self.state.manager.manages(project_id) && !self.state.is_hidden(project_id)
-    }
 }
 
 // ----- what it sees -----------------------------------------------------------------------------
@@ -451,7 +327,7 @@ impl Workspace {
         let (mut ours, mut others): (HashSet<&str>, HashSet<&str>) = Default::default();
         for s in &self.state.sessions {
             let repo = self.prs.map.get(&s.id).and_then(|p| p.repo.as_deref());
-            if !self.mtick_manages(&s.project_id) {
+            if !self.manager_manages(&s.project_id) {
                 others.extend(repo);
                 continue;
             }
@@ -483,7 +359,7 @@ impl Workspace {
                 // The Mac has its own copy of the project under the same name: its switch counts.
                 let name = server.projects.iter().find(|p| p.id == s.project_id).map(|p| p.name.clone()).unwrap_or_default();
                 let mac = self.state.projects.iter().find(|p| p.id == s.project_id || (!name.is_empty() && p.name == name));
-                if !self.mtick_manages(mac.map(|p| p.id.as_str()).unwrap_or(&s.project_id)) {
+                if !self.manager_manages(mac.map(|p| p.id.as_str()).unwrap_or(&s.project_id)) {
                     continue;
                 }
                 let state = match r.activity {
@@ -539,91 +415,12 @@ impl Workspace {
 // ----- talking to it ----------------------------------------------------------------------------
 
 impl Workspace {
-    /// The person said or typed something to it: the chat lane answers (M52.1).
-    pub fn manager_ask(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
-        self.mtick_ask(text, voice, None, cx);
-    }
 
-    /// A question with whose words it is (M52.1, the v2 chat): `words`, the person's record from
-    /// the box they typed in; `asker`, who asked when it was not the person (a command), and
-    /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
-    /// waits for it.
-    pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
-        if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
-            return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
-        }
-        self.mtick_ask(text, voice, on_answer, cx);
-    }
 
-    /// A question to the chat. Said, or put in the box by the app (a Try phrase): its words are
-    /// recorded as such (D1). One that cannot be asked is answered with why.
-    fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
-        let text = text.trim().to_string();
-        if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
-            let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
-            let words = glasscode_core::words::record(origin, &text, None, None);
-            return self.chat_ask(text, Some(words), None, voice, on_answer, cx);
-        }
-        let why = if !self.state.manager.enabled {
-            "The manager is switched off. Settings › Manager switches it on."
-        } else if text.is_empty() {
-            "There was nothing to answer."
-        } else {
-            // Only a home whose engine switch could not be written is still at v1 (M56).
-            "The manager runs with Manager v2 only. Settings › Manager switches to it."
-        };
-        if let Some(on_answer) = on_answer {
-            on_answer(self, Err(why.to_string()), cx);
-        }
-    }
 
-    /// It says something: the conversation, the caption, and its voice when that is on.
-    pub fn manager_say(&mut self, text: &str, show: Option<Show>, cx: &mut Context<Self>) {
-        self.mtick_say(text, show, cx);
-    }
 
-    /// The same; tells whether its voice speaks it.
-    fn mtick_say(&mut self, text: &str, show: Option<Show>, cx: &mut Context<Self>) -> bool {
-        let text = text.trim();
-        if text.is_empty() {
-            return false;
-        }
-        self.mtick_line(Who::Manager, text, show);
-        self.manager_caption(text, true, cx)
-    }
 
-    /// What it says, in the bubble's caption and in its voice (when `voice` and the voice is on);
-    /// tells whether it was spoken. The v2 chat keeps its lines in the conversation store.
-    pub(crate) fn manager_caption(&mut self, text: &str, voice: bool, cx: &mut Context<Self>) -> bool {
-        let text = text.trim();
-        if text.is_empty() {
-            return false;
-        }
-        let spoken = voice && self.manager_voice_speak(text, cx);
-        let until = Instant::now() + say_time(text, spoken);
-        self.manager.caption = text.to_string();
-        self.manager.speaking_until = Some(until);
-        self.manager.caption_until = Some(until + CAPTION_STAYS);
-        cx.notify();
-        spoken
-    }
 
-    /// Add a line to the conversation (the last `CHAT_MAX` are kept).
-    pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
-        let text = text.into();
-        // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
-        // still say goes there too (the person's own lines are posted by the chat, M52.1).
-        if self.control.engine_v2 && who != Who::You {
-            self.chat_post_line(who == Who::System, text.clone());
-        }
-        let chat = &mut self.manager.harness.data.chat;
-        chat.push(ChatLine { who, text, at: now(), show });
-        if chat.len() > CHAT_MAX {
-            let extra = chat.len() - CHAT_MAX;
-            chat.drain(..extra);
-        }
-        self.manager.harness.dirty = true;
-    }
 
     /// A line in what agents did (Today lists it), for what the manager did to a session.
     fn mtick_log(&mut self, what: String) {
@@ -863,26 +660,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Show a picture on its page and say its first step.
-    pub(crate) fn manager_play(&mut self, scene: Scene, cx: &mut Context<Self>) {
-        // A picture that cannot be drawn (a step names something that is not there) is not shown.
-        if let Err(why) = scene::check(&scene) {
-            let line = format!("{} could not draw that. {}", self.state.manager.name, sentence(&format!("{why:#}")));
-            self.mtick_line(Who::System, line, None);
-            cx.notify();
-            return;
-        }
-        let Some(first) = scene.steps.first().map(|s| s.say.clone()) else { return };
-        let more = scene.steps.len() > 1;
-        self.manager.scene = Some(ScenePlay { scene, step: 0, next_at: None });
-        self.manager.stage = Stage::Scene;
-        self.show_view(View::Manager, cx);
-        let spoken = self.mtick_say(&first, None, cx);
-        if let Some(play) = self.manager.scene.as_mut() {
-            play.next_at = more.then(|| Instant::now() + stop_time(&first, spoken));
-        }
-        cx.notify();
-    }
 
     /// Start a session the way `glasscode session new` does: in the background, without
     /// taking the keyboard. Settings › Automation's "never" for starting sessions holds.
@@ -896,7 +673,7 @@ impl Workspace {
             Err("A shell has no agent to give the work to.".to_string())
         } else {
             self.find_project(project).and_then(|project_id| Ok((self.find_account(agent, None)?, project_id))).map_err(|reply| reply_text(&reply)).and_then(|(account_id, project_id)| {
-                if !self.mtick_manages(&project_id) {
+                if !self.manager_manages(&project_id) {
                     return Err(format!("{name} does not manage {project}."));
                 }
                 Ok(NewSpec {
@@ -956,229 +733,27 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Switch the manager on or off, or change its settings: save, and start or stop its parts.
-    pub fn manager_settings_changed(&mut self, cx: &mut Context<Self>) {
-        self.save();
-        if self.state.manager.enabled {
-            // Its first round comes with the next tick.
-            self.manager.last_round = None;
-        } else {
-            if self.manager.live {
-                self.manager_voice_toggle(cx);
-            }
-            let manager = &mut self.manager;
-            manager.tour = None;
-            manager.tick.tour_waits = false;
-            manager.highlight = None;
-            manager.scene = None;
-            if manager.stage == Stage::Scene {
-                manager.stage = Stage::Overview;
-            }
-            manager.thinking = false;
-            manager.caption.clear();
-            manager.speaking_until = None;
-            manager.caption_until = None;
-            manager.tick.tells.clear();
-            manager.tick.later.clear();
-            manager.harness.save();
-        }
-        cx.notify();
-    }
 }
 
 // ----- taking the person through the app --------------------------------------------------------
 
 impl Workspace {
-    /// Go where `show` says and point at what it names.
-    pub fn manager_show(&mut self, show: &Show, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.manager.enabled {
-            return;
-        }
-        match show.view.as_deref().map(|v| v.trim().to_lowercase()).as_deref() {
-            Some("manager") => self.show_manager(window, cx),
-            Some("sessions" | "session") => self.show_view(View::Sessions, cx),
-            Some("today" | "board") => self.show_today(cx),
-            Some("tickets") => self.show_tickets(cx),
-            Some("usage") => self.show_view(View::Usage, cx),
-            Some("themes") => self.open_appearance(cx),
-            Some("settings") => self.open_settings(self.settings.section, window, cx),
-            _ => {}
-        }
-        // On its own page a section is one of the things it holds, not a part of a panel.
-        if show.session.is_none() && show.view.as_deref().is_some_and(|v| v.trim().eq_ignore_ascii_case("manager")) {
-            if let Some(stage) = show.section.as_deref().and_then(stage_of) {
-                self.manager.stage = stage;
-            }
-            self.manager.highlight = None;
-            cx.notify();
-            return;
-        }
-        if let Some(id) = show.session.as_deref() {
-            if self.state.session(id).is_some_and(|s| !self.state.session_hidden(s)) {
-                self.menu_open = false;
-                // Taken there at the person's asking: `open_session` shows Sessions and puts the
-                // place left on the back list once.
-                if self.view != View::Sessions || self.state.active_session.as_deref() != Some(id) || self.center != Center::Session {
-                    self.open_session(id, window, cx);
-                }
-            } else if self.server.session(id).is_some() {
-                self.enter(View::Sessions);
-                self.menu_open = false;
-                self.open_server_session(id, window, cx);
-            } else {
-                // The session is gone: there is nothing to show.
-                self.manager.highlight = None;
-                cx.notify();
-                return;
-            }
-        }
-        let section = show.section.as_deref().map(section_key).filter(|s| !s.is_empty());
-        if let Some(tab) = show.tab.or_else(|| section.as_deref().and_then(tab_of_section)) {
-            // The panel belongs to a session: make sure one is on screen.
-            if show.view.is_none() && show.session.is_none() {
-                self.enter(View::Sessions);
-            }
-            self.right_tab = match tab {
-                // The checks have a tab of their own since the redesign.
-                PanelTab::PullRequest if section.as_deref() == Some("checks") => RightTab::Checks,
-                PanelTab::PullRequest => RightTab::PullRequest,
-                PanelTab::Changes => RightTab::Changes,
-                PanelTab::Files => RightTab::Files,
-            };
-            self.show_right = true;
-            if tab == PanelTab::Files {
-                self.files_tick(cx);
-            }
-        }
-        self.manager.highlight = section.map(|section| {
-            // At a stop of a walk it points for as long as the stop lasts.
-            let until = (Instant::now() + POINT_FOR).max(self.manager.tour.as_ref().map(|t| t.next_at).unwrap_or_else(Instant::now));
-            Highlight { session: show.session.clone().or_else(|| self.state.active_session.clone()), section, until }
-        });
-        cx.notify();
-    }
 
-    /// Start a walk through the app: go to its first stop.
-    pub fn manager_start_tour(&mut self, stops: Vec<TourStop>, cx: &mut Context<Self>) {
-        if stops.is_empty() || !self.state.manager.enabled {
-            return;
-        }
-        // It finishes the sentence it is saying (the answer that announced the walk) first.
-        let now = Instant::now();
-        match self.manager.speaking_until.filter(|until| *until > now) {
-            Some(until) => {
-                self.manager.tour = Some(Tour { stops, index: 0, next_at: until });
-                self.manager.tick.tour_waits = true;
-                cx.notify();
-            }
-            None => {
-                self.manager.tour = Some(Tour { stops, index: 0, next_at: now });
-                self.manager_tour_go(0, cx);
-            }
-        }
-    }
 
-    /// Go to a stop of the walk: show it and say its sentence. The walk moves on by itself
-    /// when the sentence is over, and ends after the last stop.
-    pub fn manager_tour_go(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(stop) = self.manager.tour.as_ref().map(|t| t.stops.get(index).cloned()) else { return };
-        let Some(stop) = stop else {
-            self.manager_stop_tour(cx);
-            return;
-        };
-        self.manager.tick.tour_waits = false;
-        let spoken = self.mtick_say(&stop.say, Some(stop.show.clone()), cx);
-        if let Some(tour) = self.manager.tour.as_mut() {
-            tour.index = index;
-            tour.next_at = Instant::now() + stop_time(&stop.say, spoken);
-        }
-        let show = stop.show;
-        self.with_main_window(cx, move |ws, window, cx| ws.manager_show(&show, window, cx));
-        cx.notify();
-    }
 
-    /// End the walk (the person asked something, clicked, or it is over).
-    pub fn manager_stop_tour(&mut self, cx: &mut Context<Self>) {
-        self.manager.tick.tour_waits = false;
-        if self.manager.tour.take().is_some() {
-            self.manager.highlight = None;
-            if self.manager.live {
-                self.manager_voice_stop(cx);
-            }
-        }
-        cx.notify();
-    }
 
-    /// Whether it is pointing at this part of the active session's right panel now
-    /// ("checks", "preview", "reviews", "comments", "changes", "files", "reply").
-    pub fn manager_points_at(&self, section: &str) -> bool {
-        let Some(highlight) = self.manager.highlight.as_ref() else { return false };
-        self.state.manager.enabled
-            && highlight.section == section
-            && highlight.until > Instant::now()
-            && self.view == View::Sessions
-            && self.center == Center::Session
-            && highlight.session.as_deref().is_none_or(|id| self.state.active_session.as_deref() == Some(id))
-    }
 
-    /// Mark a row (a section's heading) while the manager points at `section`: a warm outline,
-    /// a tint, and "<name> is pointing here" at its end. Otherwise `el` comes back as it is.
-    pub fn manager_mark<E: Styled + ParentElement>(&self, section: &str, el: E) -> E {
-        if !self.manager_points_at(section) {
-            return el;
-        }
-        el.mt_2().px_2().pt_1p5().pb_1p5().rounded(px(8.)).border(px(1.5)).border_color(gold()).bg(gold_bg()).child(pointing_tag(&self.state.manager.name))
-    }
 
-    /// The same for a whole tab of the panel: the mark goes around it, the caption on top.
-    pub fn manager_mark_any(&self, section: &str, el: AnyElement) -> AnyElement {
-        if !self.manager_points_at(section) {
-            return el;
-        }
-        pointed(&self.state.manager.name, el, true)
-    }
 }
 
 // ----- pointing ---------------------------------------------------------------------------------
 
-/// "<name> is pointing here", in the manager's own colour.
-fn pointing_tag(name: &str) -> Div {
-    div().flex_none().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(gold()).child(format!("{name} is pointing here"))
-}
 
-/// `el` with the mark around it and "<name> is pointing here" above. `fill`: it takes the
-/// room its place in a column gives it (a tab of the panel); else it is as tall as `el`.
-pub(crate) fn pointed(name: &str, el: AnyElement, fill: bool) -> AnyElement {
-    let frame = div().flex().flex_col().rounded(px(8.)).border(px(1.5)).border_color(gold()).bg(gold_bg());
-    let frame = if fill { frame.flex_1().min_h_0() } else { frame.p_2() };
-    frame.child(pointing_tag(name).px_2().py_1()).child(el).into_any_element()
-}
 
 // ----- small things -----------------------------------------------------------------------------
 
-/// How long it takes to say a sentence: about a second and 22 ms a character on screen (at
-/// most six seconds), and the pace of speech when its voice says it.
-fn say_time(text: &str, spoken: bool) -> Duration {
-    let chars = text.chars().count() as u64;
-    if spoken { Duration::from_millis((1000 + 65 * chars).min(90_000)) } else { Duration::from_millis((1000 + 22 * chars).min(6000)) }
-}
 
-/// How long a stop of a walk (or a step of a picture) lasts: its sentence, said or read at
-/// an easy pace, and two seconds to look.
-fn stop_time(text: &str, spoken: bool) -> Duration {
-    let chars = text.chars().count() as u64;
-    let sentence = if spoken { say_time(text, true) } else { Duration::from_millis((1000 + 45 * chars).clamp(3000, 20_000)) };
-    sentence + Duration::from_secs(2)
-}
 
-/// Whose turn it is: where to start among `len` things when the last turn stopped at `from`,
-/// and how many to take (at most `at_once`, never one twice).
-fn turn(len: usize, from: usize, at_once: usize) -> (usize, usize) {
-    if len == 0 {
-        return (0, 0);
-    }
-    (from % len, len.min(at_once))
-}
 
 /// The app's word for a session's state, as the manager's.
 fn state_of(word: &str) -> SessionState {
@@ -1288,40 +863,8 @@ fn pr_state(state: &str, draft: bool) -> &'static str {
     }
 }
 
-/// A section of the right panel as the app names it, whatever the manager called it.
-fn section_key(word: &str) -> String {
-    let word = word.trim().to_lowercase();
-    match word.as_str() {
-        "check" | "ci" => "checks",
-        "review" => "reviews",
-        "comment" | "threads" => "comments",
-        "change" | "diff" => "changes",
-        "file" | "worktree" => "files",
-        _ => return word,
-    }
-    .to_string()
-}
 
-/// What the right side of its own page shows for a section named in a `Show`.
-fn stage_of(section: &str) -> Option<Stage> {
-    match section.trim().to_lowercase().as_str() {
-        "overview" | "home" => Some(Stage::Overview),
-        "followups" | "follow-ups" | "follow_ups" | "followup" | "follow-up" => Some(Stage::FollowUps),
-        "messages" | "message" | "outbox" => Some(Stage::Messages),
-        "memory" | "notes" => Some(Stage::Memory),
-        _ => None,
-    }
-}
 
-/// The tab of the right panel a section is on (the last reply is on none).
-fn tab_of_section(section: &str) -> Option<PanelTab> {
-    match section {
-        "checks" | "preview" | "reviews" | "comments" => Some(PanelTab::PullRequest),
-        "changes" => Some(PanelTab::Changes),
-        "files" => Some(PanelTab::Files),
-        _ => None,
-    }
-}
 
 /// What is typed into a session: one line that says who speaks, and ends the way
 /// Glasscode's own messages do (the Chat view shows those as sent by Glasscode).
@@ -1334,7 +877,7 @@ fn tell_line(name: &str, text: &str) -> String {
 }
 
 /// The first line of a reason, ending like a sentence.
-fn sentence(why: &str) -> String {
+pub(crate) fn sentence(why: &str) -> String {
     let line = why.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Something went wrong");
     if line.ends_with(['.', '!', '?']) { line.to_string() } else { format!("{line}.") }
 }
@@ -1374,16 +917,6 @@ mod tests {
         PullRequest { number: 41, title: "Add the export".into(), url: "https://example.test/pr/41".into(), base_ref_name: "main".into(), head_ref_name: "feat/export".into(), is_draft: false, state: "OPEN".into(), ..Default::default() }
     }
 
-    #[test]
-    fn a_caption_is_short_and_speech_takes_its_time() {
-        assert_eq!(say_time("Hi", false), Duration::from_millis(1044));
-        assert_eq!(say_time(&"a".repeat(1000), false), Duration::from_secs(6));
-        assert!(say_time(&"a".repeat(200), true) > Duration::from_secs(12));
-        // A stop lasts as long as its sentence and two seconds more, never a blink.
-        assert_eq!(stop_time("Hi", false), Duration::from_secs(5));
-        assert_eq!(stop_time(&"a".repeat(200), true), say_time(&"a".repeat(200), true) + Duration::from_secs(2));
-        assert_eq!(stop_time(&"a".repeat(5000), false), Duration::from_secs(22));
-    }
 
     #[test]
     fn keeps_the_end_of_a_reply() {
@@ -1398,23 +931,6 @@ mod tests {
         assert_eq!(tail_of(&"ä".repeat(50), 10).chars().count(), 11);
     }
 
-    #[test]
-    fn states_and_sections_get_the_manager_s_words() {
-        assert_eq!(state_of("needs you"), SessionState::NeedsYou);
-        assert_eq!(state_of("working"), SessionState::Working);
-        assert_eq!(state_of("idle"), SessionState::Idle);
-        assert_eq!(state_of("not running"), SessionState::NotRunning);
-        assert_eq!(section_key(" Checks "), "checks");
-        assert_eq!(section_key("diff"), "changes");
-        assert_eq!(tab_of_section("reviews"), Some(PanelTab::PullRequest));
-        assert_eq!(tab_of_section("changes"), Some(PanelTab::Changes));
-        assert_eq!(tab_of_section("files"), Some(PanelTab::Files));
-        assert_eq!(tab_of_section("reply"), None);
-        assert_eq!(stage_of("followups"), Some(Stage::FollowUps));
-        assert_eq!(stage_of("Messages"), Some(Stage::Messages));
-        assert_eq!(stage_of("memory"), Some(Stage::Memory));
-        assert_eq!(stage_of("checks"), None);
-    }
 
     #[test]
     fn a_pull_request_as_the_manager_sees_it() {
@@ -1456,21 +972,6 @@ mod tests {
         assert_eq!(tell_line("AI Alex", "  \n "), "");
     }
 
-    #[test]
-    fn pull_requests_take_turns() {
-        // 30 open ones, 12 at a time: every one is read within three turns.
-        let mut seen = std::collections::HashSet::new();
-        let mut from = 0;
-        for _ in 0..3 {
-            let (start, count) = turn(30, from, 12);
-            seen.extend((0..count).map(|k| (start + k) % 30));
-            from = start + count;
-        }
-        assert_eq!(seen.len(), 30);
-        // Fewer than a turn takes: each once, not twice.
-        assert_eq!(turn(5, 7, 12), (2, 5));
-        assert_eq!(turn(0, 3, 12), (0, 0));
-    }
 
     #[test]
     fn reasons_read_as_sentences() {

@@ -12,7 +12,7 @@ use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Highligh
 use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
 use glasscode_core::model::now;
 
-use crate::manager_state::{Mode, Stage};
+use crate::manager_view::{Mode, Stage};
 use crate::scenes_ui::{gold, gold_bg, gold_line, text_lines};
 use crate::settings_ui::Section;
 use crate::text_input::{InputEvent, TextInput};

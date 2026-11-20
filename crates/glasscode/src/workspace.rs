@@ -142,7 +142,7 @@ pub struct Workspace {
     pub cli_contracts: HashMap<String, (String, Result<(), Vec<String>>)>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
     /// The manager: the agent above every session (its page, bubble and rounds).
-    pub manager: crate::manager_state::ManagerUi,
+    pub manager: crate::manager_view::ManagerUi,
     pub prs: crate::pr_status::PrStatuses,
     pub center: crate::center::Center,
     pub server: crate::server_ui::ServerUi,
@@ -302,7 +302,7 @@ impl Workspace {
             cli_status: Vec::new(),
             cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
-            manager: crate::manager_state::ManagerUi::new(),
+            manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
             server: crate::server_ui::ServerUi::new(),
@@ -516,10 +516,10 @@ impl Workspace {
             Some("manager") => this.show_manager(window, cx),
             Some("manager-memory") => {
                 this.show_manager(window, cx);
-                this.manager_set_stage(crate::manager_state::Stage::Memory, cx);
+                this.manager_set_stage(crate::manager_view::Stage::Memory, cx);
             }
             Some("manager-chat") => {
-                this.manager.mode = crate::manager_state::Mode::Chat;
+                this.manager.mode = crate::manager_view::Mode::Chat;
                 this.show_manager(window, cx);
             }
             Some(mode) if mode.starts_with("settings") => {
@@ -1722,6 +1722,7 @@ impl Workspace {
         }
         self.glasscode_tick(cx);
         self.manager_tick(cx);
+        self.manager_view_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);
