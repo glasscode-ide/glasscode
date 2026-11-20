@@ -611,9 +611,14 @@ impl Workspace {
                 step_dot(("manager-tour-dot", k), k <= tour.index).occlude().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_tour_go(k, cx)))
             }))
         });
+        // With the v2 engine the bubble is the chat's collapsed state (M52.1, ux-3): a click opens
+        // the chat over the window; its count is what was said since, its mark the cards waiting.
+        let v2 = self.control.engine_v2;
+        let overlay = v2 && self.mchat.overlay;
+        let (unread, waiting) = if v2 { self.chat_unread() } else { (0, 0) };
         // The caption takes no clicks: what is under it stays reachable. Only the dots and
         // the avatar do.
-        let card = (talking && (!caption.trim().is_empty() || dots.is_some())).then(|| {
+        let card = (!overlay && talking && (!caption.trim().is_empty() || dots.is_some())).then(|| {
             div()
                 .flex()
                 .flex_col()
@@ -650,9 +655,44 @@ impl Workspace {
                     .cursor_pointer()
                     .occlude()
                     .hover(|s| s.opacity(0.9))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_manager(window, cx)))
+                    .role(gpui::Role::Button)
+                    .aria_label(match (v2, overlay) {
+                        (true, true) => format!("Close the chat with {}", self.state.manager.name),
+                        (true, false) if waiting > 0 => format!("Chat with {}: {waiting} waiting for you", self.state.manager.name),
+                        (true, false) if unread > 0 => format!("Chat with {}: {unread} new", self.state.manager.name),
+                        (true, false) => format!("Chat with {}", self.state.manager.name),
+                        _ => format!("Open {}'s page", self.state.manager.name),
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if v2 {
+                            this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": overlay }), window, cx);
+                        } else {
+                            this.show_manager(window, cx);
+                        }
+                    }))
                     .child(avatar(&self.state.manager.initials(), 40., asleep).text_size(px(13.)).when(look == Presence::Thinking, |d| d.border_dashed())),
-            );
+            )
+            // Not colour only: the count is a number, the mark a ring with its own label above.
+            .when(!overlay && (unread > 0 || waiting > 0), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .right(px(0.))
+                        .min_w(px(17.))
+                        .h(px(17.))
+                        .px(px(4.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if waiting > 0 { theme::attention() } else { theme::accent() })
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::on_accent())
+                        .child(if waiting > 0 { format!("{waiting}!") } else { unread.min(99).to_string() }),
+                )
+            });
         Some(
             deferred(
                 div()
@@ -660,11 +700,12 @@ impl Workspace {
                     .right(px(9.))
                     // Above the status bar, at any scale.
                     .bottom(theme::sz(crate::status_bar::BAR_HEIGHT) + px(9.))
-                    .w(px(290.))
+                    .w(px(if overlay { 390. } else { 290. }))
                     .flex()
                     .flex_col()
                     .items_end()
                     .gap(px(6.))
+                    .when(overlay, |d| d.child(self.render_chat_overlay(cx)))
                     .when_some(card, |d, card| d.child(div().pr(px(5.)).child(card)))
                     .child(face),
             )
@@ -792,17 +833,26 @@ impl Workspace {
         let m = &self.manager;
         let body = match m.mode {
             Mode::Talk => self.manager_talk(cx),
-            // With the v2 engine: the conversation store's thread (M52.1).
+            // With the v2 engine: the conversation store's thread (M52.1), the left column of the
+            // page (ux-3), its topics a row above it.
             Mode::Chat if self.control.engine_v2 => div()
-                .id("manager-chat")
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&m.page.chat_scroll)
-                .p_4()
-                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "manager-thread", limit: 80, compact: false }, cx))
+                .child(self.render_chat_topics(cx))
+                .child(
+                    div()
+                        .id("manager-chat")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&m.page.chat_scroll)
+                        .p_4()
+                        .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "manager-thread", limit: 80, compact: false }, cx)),
+                )
                 .into_any_element(),
             Mode::Chat => self.manager_chat(cx),
         };

@@ -1147,7 +1147,7 @@ impl Workspace {
     /// The start box's Session | Ask control: what Enter does, remembered (ux-4).
     fn today_mode_switch(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         use glasscode_core::runtime::chat::StartMode;
-        let chosen = self.mchat.today_mode;
+        let chosen = self.chat_today_mode();
         let option = |mode: StartMode, label: String, cx: &mut Context<Self>| {
             let on = chosen == mode;
             div()
@@ -1162,7 +1162,7 @@ impl Workspace {
                 .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
                 .child(label)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_set_today_mode(mode, cx)))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_set_today_mode(mode, window, cx)))
         };
         div()
             .id("today-mode")

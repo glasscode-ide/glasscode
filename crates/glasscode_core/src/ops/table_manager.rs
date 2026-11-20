@@ -54,6 +54,18 @@ pub(super) const OPS: &[OpSpec] = &[
         v2_only: true,
         ..DATA
     },
+    // The person's Stop of the manager's answer being written in the chat (M52.1). The v2
+    // engine's.
+    OpSpec {
+        name: "manager.stop",
+        cli: &["manager", "stop"],
+        retry: Retry::Idempotent,
+        summary: "stop the manager's answer that is being written in the chat",
+        examples: &["manager stop"],
+        human_only: true,
+        v2_only: true,
+        ..DATA
+    },
     OpSpec {
         name: "manager.ask",
         cli: &["manager", "ask"],
