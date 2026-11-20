@@ -112,7 +112,29 @@ pub struct Plan {
     pub skipped: Vec<String>,
 }
 
-/// A schedule id from a v1 check's id: `v1-check-` and its safe letters.
+/// The keys of `Data::seen` that are the follow-ups' (`followups`' module doc).
+const FOLLOW_KEYS: [&str; 5] = ["pr|", "prr|", "review|", "ci|", "fixed|"];
+
+/// v1's follow-ups and their keys from `data` (M56.2): what the work ledger takes in
+/// (`WorkLedger::take_follow_ups`), so v2's follow-ups go on where v1's were.
+pub fn follow_ups_of(data: &Data) -> (Vec<super::FollowUp>, BTreeMap<String, String>) {
+    let seen = data.seen.iter().filter(|(key, _)| FOLLOW_KEYS.iter().any(|p| key.starts_with(p))).map(|(k, v)| (k.clone(), v.clone())).collect();
+    (data.followups.clone(), seen)
+}
+
+/// [`follow_ups_of`] the home's `data.json`, read only (none when there is none). It reads the
+/// disk: off the main thread.
+pub fn v1_follow_ups() -> Result<(Vec<super::FollowUp>, BTreeMap<String, String>), String> {
+    let file = super::store::file();
+    if !file.exists() {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let text = std::fs::read_to_string(&file).map_err(|err| format!("{} could not be read ({err})", file.display()))?;
+    let data: Data = serde_json::from_str(&text).map_err(|err| format!("{} does not parse ({err})", file.display()))?;
+    Ok(follow_ups_of(&data))
+}
+
+/// A schedule id from a v1 check's id: `v1-check-` and its safe letters./// A schedule id from a v1 check's id: `v1-check-` and its safe letters.
 pub fn check_id(id: &str) -> String {
     let safe: String = id.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let safe = safe.trim_matches('-');
@@ -447,6 +469,29 @@ mod tests {
 
     /// M56: the decision at the start. Every home at v1 goes to v2, also one whose manager runs;
     /// v2 stays; a switch that does not read stays as it is (it fails closed).
+    /// M56.2: v1's follow-ups and only their keys come over to the work ledger; again, nothing
+    /// changes; v1's newer state wins, the ledger's newer one stays.
+    #[test]
+    fn follow_ups_come_over_to_the_ledger_once() {
+        let mut data = Data::default();
+        data.followups.push(FollowUp { id: "fu-acme/app#7".into(), repo: "acme/app".into(), number: 7, updated: 10, ..FollowUp::default() });
+        data.seen.insert("fixed|fu-acme/app#7".into(), "abc".into());
+        data.seen.insert("send|m1".into(), "1".into());
+        let (followups, seen) = follow_ups_of(&data);
+        assert_eq!(seen.keys().collect::<Vec<_>>(), ["fixed|fu-acme/app#7"], "only the follow-ups' keys");
+        let mut ledger = WorkLedger::default();
+        assert!(ledger.take_follow_ups(followups.clone(), seen.clone()));
+        assert!(!ledger.take_follow_ups(followups.clone(), seen.clone()), "again, nothing");
+        ledger.follow_ups[0].updated = 20;
+        ledger.follow_ups[0].note = "the ledger's".into();
+        assert!(!ledger.take_follow_ups(followups, seen), "the ledger's newer state stays");
+        data.followups[0].updated = 30;
+        data.followups[0].note = "v1's".into();
+        let (newer, seen) = follow_ups_of(&data);
+        assert!(ledger.take_follow_ups(newer, seen));
+        assert_eq!(ledger.follow_ups[0].note, "v1's");
+    }
+
     #[test]
     fn the_start_switches_every_home() {
         use crate::store::{Engine, EngineSwitch};
