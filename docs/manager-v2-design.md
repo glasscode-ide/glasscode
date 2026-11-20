@@ -581,7 +581,7 @@ pub fn runs_glasscode(line: &str) -> bool;                                    //
 pub const DAEMON_FEATURE: &str = "caller"; pub const DECLARE_METHOD: &str = "caller.declare";  // params: the Caller JSON
 pub struct DaemonConnection;          // undeclared is Ui; the first declaration wins; only machine, phone and ui are declared
 impl DaemonConnection { pub fn caller(&self) -> Caller; pub fn declare(&mut self, params: &Value) -> Result<Caller, String>; }
-pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: restart, shutdown, phones.add, caller.declare, mirror.sync and its uploads; owners.*: Machine only
+pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: only PHONE_ALLOWED (phase 0b); owners.*: Machine only
 pub fn device_id_for_key(blob: &str) -> String; pub fn device_id_ok(id: &str) -> bool;  // gate --device <id>; "unknown" for older lines
 
 // glasscode_core::words

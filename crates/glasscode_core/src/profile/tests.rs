@@ -515,9 +515,10 @@ fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
     for kind in [HeadlessKind::AutoReview, HeadlessKind::Study, HeadlessKind::Reflect] {
         let args = headless_profile(kind, AgentKind::Codex, &json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt")).codex_args;
         let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
-        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use", "goals", "image_generation"] {
             assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
         }
+        assert!(has(&["-c", r#"web_search="disabled""#]), "{kind:?}: web search stays on in {args:?}");
         for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
             assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
         }
@@ -580,6 +581,11 @@ fn a_branch_moved_onto_other_work_is_not_the_sessions_own() {
     scratch_git(scratch.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()], None);
     scratch_commit(&other, "teammates-work", Some(hour_ago + 30));
     scratch_git(&other, &["push", "-q", "origin", "main"], None);
+    // And the remote has a ref whose commit no fetch of branches brings here (a fork's pull
+    // request head on GitHub, `refs/pull/<n>/head`).
+    scratch_git(&other, &["checkout", "-q", "-b", "fork"], None);
+    scratch_commit(&other, "a-forks-work", Some(hour_ago + 40));
+    scratch_git(&other, &["push", "-q", "origin", "fork:refs/pull/1/head"], None);
     // The person's work on another branch, never pushed.
     scratch_git(&repo, &["checkout", "-q", "-b", "person-wip"], None);
     let theirs = scratch_commit(&repo, "the-persons-work", Some(hour_ago + 60));
