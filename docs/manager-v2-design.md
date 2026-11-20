@@ -548,7 +548,9 @@ pub enum Caller {                     // serde: {"kind": "session", "id": …}
     Ui,
     Session { id: String, project: Option<ProjectKey> },
     ShellTab { session: String, project: Option<ProjectKey> },  // the person typing in a Glasscode shell tab: the terminal view saw the
-                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall)
+                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall).
+                                                                // A background process in the shell tab could fire inside the window, so M21
+                                                                // keeps the in-app sheet for person-present ops.
     Manager { lane: Lane, wake: Option<String>, project: Option<ProjectKey> },
     Phone { device: String },
     Machine { id: MachineId },        // another Glasscode machine's sync connection (the Mac, seen from glasscoded)
@@ -855,6 +857,14 @@ impl Queues { pub fn push(&mut self, d: Delivery) -> Pushed; pub fn expire(&mut 
 pub fn probe(marker: &str, events: &str) -> ProbeResult;                   // the UserPromptSubmit with the marker; a SessionStart after: did not happen
 pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeResult>;  // reads the session's events file (M14's journal later)
 
+// glasscode_core::trust (M53): what Settings shows and changes of trust, with no TOML or YAML
+pub fn level_table() -> Vec<TableLine>; pub fn consequences(level: Level) -> Vec<String>;  // from gate::TABLE
+pub fn moved(before: &Policy, after: &Policy, key: &ProjectKey, forge: &BTreeMap<ProjectKey, ForgeFacts>) -> Vec<Moved>;  // decide() before and after
+pub fn parse_condition(text: &str) -> Result<Condition, String>;          // "not on main", "never secrets/**", "hours 09:00-18:00 weekdays", "only Sam"
+pub fn playbook_sentence(p: &Playbook) -> String; pub fn schedule_sentence(s: &Schedule) -> String;
+pub enum Change { Level{..}, AddCondition{..}, RemoveCondition{..}, Playbook{..}, ApprovePlaybook{..}, Schedule{..}, ApproveSchedule{..} }
+pub fn prepare(change: Change, world: &World) -> Result<Pending, String>; pub fn apply(pending: &Pending, confirmed: bool) -> Result<String, String>;  // never unconfirmed
+
 // glasscode_core::turns (M30)
 pub enum TurnEnd { Completed, Paused, Failed(String), Interrupted, Aborted(Option<i32>), Crashed, Slept, AppQuit }
 pub struct FileDelta { pub path: String, pub added: u32, pub removed: u32 }
@@ -963,6 +973,11 @@ pub trait Host: Send + Sync {
 // pub enum BrainHealth { Ready, NotInstalled, SignedOut, LoginExpiresSoon, OutOfUsage, Overloaded, VersionNotApproved, Crashed,
 // ToolListWrong, SwitchedOff } with sentence() and backoff(); budget::Ledger (store manager/tokens); wrap::wrap(source, text);
 // layout(instructions, memory, situation, question) -> (system, user); restart_due(turns, rss).
+// M51: Host also has propose(op, reason, lane, wake) -> Result<card, why> and run_under(op, caller, playbook) -> OpReply;
+// runtime::queue::{Wake { key, priority, precondition, events, projects, notes, playbook, … }, Queue { push, pop_where, cancel }};
+// runtime::wake::{INSTRUCTIONS, parse(reply) -> Answer { tell_person, matters, proposals, notify }, decide(answer, under) -> Vec<Effect>};
+// runtime::situation::for_wake(wake, facts, projects); runtime::lanes::{ChatLane, Hold, Locks, wake_spec, run_wake, next_wake,
+// wake_for_event, still_holds, under_playbook, lane_may_act, link_rollover}; playbooks::engine::wake_of(firing) -> Option<Wake>.
 
 // glasscode_core::profile
 pub enum SessionOrigin { Person, Automation, Quarantine }

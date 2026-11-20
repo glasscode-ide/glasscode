@@ -143,6 +143,8 @@ pub struct Workspace {
     pub mirror: crate::mirror_ui::MirrorUi,
     /// The journal's part of the app (M14).
     pub journal: crate::journal_ui::JournalUi,
+    /// Settings' trust part: playbooks and schedules as read (M53).
+    pub trust: crate::trust_ui::TrustUi,
     pub browser: crate::browser_ui::BrowserUi,
     pub switch: Option<crate::switch_ui::SwitchForm>,
     /// Moving in (M35): its dialog's state, kept while it is hidden.
@@ -193,8 +195,9 @@ pub struct Workspace {
     pub control: crate::control_ui::ControlUi,
     /// The brain runtime's host (M50), with the engine at v2: what the manager's lanes (M51) and
     /// the chat (M52) run their brains with.
-    #[allow(dead_code)]
     pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
+    /// The manager's lanes (M51): the wake queue, the hold, the claims; the wake lane's worker.
+    pub lanes: crate::manager_lanes::Lanes,
     /// The manager's home lease (M58, engine v2).
     pub home: crate::home_ui::HomeUi,
     /// The Today board.
@@ -282,6 +285,7 @@ impl Workspace {
             update: crate::update_ui::UpdateUi::new(),
             mirror: crate::mirror_ui::MirrorUi::new(),
             journal: Default::default(),
+            trust: Default::default(),
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
             movein: None,
@@ -314,6 +318,7 @@ impl Workspace {
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
             brain_host: None,
+            lanes: Default::default(),
             home: Default::default(),
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
@@ -1466,6 +1471,7 @@ impl Workspace {
         self.themes_tick(cx);
         self.today_tick(cx);
         self.journal_tick(cx);
+        self.trust_tick(cx);
         self.remember_right_tab();
         let mut dirty = false;
         let mut redraw = false;

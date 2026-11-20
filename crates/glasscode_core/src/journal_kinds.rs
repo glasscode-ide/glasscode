@@ -114,6 +114,7 @@ const CORE: &str = "crates/glasscode_core/src/journal.rs";
 const BRAIN: &str = "crates/glasscode_core/src/runtime/health.rs";
 const RECONCILE: &str = "crates/glasscode_core/src/reconcile.rs";
 const TURNS: &str = "crates/glasscode_core/src/turns.rs";
+const LANES: &str = "crates/glasscode_core/src/runtime/lanes.rs";
 const WORK: &str = "crates/glasscode_core/src/work.rs";
 
 kinds! {
@@ -165,6 +166,8 @@ kinds! {
     // ----- the manager's brain: M50
     MANAGER_BRAIN_DOWN = "brain.down", Warn, "crates/glasscode_core/src/runtime/health.rs", "agent, lane, health (state and its words)", "the chat, Activity";
     MANAGER_BRAIN_UP = "brain.up", Info, "crates/glasscode_core/src/runtime/health.rs", "agent, lane, health", "the chat";
+    // ----- the manager's wakes: M51
+    WAKE_DROPPED = "wake.dropped", Info, "crates/glasscode_core/src/runtime/lanes.rs", "key, why (stale, past its deadline, cancelled), events", "Activity";
     LINK_LOST = "link.lost", Warn, "planned:M58", "the server, since", "M58";
     LINK_BACK = "link.back", Info, "planned:M58", "the server, after (ms)", "M58";
     CLOCK_JUMPED = "clock.jumped", Warn, "crates/glasscode_core/src/journal.rs", "by (ms)", "M41";
@@ -188,7 +191,7 @@ kinds! {
 }
 
 /// The files that write the kinds of the catalogue, for the reader of the table.
-pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK, BRAIN];
+pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK, BRAIN, LANES];
 
 #[cfg(test)]
 mod tests {

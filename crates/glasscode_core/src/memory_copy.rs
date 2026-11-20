@@ -2,8 +2,12 @@
 //! separate tree from its memory that leaves out every project marked "stays on this Mac" and
 //! every `org/<employer>/` folder used only by such projects, commits it on a history of its own
 //! (`git commit-tree` over the filtered tree, never over the Mac's commits), and pushes that
-//! history to the server, which checks it out read-only (`memory.copy.*` in glasscoded). So no
-//! local-only text is ever in an object the server receives.
+//! history to the server, which checks it out read-only (`memory.copy.*` in glasscoded). The
+//! generated `INDEX.md` stays here (it names every file and heading), and in the files that go, a
+//! line about what stays is taken out: an entry kept to a left-out employer (`org=`) or proposed
+//! for a left-out file (`to=`), and any line that names a left-out folder, project key or employer
+//! (the inbox's per-file headings). So no local-only text, name or path is ever in an object the
+//! server receives.
 //!
 //! (It lives beside `memstore` until M20.1 lands; then the Mac's memory head gives the commit.)
 
@@ -49,6 +53,56 @@ pub fn excluded_paths(local_only: &[ProjectKey], employers: &[(ProjectKey, Optio
     paths
 }
 
+/// Whether `rel` is one of `excluded` or below one.
+fn under(rel: &str, excluded: &[String]) -> bool {
+    excluded.iter().any(|path| rel == path || rel.starts_with(&format!("{path}/")))
+}
+
+/// The files of `commit` (outside `excluded`) with a line about what is excluded, each with its
+/// text without those lines: an entry kept to an excluded employer (`org=`) or proposed for an
+/// excluded file (`to=`), and any line (an entry, a heading such as the inbox's per-file one, prose)
+/// that names an excluded folder, a local-only project's key or an excluded employer.
+fn pointing_at(repo: &Path, commit: &str, excluded: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let orgs: Vec<&str> = excluded.iter().filter_map(|path| path.strip_prefix("org/")).collect();
+    let mut needles: Vec<&str> = excluded.iter().map(String::as_str).collect();
+    needles.extend(excluded.iter().filter_map(|path| path.rsplit('/').next()));
+    let names = |text: &str| needles.iter().any(|needle| text.contains(needle));
+    let mut grep = git(repo);
+    grep.args(["grep", "-l", "-F", "-e", "org=", "-e", "to="]);
+    for needle in &needles {
+        grep.args(["-e", needle]);
+    }
+    grep.args([commit, "--"]);
+    let out = grep.output().context("could not run git")?;
+    // `git grep` exits 1 when nothing matches.
+    let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut out = Vec::new();
+    for line in listed.lines() {
+        let rel = line.strip_prefix(&format!("{commit}:")).unwrap_or(line);
+        if under(rel, excluded) || rel == "INDEX.md" {
+            continue;
+        }
+        let shown = git(repo).args(["show", &format!("{commit}:{rel}")]).output().context("could not run git")?;
+        if !shown.status.success() {
+            bail!("{}", String::from_utf8_lossy(&shown.stderr).trim());
+        }
+        let text = String::from_utf8_lossy(&shown.stdout).into_owned();
+        let mut doc = crate::memstore::entry::Doc::parse(&text);
+        let before = doc.lines.len();
+        doc.lines.retain(|line| match line {
+            crate::memstore::entry::Line::Entry(entry) => {
+                !entry.header.org.as_ref().is_some_and(|org| orgs.contains(&org.to_string().as_str())) && !entry.header.to.as_deref().is_some_and(|to| under(to, excluded)) && !names(&entry.render())
+            }
+            crate::memstore::entry::Line::Text(text) => !names(text),
+            crate::memstore::entry::Line::Tombstone { .. } => true,
+        });
+        if doc.lines.len() != before {
+            out.push((rel.to_string(), doc.render()));
+        }
+    }
+    Ok(out)
+}
+
 /// The server copy's commit for `commit` of the memory `repo`: its tree without `excluded`,
 /// committed with `previous` (the copy's last commit) as its only parent, so the copy's history
 /// holds filtered trees only. The same tree as `previous` gives `previous` back.
@@ -62,6 +116,27 @@ pub fn server_commit(repo: &Path, commit: &str, excluded: &[String], previous: O
     run(with_index(&["read-tree", commit]))?;
     for path in excluded {
         run(with_index(&["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", path]))?;
+    }
+    // INDEX.md names every file and its headings, the kept-back ones too: it stays here.
+    run(with_index(&["rm", "-q", "--cached", "--ignore-unmatch", "--", "INDEX.md"]))?;
+    // An entry elsewhere that points at what stays here (a profile entry kept to an employer left
+    // out, `org=`; a proposal for a file left out, `to=`) is taken out of its file's copy.
+    for (path, text) in pointing_at(repo, commit, excluded)? {
+        let blob = {
+            let mut cmd = git(repo);
+            cmd.args(["hash-object", "-w", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            let mut child = cmd.spawn().context("could not run git")?;
+            {
+                use std::io::Write as _;
+                child.stdin.take().context("no stdin for git")?.write_all(text.as_bytes())?;
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(with_index(&["update-index", "--cacheinfo", &format!("100644,{blob},{path}")]))?;
     }
     let tree = run(with_index(&["write-tree"]))?;
     if let Some(previous) = previous {
@@ -181,6 +256,60 @@ mod tests {
         assert!(paths.contains(&"projects/secret-111111".to_string()));
         assert!(paths.contains(&"org/acme".to_string()), "used only by a local-only project");
         assert!(!paths.iter().any(|p| p == "org/globex"), "an open project uses it too");
+    }
+
+    /// M20.3 with the real memory writer: no text, name or path of a "stays on this Mac" project
+    /// is in any object the server receives. Not its files' text, a know-how topic's file name or
+    /// heading, its key, its employer's name or people, a work file's name, a proposal for it, a
+    /// profile entry kept to its employer, a forgotten entry, nor the index that lists them.
+    #[test]
+    fn nothing_of_a_local_only_project_reaches_the_server() {
+        use crate::memstore::git::Who;
+        use crate::memstore::layout::{Employer, MemFile};
+        use crate::memstore::tests_support::{Scratch, chat};
+        use crate::memstore::{Memory, MemoryHead, Remembered};
+        use crate::store::Store as _;
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let (secret, open) = (key("secret-111111"), key("open-222222"));
+        let acme = Employer::parse("acmecorp").unwrap();
+        memory.set_employer(&Who::You, &secret, &acme).unwrap();
+        let fact = |text: &str, file: &MemFile| match memory.remember(&chat(&format!("Remember: {text}")), text, text, file, None).unwrap() {
+            Remembered::Entry { id, .. } | Remembered::Proposed { id, .. } => id,
+        };
+        fact("The launch codename is BLUEHERON.", &MemFile::Project(secret.clone()));
+        let gone = fact("The vault is OSPREYVAULT.", &MemFile::Decisions(secret.clone()));
+        memory.forget(&[gone.as_str()], false).unwrap();
+        fact("Pat runs KESTRELPAYROLL.", &MemFile::People(acme.clone()));
+        memory.learn(&Who::Session("s1".into()), &MemFile::Knowhow(secret.clone(), "heronstep".into()), Some("Heronheading"), "Ship with make heronship.", None).unwrap();
+        let work = crate::work::WorkItem::new(crate::identity::WorkKey { project: secret.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/heronbranch".into() }, crate::identity::Hlc::zero(crate::paths::MachineId::parse("0123456789abcdef").unwrap()));
+        memory.write_work(&work).unwrap();
+        memory.propose(&Who::Session("s1".into()), &MemFile::Project(secret.clone()), None, "Use SWIFTPROPOSAL for builds.", crate::memstore::entry::Source::Session("s1".into())).unwrap();
+        // An open project and the profile do go.
+        fact("Builds with cargo.", &MemFile::Project(open.clone()));
+        fact("Prefers short pull requests.", &MemFile::Profile);
+        // A profile entry kept to the local-only project's employer: written by the person.
+        let profile = memory.dir().join("you/profile.md");
+        let mut text = std::fs::read_to_string(&profile).unwrap();
+        text.push_str("- Use the ACMEVPNLINE. <!-- id=0aa0f00d status=confirmed kind=fact source=person-edit org=acmecorp -->\n");
+        std::fs::write(&profile, text).unwrap();
+        memory.accept(&["you/profile.md".to_string()]).unwrap();
+
+        let head = MemoryHead::load().unwrap().commit.unwrap();
+        let all_mac = scratch.git(memory.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
+        for word in ["ACMEVPNLINE", "heronstep", "Heronheading", "SWIFTPROPOSAL", "heronbranch", "secret-111111"] {
+            assert!(all_mac.contains(word), "the test wrote {word} on the Mac");
+        }
+        let excluded = excluded_paths(std::slice::from_ref(&secret), &[(secret.clone(), Some("acmecorp".into())), (open.clone(), None)]);
+        let copy = server_commit(memory.dir(), &head, &excluded, None).unwrap();
+        let server = scratch.at("server.git");
+        sh(&scratch.at(""), &["init", "-q", "--bare", server.to_str().unwrap()]);
+        sh(memory.dir(), &["push", "-q", server.to_str().unwrap(), &format!("{copy}:{SERVER_REF}")]);
+        let all = sh(&server, &["cat-file", "--batch-all-objects", "--batch"]);
+        for word in ["secret-111111", "BLUEHERON", "OSPREYVAULT", gone.as_str(), "acmecorp", "KESTRELPAYROLL", "heronstep", "Heronheading", "heronship", "heronbranch", "SWIFTPROPOSAL", "ACMEVPNLINE"] {
+            assert!(!all.contains(word), "{word} reached the server: {}", all.find(word).map(|at| all[at.saturating_sub(300)..(at + 200).min(all.len())].to_string()).unwrap_or_default());
+        }
+        assert!(all.contains("Builds with cargo") && all.contains("Prefers short pull requests"), "the rest goes");
     }
 
     #[test]
