@@ -1,4 +1,4 @@
-//! The Today board's ops (M12.1). Summaries and examples are `cli.rs`'s `HELP`, word for word
+//! The Today board's ops (M12.1). Summaries and examples are the help's (`help.rs`, which prints them), word for word
 //! (a test checks); the words, options and messages are those of `board_plan` in `commands.rs`.
 
 use super::spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpSpec, Retry, Undo};

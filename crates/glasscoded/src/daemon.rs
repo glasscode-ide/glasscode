@@ -21,6 +21,7 @@ use glasscode_core::remote::{
 use glasscode_core::owners::WorktreeKey;
 use glasscode_core::prompt::{self, PendingPrompt};
 use glasscode_core::remote::PhoneKey;
+use glasscode_core::caller::{self, Caller};
 use glasscode_core::{github, history, paths, store, sync, transcript, versions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -825,10 +826,24 @@ pub fn project_lock(place: &str) -> Arc<Mutex<()>> {
     locks.entry(place.to_string()).or_default().clone()
 }
 
-/// Answer one request. Slow work (git clones, worktree checks, history scans) runs without
-/// holding the daemon's lock, so other clients and the activity loop are not blocked.
-pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<Value> {
-    if let Some(answer) = crate::mirror::dispatch(shared, method, &params) {
+/// What `caller` may not call here (M13.2), before any handler runs; and a declaration, which
+/// only a connection's own read loop answers.
+fn refuse(caller: &Caller, method: &str) -> anyhow::Result<()> {
+    if let Some(why) = caller::daemon_refusal(caller, method) {
+        bail!("{why}");
+    }
+    if method == caller::DECLARE_METHOD {
+        bail!("a connection declares its caller in its own read loop, not here");
+    }
+    Ok(())
+}
+
+/// Answer one request from `caller` (its connection's, M13.2). Slow work (git clones, worktree
+/// checks, history scans) runs without holding the daemon's lock, so other clients and the
+/// activity loop are not blocked.
+pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -> anyhow::Result<Value> {
+    refuse(caller, method)?;
+    if let Some(answer) = crate::mirror::dispatch(shared, caller, method, &params) {
         return answer;
     }
     if let Some(answer) = crate::today::dispatch(method, &params) {
@@ -837,7 +852,7 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
     if let Some(answer) = crate::manager::dispatch(shared, method, &params) {
         return answer;
     }
-    if let Some(answer) = crate::owners::dispatch(shared, method, &params) {
+    if let Some(answer) = crate::owners::dispatch(shared, caller, method, &params) {
         return answer;
     }
     match method {
@@ -859,7 +874,7 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
                 features: {
                     // "authority": it keeps the Mac's approved authority from `mirror.sync` (M21.1),
                     // and never sends it back.
-                    let mut features: Vec<String> = ["phone", "mirror", "today", "manager", "authority"].map(String::from).to_vec();
+                    let mut features: Vec<String> = ["phone", "mirror", "today", "manager", caller::DAEMON_FEATURE, "authority"].map(String::from).to_vec();
                     if crate::push::configured() {
                         features.push("push".into());
                     }
@@ -1444,10 +1459,6 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
     }
 }
 
-/// The device id of a phone's words until its connection names the phone (M13.2: `gate
-/// --device <id>`, one per paired key).
-pub const UNKNOWN_DEVICE: &str = "unknown";
-
 /// What a phone types into a session, from one request line of its connection (`sessions.send`,
 /// or the text of `sessions.answer`): the session and the text. Other lines carry no words.
 pub fn phone_words(line: &str) -> Option<(String, String)> {
@@ -1461,40 +1472,72 @@ pub fn phone_words(line: &str) -> Option<(String, String)> {
 }
 
 /// Record a phone's words before the daemon gets its request (the gate, which only phones' keys
-/// run): a device's, tier two at most (design D1). Every other door to `sessions.send` (the Mac,
-/// the manager here, a program on this server) records nothing, so its text is nobody's words.
-pub fn record_phone_input(line: &str) {
+/// run): `device`'s, the id its `authorized_keys` line gives (`unknown` for a phone paired before
+/// M13.2), tier two at most (design D1). Every other door to `sessions.send` (the Mac over its
+/// `Machine` connection, the manager here, a program on this server) records nothing here: the
+/// Mac recorded its own text with its own origin, and the server never upgrades a tier.
+pub fn record_phone_input(device: &str, line: &str) {
     if let Some((session, text)) = phone_words(line) {
-        glasscode_core::words::record(glasscode_core::words::Origin::Device(UNKNOWN_DEVICE.into()), &text, Some(&session), None);
+        glasscode_core::words::record(glasscode_core::words::Origin::Device(device.to_string()), &text, Some(&session), None);
         // On disk before the request goes on: the gate's process ends with the connection.
         glasscode_core::words::flush();
     }
 }
 
-/// Answer each request on its own thread, so a slow one (a GitHub lookup) does not hold up
-/// the others on the same connection; replies carry the request's id.
 fn handle_connection(stream: UnixStream, shared: Shared) {
+    serve_connection(stream, move |caller, method, params| dispatch(&shared, &caller, method, params));
+}
+
+/// Answer each request on its own thread, so a slow one (a GitHub lookup) does not hold up
+/// the others on the same connection; replies carry the request's id. A caller declaration
+/// (M13.2) is answered here in the read loop instead, so it applies to every later line, and
+/// each request keeps the caller its connection had when the line was read.
+pub(crate) fn serve_connection<F>(stream: UnixStream, answer: F)
+where
+    F: Fn(Caller, &str, Value) -> anyhow::Result<Value> + Send + Sync + 'static,
+{
     let Ok(writer) = stream.try_clone() else { return };
     let writer = Arc::new(Mutex::new(std::io::BufWriter::new(writer)));
+    let answer = Arc::new(answer);
+    let mut connection = caller::DaemonConnection::default();
     for line in BufReader::new(stream).lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
-        let (shared, writer) = (shared.clone(), writer.clone());
-        std::thread::spawn(move || {
-            let response = match serde_json::from_str::<Request>(&line) {
-                Ok(request) => match dispatch(&shared, &request.method, request.params) {
-                    Ok(result) => Response { id: request.id, result: Some(result), error: None },
-                    Err(err) => Response { id: request.id, result: None, error: Some(format!("{err:#}")) },
-                },
-                Err(err) => Response { id: 0, result: None, error: Some(format!("bad request: {err}")) },
-            };
-            let Ok(mut out) = serde_json::to_string(&response) else { return };
-            out.push('\n');
-            if let Ok(mut writer) = writer.lock() {
-                let _ = writer.write_all(out.as_bytes()).and_then(|_| writer.flush());
+        let request = match serde_json::from_str::<Request>(&line) {
+            Ok(request) => request,
+            Err(err) => {
+                write_response(&writer, &Response { id: 0, result: None, error: Some(format!("bad request: {err}")) });
+                continue;
             }
+        };
+        if request.method == caller::DECLARE_METHOD {
+            let response = match connection.declare(&request.params) {
+                Ok(declared) => Response { id: request.id, result: Some(serde_json::to_value(&declared).unwrap_or(Value::Null)), error: None },
+                Err(why) => {
+                    log(format!("refused a caller declaration from {:?}: {why}", connection.caller()));
+                    Response { id: request.id, result: None, error: Some(why) }
+                }
+            };
+            write_response(&writer, &response);
+            continue;
+        }
+        let (caller, answer, writer) = (connection.caller(), answer.clone(), writer.clone());
+        std::thread::spawn(move || {
+            let response = match answer(caller, &request.method, request.params) {
+                Ok(result) => Response { id: request.id, result: Some(result), error: None },
+                Err(err) => Response { id: request.id, result: None, error: Some(format!("{err:#}")) },
+            };
+            write_response(&writer, &response);
         });
+    }
+}
+
+fn write_response(writer: &Mutex<std::io::BufWriter<UnixStream>>, response: &Response) {
+    let Ok(mut out) = serde_json::to_string(response) else { return };
+    out.push('\n');
+    if let Ok(mut writer) = writer.lock() {
+        let _ = writer.write_all(out.as_bytes()).and_then(|_| writer.flush());
     }
 }
 
@@ -1579,6 +1622,136 @@ mod tests {
     use glasscode_core::owners::{OwnerRecord, Owners};
     use glasscode_core::paths::MachineId;
     use glasscode_core::store::Store;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    use glasscode_core::caller::{Caller, DECLARE_METHOD};
+    use glasscode_core::remote::Response;
+    use serde_json::{Value, json};
+
+    /// One end of a connection the daemon serves as it serves its socket, with `refuse` in front
+    /// of a handler that answers every request with its caller.
+    fn served() -> (UnixStream, BufReader<UnixStream>) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            super::serve_connection(theirs, |caller, method, _| {
+                super::refuse(&caller, method)?;
+                Ok(serde_json::to_value(caller)?)
+            })
+        });
+        let reader = BufReader::new(ours.try_clone().unwrap());
+        (ours, reader)
+    }
+
+    fn send(stream: &mut UnixStream, id: u64, method: &str, params: Value) {
+        let mut line = json!({ "id": id, "method": method, "params": params }).to_string();
+        line.push('\n');
+        stream.write_all(line.as_bytes()).unwrap();
+    }
+
+    fn read(reader: &mut BufReader<UnixStream>) -> Response {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn ask(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>, id: u64, method: &str, params: Value) -> Result<Value, String> {
+        send(stream, id, method, params);
+        let response = read(reader);
+        assert_eq!(response.id, id);
+        match response.error {
+            Some(error) => Err(error),
+            None => Ok(response.result.unwrap_or(Value::Null)),
+        }
+    }
+
+    fn machine() -> Value {
+        json!({ "kind": "machine", "id": "0123456789abcdef" })
+    }
+
+    #[test]
+    fn a_connection_that_declares_nothing_is_ui() {
+        let (mut stream, mut reader) = served();
+        assert_eq!(ask(&mut stream, &mut reader, 1, "state", Value::Null), Ok(json!({ "kind": "ui" })));
+        // As before M13.2, the app's connection keeps everything but the moves' owner records.
+        assert_eq!(ask(&mut stream, &mut reader, 2, "restart", Value::Null), Ok(json!({ "kind": "ui" })));
+        assert!(ask(&mut stream, &mut reader, 3, "owners.begin", json!({})).is_err());
+    }
+
+    #[test]
+    fn the_declaration_comes_before_every_later_line() {
+        let (mut stream, mut reader) = served();
+        // Sent together, without waiting: the request after the declaration is the Mac's.
+        send(&mut stream, 1, DECLARE_METHOD, machine());
+        send(&mut stream, 2, "owners.begin", json!({ "key": "Projects/app" }));
+        let mut responses = [read(&mut reader), read(&mut reader)];
+        responses.sort_by_key(|r| r.id);
+        assert_eq!((responses[0].result.clone(), responses[0].error.clone()), (Some(machine()), None));
+        assert_eq!((responses[1].result.clone(), responses[1].error.clone()), (Some(machine()), None));
+        // Once: the Mac cannot become anyone else on this connection.
+        assert!(ask(&mut stream, &mut reader, 3, DECLARE_METHOD, json!({ "kind": "ui" })).is_err());
+        assert_eq!(ask(&mut stream, &mut reader, 4, "state", Value::Null), Ok(machine()));
+    }
+
+    #[test]
+    fn a_phone_that_declares_is_refused() {
+        let (mut stream, mut reader) = served();
+        // The gate names the phone and reads the reply before it forwards anything.
+        crate::declare_on(&stream, &Caller::Phone { device: "phone-1a2b".into() }).unwrap();
+        let phone = json!({ "kind": "phone", "device": "phone-1a2b" });
+        for (id, said) in [(1, json!({ "kind": "phone", "device": "phone-other" })), (2, json!({ "kind": "ui" }))] {
+            assert_eq!(ask(&mut stream, &mut reader, id, DECLARE_METHOD, said), Err("a phone cannot declare a caller".into()));
+        }
+        assert_eq!(ask(&mut stream, &mut reader, 3, "sessions.send", json!({ "session_id": "s", "text": "hi" })), Ok(phone));
+    }
+
+    #[test]
+    fn a_machine_declaration_from_a_phone_key_is_refused() {
+        let (mut stream, mut reader) = served();
+        crate::declare_on(&stream, &Caller::Phone { device: "unknown".into() }).unwrap();
+        assert!(ask(&mut stream, &mut reader, 1, DECLARE_METHOD, machine()).is_err());
+        // Still the phone: the moves' owner records stay out of reach.
+        assert!(ask(&mut stream, &mut reader, 2, "owners.commit", json!({})).is_err());
+        assert_eq!(ask(&mut stream, &mut reader, 3, "state", Value::Null), Ok(json!({ "kind": "phone", "device": "unknown" })));
+    }
+
+    #[test]
+    fn restart_and_shutdown_from_a_phone_are_refused() {
+        let (mut stream, mut reader) = served();
+        crate::declare_on(&stream, &Caller::Phone { device: "phone-1a2b".into() }).unwrap();
+        for (id, method) in [(1, "restart"), (2, "shutdown"), (3, "phones.add"), (4, "owners.begin"), (5, "owners.abort")] {
+            assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_err(), "{method}");
+        }
+        // Everything else stays open to a phone until phase 0b.
+        for (id, method) in [(6, "state"), (7, "sessions.answer"), (8, "phones.remove"), (9, "today.op")] {
+            assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_ok(), "{method}");
+        }
+    }
+
+    #[test]
+    fn owners_only_from_a_machine() {
+        for declared in [None, Some(json!({ "kind": "ui" })), Some(json!({ "kind": "phone", "device": "p" })), Some(machine())] {
+            let (mut stream, mut reader) = served();
+            let is_machine = declared.as_ref() == Some(&machine());
+            if let Some(declared) = declared {
+                ask(&mut stream, &mut reader, 1, DECLARE_METHOD, declared).unwrap();
+            }
+            for (id, method) in [(2, "owners.begin"), (3, "owners.commit"), (4, "owners.abort"), (5, "owners.get")] {
+                assert_eq!(ask(&mut stream, &mut reader, id, method, json!({})).is_ok(), is_machine, "{method}");
+            }
+        }
+    }
+
+    #[test]
+    fn old_authorized_keys_lines_still_work() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        // `command="… glasscoded gate"`, written before M13.2: the device nobody named.
+        assert_eq!(crate::gate_device(&args(&[])).unwrap(), "unknown");
+        assert_eq!(crate::gate_device(&args(&["--device", "phone-0123456789abcdef"])).unwrap(), "phone-0123456789abcdef");
+        for bad in [&["--device"][..], &["--device", "a\"b"], &["--device", ""], &["rpc"], &["--device", "p", "x"]] {
+            assert!(crate::gate_device(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
 
     /// A new agent starts only where this server may run it: never in a worktree another machine
     /// owns (and a new session there is refused with words for the person), never while held for

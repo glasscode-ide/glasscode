@@ -622,7 +622,8 @@ fn run(shared: &Shared, effects: Vec<Effect>) {
                 Effect::Send { id } => send_message(&shared, &id),
                 Effect::Tell { session, text } => {
                     // The same door phones and the Mac use to type into a session here.
-                    match crate::daemon::dispatch(&shared, "sessions.send", json!({ "session_id": session, "text": text, "enter": true })) {
+                    let manager = glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: None, project: None };
+                    match crate::daemon::dispatch(&shared, &manager, "sessions.send", json!({ "session_id": session, "text": text, "enter": true })) {
                         Ok(_) => log(format!("manager: told session {session}: {}", text.chars().take(80).collect::<String>())),
                         Err(error) => log(format!("manager: could not type into session {session}: {error:#}")),
                     }

@@ -326,7 +326,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Protocol** (`glasscode_core::control`): the command sends `Request { args, session, sig,
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
-  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`). A failure's `data` says
+  `--no-wait`, `--timeout`) and the help text, which the registry makes (`ops::help`). A failure's `data` says
   which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
   its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
   (with the v2 engine an object also gets `op`).
@@ -344,10 +344,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   asked, what was decided, the exit code) for the journal of M14. Tests keep it honest: a golden
   corpus of command lines recorded from the app before the registry (`ops_golden`), a source scan
   that each `plan(Kind::…)` is its op's v1 kind, and the sentences of the approvals checked
-  against what v1 said. GPUI actions stay for key bindings and text editing; from M33.1 they, and
-  the Jump commands, call ops, and each list the registry absorbs is deleted by the slice that
-  absorbs it (`HELP` in M33.1, `past_tense` with M14's Activity, the manager's `VIEWS` and
-  `SECTIONS` with M33.2's `ui.open`). Only the person names a session, a project or a task by the
+  against what v1 said. `glasscode help` is made from the table (`ops/help.rs`: each command's
+  line is its op's example and summary; the file keeps only the layout), with a golden of its
+  text. GPUI actions stay for key bindings and text editing; a key bound to an op uses the one
+  action `RunOp { name, args }`, and a Jump command that is an op runs it. Both go through
+  `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
+  `ops::typed`) by the same rules as the command, so the person's own actions leave the
+  journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
+  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
+  `SECTIONS` with M33.2's `ui.open`).
+- **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
+  person can do in the app, by screen, in one class: an op, an op planned for later, the
+  person's alone (with what the manager says and where it takes them), or view-local. Tests
+  with no window keep it whole: every op has a row, every Settings card a settings key (or only
+  actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
+  command a row, and every row names a function of the app. A committed count of the raw click
+  handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
@@ -605,7 +618,9 @@ continued on the server, and how much of each conversation the server has; the r
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
 the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
-unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
+unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
+the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
+stops listing are forgotten, refs too.
 
 **The switch** (the title bar's "Server mode" / "Laptop mode", `crates/glasscode/src/switch_ui.rs`)
 moves every open session. A worktree moves as one unit with every session open in it
@@ -655,7 +670,10 @@ snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` list
    each); `node_modules`/build output are rebuilt, never copied.
 3. **Conversation**: the Claude transcript or Codex rollout is copied to the matching account
    (same id, else same name, else the default) under the new folder's project directory, with
-   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
+   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`. To the
+   server, only what the mirror's copy lacks travels (`mirror.conversation_size`, then
+   `mirror.conversation` from there), and `mirror.conversation_into` puts the mirrored copy in
+   place; the whole file goes when the session has no mirror.
 4. **One runner**: the source session closes after the target one started.
 
 Paths map by their place under each machine's home folder, which also names a worktree in the
@@ -702,17 +720,26 @@ to the Docker test server and back, and 30 worktrees in two projects four at a t
 ## iPhone
 
 ```
-iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate" ──▶ glasscoded rpc / attach <id>
+iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate --device <id>" ──▶ glasscoded rpc / attach <id>
    ▲                                                        │
    └──────────── APNs (openssl JWT + curl) ◀────────────────┘ needs: permission prompts, questions
 Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
 ```
 
 - **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
-  added to `authorized_keys` with a forced command, `glasscoded gate`, that allows only `rpc`
-  and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The phone pins the
-  server's host keys it received while pairing. `crates/glasscoded/src/phones.rs` validates
-  keys and names before writing that file.
+  added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
+  allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
+  phone pins the server's host keys it received while pairing. `crates/glasscoded/src/phones.rs`
+  validates keys and names before writing that file, and never rewrites a line it wrote before:
+  a line without `--device` runs as the device `unknown`.
+- **Callers** (Manager v2's M13.2): each connection to the daemon may name its caller once,
+  with `caller.declare` (`{"kind":"machine","id":…}`, `{"kind":"phone","device":…}` or
+  `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
+  `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
+  it forwards anything, and each of the Mac's connections declares its `MachineId`
+  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
+  may not call `restart`, `shutdown`, `phones.add` or `caller.declare`, and only a machine may
+  call `owners.*` (`glasscode_core::caller::daemon_refusal`).
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

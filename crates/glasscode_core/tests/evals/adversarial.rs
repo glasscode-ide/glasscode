@@ -384,13 +384,16 @@ fn planned_op(name: &str) -> Option<glasscode_core::ops::Op> {
     Some(glasscode_core::ops::Op { spec, args: serde_json::json!({}) })
 }
 
-/// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller.
+/// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller. M13.2
+/// built the naming (glasscoded's `DaemonConnection`, its gate's `--device`, tested in core and in
+/// glasscoded); an unpaired key is refused by sshd before any gate runs, which only the Docker
+/// test server shows, and its stand-in wiring is M57's.
 #[test]
-#[ignore = "needs M13.2"]
+#[ignore = "needs M57"]
 fn an_unsigned_phone_gets_no_caller() {
     let case = group("callers").into_iter().find(|case| case.id == "callers-unsigned-phone-decision").unwrap();
     assert_eq!((case.expect.more["caller"].clone(), case.expect.more["decision"].clone()), (Value::Null, Value::from("refused")));
-    needs("M13.2", "connect an unpaired phone stand-in through glasscoded's gate and check the daemon names no caller and refuses its approval");
+    needs("M57", "connect an unpaired phone stand-in over SSH to the Docker test server and check that no gate runs, so the daemon names no caller and refuses its approval");
 }
 
 #[test]

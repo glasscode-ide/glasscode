@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::anyhow;
+use glasscode_core::caller::Caller;
 use glasscode_core::owners::{OwnerRecord, Owners, WorktreeKey};
 use glasscode_core::paths::MachineId;
 use glasscode_core::remote::{OwnersBegin, OwnersReply};
@@ -151,7 +152,7 @@ fn reply(result: Result<OwnerRecord, glasscode_core::owners::OwnerError>) -> any
     })?)
 }
 
-pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
     let answer = match method {
         "owners.get" => (|| {
             let keys: Vec<WorktreeKey> = serde_json::from_value(params.get("keys").cloned().unwrap_or(Value::Array(Vec::new())))?;
@@ -162,6 +163,11 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
         })(),
         "owners.begin" => (|| {
             let begin: OwnersBegin = serde_json::from_value(params.clone())?;
+            // Only a machine the worktree moves between starts its move (M13.2: the daemon has
+            // already refused every caller that is not a machine).
+            if !begun_by(caller, &begin) {
+                anyhow::bail!("a machine can only move worktrees to or from itself");
+            }
             let me = machine().ok_or_else(|| anyhow!("this server has no machine id"))?;
             // Without a record, a worktree belongs to the machine it leaves.
             let holder = if begin.to == me { begin.from.clone() } else { me.clone() };
@@ -245,8 +251,36 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
     Some(answer)
 }
 
+/// Whether `caller`, the connection's declared machine, is one end of the move `begin` asks for.
+fn begun_by(caller: &Caller, begin: &OwnersBegin) -> bool {
+    matches!(caller, Caller::Machine { id } if *id == begin.from || *id == begin.to)
+}
+
 fn key_and_epoch(params: &Value) -> anyhow::Result<(WorktreeKey, u64)> {
     let key: WorktreeKey = serde_json::from_value(params.get("key").cloned().ok_or_else(|| anyhow!("no key"))?)?;
     let epoch = params.get("epoch").and_then(Value::as_u64).ok_or_else(|| anyhow!("no epoch"))?;
     Ok((key, epoch))
+}
+
+#[cfg(test)]
+mod tests {
+    use glasscode_core::caller::Caller;
+    use glasscode_core::owners::WorktreeKey;
+    use glasscode_core::paths::MachineId;
+    use glasscode_core::remote::OwnersBegin;
+
+    #[test]
+    fn only_a_machine_at_one_end_begins_a_move() {
+        let (mac, server, other) = (MachineId::parse("0123456789abcdef").unwrap(), MachineId::parse("fedcba9876543210").unwrap(), MachineId::parse("1111222233334444").unwrap());
+        let key = WorktreeKey("Projects/app".into());
+        let to_server = OwnersBegin { key: key.clone(), from: mac.clone(), to: server.clone(), epoch: 0 };
+        let to_mac = OwnersBegin { key, from: server.clone(), to: mac.clone(), epoch: 1 };
+        for begin in [&to_server, &to_mac] {
+            assert!(super::begun_by(&Caller::Machine { id: mac.clone() }, begin));
+            // Another machine cannot move this Mac's worktrees, and nobody else at all.
+            assert!(!super::begun_by(&Caller::Machine { id: other.clone() }, begin));
+            assert!(!super::begun_by(&Caller::Ui, begin));
+            assert!(!super::begun_by(&Caller::Phone { device: "phone-1".into() }, begin));
+        }
+    }
 }
