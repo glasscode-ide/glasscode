@@ -718,6 +718,20 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "no",
         ..TODAY
     },
+    DataRow {
+        path: "authority/projects.json",
+        store: Some("authority/projects"),
+        module: "identity",
+        writer: "the app only",
+        format: "JSON, schema v1",
+        retention: "lasting: a removed project keeps its key, and adding it again finds it",
+        on_damage: "refuse; no project key is made or looked up, so memory and agent notes stop until it is repaired",
+        export: "yes",
+        local_only: "per project: a \"stays on this Mac\" project's key is never sent",
+        forget: "project",
+        sync: "Mac to server (M57), without \"stays on this Mac\" projects; the server reads its own machine's folders and ids",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
@@ -806,7 +820,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>()];
 
 #[cfg(test)]
 mod tests {

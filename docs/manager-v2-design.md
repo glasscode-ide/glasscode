@@ -247,6 +247,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `state.json` | `store` | JSON | lasting | today's rule (backup and fresh start); the manager part refuses | yes | — | — | through `mirror` |
 | `authority/machine.json` | `store` | JSON, schema v1 | lasting | refuse; what needs the machine id (sync, the words ledger) stops | no | yes: each machine has its own | — | never |
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
+| `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
 | `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
@@ -377,6 +378,7 @@ impl LayoutRow { pub fn path(&self) -> PathBuf; }
 pub fn layout() -> &'static [LayoutRow];                                       // for M22: from classes to paths
 pub fn row_of(path: &Path) -> Option<&'static LayoutRow>;                      // the longest row that matches
 pub fn same_folder(a: &Path, b: &Path) -> bool;                                // canonical, case-insensitive on macOS and Windows
+pub enum FolderForm { Folded(Vec<String>), Exact(PathBuf) } pub fn folder_form(path: &Path) -> FolderForm;  // what same_folder compares (M11)
 pub fn authority_dir() -> PathBuf; pub fn memory_dir() -> PathBuf; pub fn agent_notes_dir(key: &ProjectKey, agent: AgentKind) -> PathBuf;
 pub fn words_dir(machine: &MachineId) -> PathBuf; pub fn journal_dir() -> PathBuf; pub fn effects_dir() -> PathBuf;
 pub fn manager_work_dir() -> PathBuf; pub fn cache_dir() -> PathBuf;
@@ -387,17 +389,55 @@ pub fn manager_work_dir() -> PathBuf; pub fn cache_dir() -> PathBuf;
 pub struct ProjectKey(String); impl ProjectKey { pub fn parse(text: &str) -> Option<ProjectKey>; pub fn as_str(&self) -> &str; }
 pub struct MachineId(String);  impl MachineId  { pub fn parse(text: &str) -> Option<MachineId>;  pub fn as_str(&self) -> &str; }
 
-// glasscode_core::identity
+// glasscode_core::identity (M11)
 pub use crate::paths::{MachineId, ProjectKey};  // defined in paths (M10)
-// ProjectKey: "glasscode-3f9a1c": slug + 6 hex of the first alias
-pub struct Aliases { pub remotes: Vec<String>, pub roots: Vec<String>, pub paths: Vec<PathBuf>, pub project_ids: Vec<String> }
-pub enum KeyMatch { Known(ProjectKey), AskFork { candidate: ProjectKey }, New(ProjectKey) }
-pub fn resolve(dir: &Path, known: &[(ProjectKey, Aliases)]) -> KeyMatch;
+// ProjectKey: "glasscode-3f9a1c": slug of the repository's (or folder's) name + 6 hex of the sha256 of the
+// first alias (the folder's own remote, else its upstream, else its folder); more digits when that key is taken.
+// The same remote gives the same key on every machine.
+pub struct Aliases { pub remotes: Vec<String>, pub roots: Vec<String>, pub paths: Vec<PathBuf>, pub pinned: Vec<PathBuf>, pub project_ids: Vec<String> }
+// One machine's view (Projects::known): remotes and roots of every machine; paths, pinned and project_ids of this one.
+// pinned: folders the person tied to the key (the answer to AskFork), the explicit mapping.
+pub enum KeyMatch { Known(ProjectKey), AskFork { candidate: ProjectKey, fresh: ProjectKey, by: Shared }, New(ProjectKey) }
+pub enum Shared { Upstream, RootCommit, Folder }                              // what an AskFork folder shares with the candidate
+pub struct Facts { pub path: PathBuf, pub git: bool, pub remotes: Vec<String>, pub upstream: Option<String>, pub others: Vec<String>, pub roots: Vec<String>, pub shallow: bool }
+impl Facts { pub fn project_remotes(&self) -> Vec<String>; }                 // its own remotes, or its upstream when it has no other
+pub fn facts(dir: &Path) -> anyhow::Result<Facts>;                            // git: the main checkout, glasscode.repo, origin, upstream, roots;
+                                                                              // git failing on a repository is Err, never a plain folder
+pub fn matching(facts: &Facts, known: &[(ProjectKey, Aliases)]) -> KeyMatch;  // no git, but it resolves folders (paths::folder_form): not on the main thread;
+                                                                              // pinned, own remotes, upstream, root, path; a folder now holding another
+                                                                              // repository is not its old key; the first of `known` wins a tie
+pub fn resolve(dir: &Path, known: &[(ProjectKey, Aliases)]) -> anyhow::Result<KeyMatch>;  // matching(&facts(dir)?, known)
+pub struct Projects { pub keys: BTreeMap<ProjectKey, Entry> }                 // authority/projects.json; refuse, FALLS_BACK = false
+pub struct Entry { pub remotes: Vec<String>, pub roots: Vec<String>, pub machines: BTreeMap<MachineId, OnMachine> }
+pub struct OnMachine { pub paths: Vec<PathBuf>, pub pinned: Vec<PathBuf>, pub project_ids: Vec<String> }
+impl Projects {
+    pub fn known(&self, machine: &MachineId) -> Vec<(ProjectKey, Aliases)>;
+    pub fn key_of(&self, machine: &MachineId, project_id: &str) -> Option<&ProjectKey>;   // the binding
+    pub fn key_for(&self, machine: &MachineId, project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;  // the binding, else resolve
+    pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // project_remotes, roots, folder: only added;
+                                                                                                               // never a remote another key has
+    pub fn pin(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);     // the AskFork answer
+}
 pub enum WorkKind { Branch, Ticket, Pr, Review }
-pub struct WorkKey { pub project: ProjectKey, pub kind: WorkKind, pub id: String }
+pub struct WorkKey { pub project: ProjectKey, pub kind: WorkKind, pub id: String }  // "feat/login", "ENG-42", "acme/app#42"
+impl WorkKey {
+    // Review (session.review), then the PR it was started from, then its ticket (State::ticket_of), else its branch.
+    pub fn for_session(project: &ProjectKey, session: &Session, ticket: Option<&str>, pr: Option<(&str, u64)>) -> WorkKey;
+    pub fn file_name(&self) -> String;                                        // "feat-login-3f9a1c": slug + 6 hex of "<kind>:<id>"
+}
 // MachineId: random (16 hex digits), kept in authority/machine.json (MachineId::this, in store)
-pub struct Hlc { pub wall_ms: u64, pub count: u32, pub machine: MachineId }
-impl Hlc { pub fn now(last: &Hlc) -> Hlc; pub fn merge(&self, seen: &Hlc) -> Hlc; }
+pub struct Hlc { pub wall_ms: u64, pub count: u32, pub machine: MachineId }  // Ord: wall_ms, count, machine
+pub const MAX_AHEAD_MS: u64;                                                  // one hour: a stamp further ahead is quarantined
+impl Hlc {
+    pub fn zero(machine: MachineId) -> Hlc;
+    pub fn now(last: &Hlc) -> Hlc; pub fn merge(&self, seen: &Hlc) -> Hlc;   // later than every input; merge ignores a stamp too far ahead
+    pub fn too_far_ahead(&self) -> bool;                                      // also of this machine's own last stamp after its clock went back
+}                                                                             // more than MAX_AHEAD_MS: it lasts until the clock passes that stamp
+// Display and FromStr: "1763560000000.3@0123456789abcdef", for headers such as memory's at=<hlc>.
+
+// glasscode_core::github (M11)
+pub fn normalize_remote(remote: &str) -> Option<String>;  // "github.com/acme/app" for every form and alias; None for a local path
+pub fn repo_override(dir: &Path) -> Option<String>;       // the glasscode.repo setting, as repo_slug reads it
 
 // glasscode_core::caller
 pub enum Lane { Chat, Wake }
