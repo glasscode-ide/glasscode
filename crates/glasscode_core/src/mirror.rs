@@ -333,7 +333,8 @@ impl Syncer {
 
 /// This Mac, for the server: a stable local id made once, and its name.
 pub fn identity() -> (String, String) {
-    let device: Option<String> = None;
+    // One id for this machine: M10's (made from this older one when it was there, M57 step 1).
+    let device: Option<String> = crate::paths::MachineId::this().ok().map(|id| id.as_str().to_string());
     let id = device.unwrap_or_else(|| {
         let path = crate::paths::root().join("machine-id");
         std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {
