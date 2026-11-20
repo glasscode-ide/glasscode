@@ -2860,7 +2860,8 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    let mut made = brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now());
+    // v2: from v2's own stores (M56.2); v1: data.json.
+    let mut made = if ws.control.engine_v2 { brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now()) } else { brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now()) };
     // v2 (M42): what was told and still waits on the person, with its age, from code.
     if ws.control.engine_v2 {
         let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
@@ -2880,7 +2881,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let stops = brief::tour(&ws.state.manager, &ws.manager.harness.data, &ws.manager_snapshot());
+        let stops = if ws.control.engine_v2 { brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot()) } else { brief::tour(&ws.state.manager, &ws.manager.harness.data, &ws.manager_snapshot()) };
         if stops.is_empty() {
             ws.reply(r, Reply::ok("Nothing to walk through right now.", json!({ "stops": [] })));
             return;

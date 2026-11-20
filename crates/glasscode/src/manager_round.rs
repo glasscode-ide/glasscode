@@ -9,7 +9,9 @@
 //! - the outbox (`manager/outbox.json` alone, v2's [`Round::outbox`]): what the person allowed is
 //!   sent, each version once (`messages::send_claimed`);
 //! - the inbox (`manager/inbox.json`): the messenger's new messages, an urgent one from an allowed
-//!   teammate notifying at once with a holding reply in the outbox (`manager::inbox`).
+//!   teammate notifying at once with a holding reply in the outbox (`manager::inbox`);
+//! - the daily brief (`manager/brief.json`): at the time set in Settings, once a day, from v2's own
+//!   inputs ([`Workspace::v2_brief_data`]), said in the conversation.
 //!
 //! It has v2's own view of what the manager sees ([`Workspace::v2_snapshot`], from what the app has
 //! at hand) and its own way to carry out what the built-ins say ([`Workspace::v2_apply`]).
@@ -54,6 +56,10 @@ pub struct Round {
     inbox: Option<glasscode_core::manager::inbox::InboxFile>,
     inbox_at: Option<Instant>,
     inbox_busy: bool,
+    /// When each session last finished a turn (Unix seconds), from its turn reports.
+    pub finished: std::collections::BTreeMap<String, u64>,
+    /// v2's last daily brief (`manager/brief.json`), read at the first round.
+    brief: Option<glasscode_core::manager::brief::BriefFile>,
 }
 
 impl Workspace {
@@ -92,7 +98,52 @@ impl Workspace {
         if self.ci_fix.natives.is_some() {
             self.v2_send(cx);
             self.v2_inbox(cx);
+            self.v2_daily_brief(&snap, cx);
         }
+    }
+
+    /// What the brief reads, from v2's own stores: the outbox, the reviews that wait to be told
+    /// (the native review-tell), when sessions finished (their turn reports). The follow-ups come
+    /// once their built-in is v2's own.
+    pub(crate) fn v2_brief_data(&self) -> glasscode_core::manager::brief::BriefData {
+        glasscode_core::manager::brief::BriefData {
+            followups: Vec::new(),
+            outbox: self.round.outbox.as_ref().map(|o| o.messages.clone()).unwrap_or_default(),
+            tells: self.ci_fix.natives.as_ref().map(|n| n.pending_tells()).unwrap_or_default(),
+            finished: self.round.finished.clone(),
+            heartbeat: glasscode_core::model::now(),
+        }
+    }
+
+    /// The daily brief built-in (v2): at the time set in Settings, once a day.
+    fn v2_daily_brief(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        use glasscode_core::manager::handover::{self, Owner, Rule};
+        if handover::owner(Rule::Brief, self.manager_mode(), &|id| self.builtin_on(id)) != Owner::V2 {
+            return;
+        }
+        let now = glasscode_core::model::now();
+        let file = self.round.brief.get_or_insert_with(|| {
+            use glasscode_core::store::Store as _;
+            glasscode_core::manager::brief::BriefFile::load().unwrap_or_default()
+        });
+        let today = glasscode_core::day::iso(glasscode_core::day::local(now as i64));
+        let minutes = glasscode_core::manager::brief::parse_clock(&glasscode_core::day::clock(now as i64)).unwrap_or(0);
+        if !glasscode_core::manager::brief::due_after(&self.state.manager, file.last.as_ref(), &today, minutes) {
+            return;
+        }
+        let made = glasscode_core::manager::brief::build_from(&self.state.manager, &self.v2_brief_data(), snap, now);
+        let text = if made.text.trim().is_empty() { "Nothing to report today.".to_string() } else { made.text.clone() };
+        let file = self.round.brief.get_or_insert_with(Default::default);
+        file.last = Some(made);
+        let kept = file.clone();
+        std::thread::spawn(move || {
+            use glasscode_core::store::Store as _;
+            if let Err(err) = kept.save() {
+                log::warn!("manager: the brief could not be kept ({err})");
+            }
+        });
+        self.chat_post_line(false, text.clone());
+        self.notify_manager("Today's brief".to_string(), text, cx);
     }
 
     /// v2's outbox changed: kept (off the main thread), and shown where v1's page still reads it
@@ -381,6 +432,9 @@ impl Workspace {
 
     /// A session's turn ended (its report): the end of what it said, for what the manager sees.
     pub(crate) fn v2_turn_ended(&mut self, report: &glasscode_core::turns::TurnReport) {
+        if report.end == glasscode_core::turns::TurnEnd::Completed {
+            self.round.finished.insert(report.session.clone(), report.ended_ms / 1000);
+        }
         let said = report.question.clone().filter(|q| !q.trim().is_empty()).unwrap_or_else(|| tail_of(&report.last_reply, REPLY_CHARS));
         if !said.trim().is_empty() {
             self.round.replies.insert(report.session.clone(), said);

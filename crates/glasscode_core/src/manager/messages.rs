@@ -374,7 +374,7 @@ pub fn waiting(data: &Data) -> Vec<&OutMessage> {
     waiting_in(&data.outbox)
 }
 
-fn waiting_in(outbox: &[OutMessage]) -> Vec<&OutMessage> {
+pub(crate) fn waiting_in(outbox: &[OutMessage]) -> Vec<&OutMessage> {
     let mut waiting: Vec<&OutMessage> = outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
     waiting.sort_by_key(|m| m.created);
     waiting
