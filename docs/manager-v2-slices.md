@@ -248,7 +248,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Tests:** none; this is measurement.
 - **Verify:** each script runs in a fresh scratch home; the count of live prompts is at most 40.
 - **Demonstration:** the filled proofs document.
-- **Server:** P03 and P05 are repeated in a tmux session on the Docker test server (`script/test-server/run.sh`), with stand-ins where no login is possible.
+- **Server:** moved to M02 (M01 run of 2026-11-19 and 2026-11-20). Today's `fake-claude` emits only four events and ignores hook output, and the shared `glasscode-test-server` container was in use by another run; M02's stand-ins replay M01's recordings.
 - **Windows:** P07 notes "no sandbox"; P05 and P03 run once on the Windows machine of the owner (O9).
 - **Addresses:** exec-30, alt-m3, land-m2 (in part)
 
@@ -270,7 +270,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Tests:** the kit's own tests, for example `home_builds_two_clones_of_one_repo`, `virtual_clock_dst_gap`, and stand-ins that replay a recorded turn byte for byte.
 - **Verify:** `cargo test --locked -p glasscode_core --features testkit -- --test-threads=1`.
 - **Demonstration:** none.
-- **Server:** the stand-ins also run inside the Docker test server.
+- **Server:** the stand-ins also run inside the Docker test server, and M01's Server line runs here. P03 (brief by the SessionStart hook on start and resume) and P05 (the turn cases) are repeated in a tmux session there, with the stand-ins replaying M01's recorded events. M02 uses a container of its own name and port, never the shared `glasscode-test-server`.
 - **Windows:** the stand-ins have `.cmd` twins.
 - **Addresses:** exec-4, events-24, trust-17, mem-21, land-14, ops-23, exec-m4
 
@@ -494,10 +494,11 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - a pointer to the repository's own `AGENTS.md` and `CLAUDE.md`, which are not copied (mem-19).
 
      Agent notes are never included. The manager's own brief holds only the list of projects with one line each; details come on demand (mem-m4).
-  2. **Delivery**, by the result of P03:
-     - Claude: `--append-system-prompt` at start; on resume and after compaction, a `SessionStart` hook prints the current brief as `additionalContext`.
-     - Codex: `developer_instructions`.
-     - The fallback path is written in P03.
+  2. **Delivery**, by the result of P03: a `SessionStart` hook prints the current brief as `additionalContext` on both CLIs, at start and on resume (and after compaction for Claude).
+     - `--append-system-prompt` and Codex `developer_instructions` are stale on resume (P03), so they carry Glasscode's fixed instructions only, never the brief.
+     - Each brief names its memory commit and says that it replaces every earlier brief, because older ones stay in the conversation until a compaction.
+     - A brief stays under 10,000 characters (Claude's `additionalContext` cap).
+     - **Dependency:** the Codex hook runs only when trusted through `hooks.state` in the account's `config.toml` (P06). M20.2 writes that one trust entry itself, with the hash from app-server `hooks/list`, and M22 later owns all Glasscode hook trust. Until then a Codex session gets the brief at start only, and changes go in the first lines of the next prompt Glasscode sends (P03's fallback).
   3. **Search.** BM25 over heading sections, with:
      - identifiers split (camelCase, snake_case, paths);
      - glossary synonyms;
@@ -649,7 +650,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - **Codex flags:**
        - the person profile as today;
        - automation: `workspace-write` with network per the allowlist rule;
-       - automation commits (decided on P07): the profile is a Codex permission profile (`default_permissions` and `[permissions.<name>.filesystem]`, written as inline tables), with `write` for the session's own repository's git metadata only. That is `<repo>/.git/worktrees/<name>`, the common dir's `objects`, `refs` and `logs`, and `packed-refs` with `packed-refs.lock`. Nothing else of `.git` is writable: not `config`, not `hooks`. Other worktrees are denied one by one, never through their parent folder; the credential paths are denied by absolute path, never by a deny glob (P07);
+       - automation commits (decision O16 on P07, narrowed in M01): the profile is a Codex permission profile (`default_permissions` and `[permissions.<name>.filesystem]`, written as inline tables), with `write` for the session's own git metadata only: `<repo>/.git/worktrees/<name>`, `<repo>/.git/objects`, `refs/heads/<own branch>` and its `.lock`, and `logs/refs/heads/<own branch>`. Not `refs` or `logs` as a whole (they let a session move any branch), not `packed-refs`, `config` or `hooks`. Other worktrees are denied one by one, never through their parent folder; the credential paths are denied by absolute path, never by a deny glob (P07). Test: `automation_profile_cannot_move_other_branches`;
        - quarantine: network off;
        - `danger-full-access` and the bypass flags refused for anything but the person;
        - worktrees no longer pre-trusted for automation and quarantine (trust-19);
@@ -668,7 +669,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   5. **`PermissionRequest` hook** (D12). `glasscode hook permission` sends `tool_name` and `tool_input` to the app. The gate answers allow, deny or nothing within 2 s. It never returns `updatedPermissions`, and it declines a command with an operator, a substitution or a redirection.
   6. **Allow-commands.** A project's approved allow-commands are compiled into Claude's allow rules at launch, so allowed commands never prompt.
   7. **`trusted_author`**: the person, teammates confirmed in the app, or GitHub author association `OWNER`, `MEMBER` or `COLLABORATOR`.
-  8. **Tokens.** `GH_TOKEN` is not put into automation or quarantine sessions; they use `gh`'s own login (trust-m4).
+  8. **Tokens and `gh`** (changed by P07). `GH_TOKEN` is not put into any session (trust-m4). `gh` cannot start inside either CLI's sandbox, because `~/.config/gh` is a Credentials path. The person profile runs `gh` outside the sandbox: Claude `sandbox.excludedCommands: ["gh"]`, Codex's `on-request` approval. This is guarded. Automation and quarantine sessions get no `gh`: their forge reads and writes are Glasscode ops (D13, M23).
   9. **The app's own git calls** on worktrees pass `-c core.hooksPath=/dev/null -c core.fsmonitor= -c core.sshCommand=ssh` and ignore worktree-local values of dangerous keys (trust-m7).
   10. **Claude's auto-memory** is redirected to `agent-notes/<key>/claude/` per P04 (D19), after a one-time copy of the old folder. Codex memories are off for Careful and local-only projects.
 - **Tests:**
@@ -707,7 +708,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - Read the protection of the default branch at project setup and during moving in.
      - Store the facts in the authority store and show a line per project: "Forge enforces: review before merge, no force-push, no bypass".
      - Autopilot's push capability is available only where all three hold.
-  5. **Brokered push** (D13), only if P14 passed and the owner chose it (O7): `git.push`, `git.fetch` and `pr.open` as gated ops for automation sessions whose sandbox has no route to the forge.
+  5. **Brokered push** (D13), only if P14 passed and the owner chose it (O7): `git.push`, `git.fetch` and `pr.open` as gated ops for automation sessions whose sandbox has no route to the forge. A Claude session can move any local branch tip (P07), so `git.push` pushes only the session's own branch, and only commits that session made (checked against the effect ledger), never a tip it found.
 - **Tests:**
   - `auto_review_input_is_data_only`;
   - `auto_review_posts_only_after_card`;
@@ -1444,6 +1445,8 @@ The main agent stops the plan, and the owner decides, on the stop conditions of 
 | O11 | Onboarding questions and "finds work" in release 1 | **Accepted 2026-11-19:** The study pass and its questions in release 1 (M54); finding work after it (M60) | M54 |
 | O12 | Where the manager lives | **Decided 2026-11-19:** one manager, present on the Mac and the server, acting from one home at a time and moving by itself (D5). Automatic is the default once a server is paired, with Always on the server and Always this Mac as choices. | M57, M58 |
 | O14 | Approvals from the phone and the glasses | **Deferred (2026-11-19)** to the separate phone and Meta glasses plan. Until then, approvals are answered in the Mac app only, and phone input stays tier 2. | — |
+| O15 | P11: the fresh wake of Codex measured above 20,000 tokens. What does wave 5's wake lane run on? | **Decided 2026-11-19 by the main agent on the owner's delegated authority; awaiting the owner's confirmation:** waves 1 to 4 continue; the wake lane runs on Claude's cheapest model; a Codex wake lane needs the three trim keys of P11 and a re-measure at or under 20,000 tokens (it measured 22,542, so it stays off) | M50, M51 |
+| O16 | P07: Codex automation sessions cannot commit inside the sandbox. May they write their repository's git metadata? | **Decided 2026-11-19 by the main agent on the owner's delegated authority; awaiting the owner's confirmation:** yes, the session's own metadata only. M01 narrowed it to the gitdir, `objects`, and the own branch's ref, lock and log, because `refs` as a whole let a session move any branch | M22 |
 | O13 | Should `glasscode` typed in a terminal outside Glasscode keep full rights, as today? (Any program can claim to be that terminal.) | **Accepted 2026-11-19:** No: as a security fix for everyone, commands from other terminals may read, and anything else waits on a card in the app. Commands typed in a Glasscode shell tab keep full rights, because the app sees the keys. | M13 |
 
 ## 12. Traceability: requirements to slices and tests

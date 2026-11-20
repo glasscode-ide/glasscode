@@ -103,13 +103,5 @@ json.dump(j, open(f, "w"), indent=2)
 PY
 }
 
-# Replace personal values in a capture before it is quoted in the doc.
-scrub() {
-  sed -E \
-    -e "s#$HOME#~#g" \
-    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g' \
-    -e 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g' \
-    -e 's/(sk-ant-|sk-|gh[pousr]_)[A-Za-z0-9_-]{8,}/<token>/g'
-}
 
 ms_now() { python3 -c 'import time; print(int(time.time()*1000))'; }

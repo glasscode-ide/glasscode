@@ -29,7 +29,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **"Docs only, not run"** marks a statement that rests on the vendor docs (code.claude.com, learn.chatgpt.com, read 2026-11-19) or on strings in the CLI binary, and that no run in this proof checked. Everything else was measured.
 - **Raw captures** (transcripts, rollouts, hook logs, screens) stay on the owner's Mac under the scratch folders (`~/.glasscode-proofs/<proof>/raw/`). They are not committed (rule 13). M02's stand-ins can be recorded from them.
 
-**Prompts used: 38 of 40** (2026-11-19 and 2026-11-20). Two more tally lines reached no model and count 0: a Codex start whose keys went into an update dialog, and a P05 run whose step list did not parse. Each has a correction line in the tally.
+**Prompts used: 40 of 40** (2026-11-19 and 2026-11-20), counting every model turn that a message started. That includes P05's subagent hand-back turn, which no tally line has, and P16's receiver turn. Two more tally lines reached no model and count 0: a Codex start whose keys went into an update dialog, and a P05 run whose step list did not parse. Each has a correction line in the tally.
 
 | Proof | Prompts | What they were |
 |---|---|---|
@@ -37,16 +37,18 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 | P02 | 2 | `codex exec` (the wake), `codex exec resume` |
 | P03 | 6 | Claude: start, resume, resume with the snapshot off, `/compact`, the question after it; Codex: the resume with a SessionStart hook |
 | P04 | 3 | Claude redirect; Codex memories on and off |
-| P05 | 5 | interrupt, API error, two `kill -9` tries, the continuation |
+| P05 | 6 | interrupt, API error, two `kill -9` tries, the continuation, and the hand-back turn it caused |
 | P06 | 2 | Codex TUI start and resume (also P03's Codex start and first resume) |
-| P07 | 3 | Claude person profile twice (the first had two script faults), automation profile (with P14) |
+| P07 | 4 | Claude person profile twice (the first had two script faults), automation profile (with P14), and the person session resumed (Keychain control, git metadata, exec-30's stream-json resume) |
 | P10 | 4 | proxy, normal and force, Claude and Codex |
 | P11 | 2 | Claude default model; Codex with the trim keys |
 | P13 | 3 | TUI turn with an approval; TUI turn; the second client's steer |
 | P15 | 3 | Claude, Codex default, Codex with `tool_timeout_sec=900` |
 | P16 | 3 | accept (sender, receiver's turn), refuse (sender) |
 
-**Usage.** On 2026-11-20 the scratch account, which shares the person's Claude plan, showed "You've used 79% of your weekly limit". The last `rate_limit_event` read `seven_day.utilization: 0.78`, `status: allowed_warning`. The proofs' own prompts were small haiku turns; the use is the team's as a whole.
+**Usage.** The proofs' prompts were small turns of the cheapest models. The account's usage readings are not recorded here (rule 13).
+
+**The person's skill list went out in some runs.** The Codex runs of P04, P06, P10 and P13 did not pass `-c skills.include_instructions=false`, so their prompts carried the names and descriptions of the person's skills in `~/.agents/skills` (see P02). P02, P11 and P15 passed it.
 
 **Owner steps** (to be batched by the main agent):
 - **P17**: three sleep cases with `p17-sleep.sh`.
@@ -55,7 +57,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **M01's Windows line**: P03 and P05 on the owner's Windows machine.
 
 **Could not verify in this run:**
-- **Docker test server.** The Server line (P03 and P05 in a tmux session on `script/test-server` with stand-ins) was not run. tmux is not installed on this Mac, and the person's containers were left alone.
+- **Docker test server.** The Server line (P03 and P05 in a tmux session on `script/test-server` with stand-ins) did not run in M01; it moves to M02. The image does install tmux, and Docker runs here. The reasons it moved are these. The shared `glasscode-test-server` container was in use by another run, and `run.sh` removes any container of that name first. Today's `fake-claude` emits only `SessionStart`, `UserPromptSubmit`, `Notification` and `Stop`, and ignores hook output, so it cannot show a brief or a turn end beyond tmux plumbing. M02's stand-ins replay the events recorded here, and M02 now runs the Server line with them (slices, M01 and M02).
 - **Windows.**
 - **Brokered push.** P14's prototype op was not built.
 - **Claude, cut mid-turn by a quit** (P10).
@@ -63,6 +65,9 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **`PermissionDenied`** (P05: only auto mode's classifier emits it).
 - **The `!` negation** (P07).
 - **The live sleep window** (P17).
+- **P02's pass rule at run time:** `ALL_TOOLS`, and whether any model-visible tool reaches the network.
+- **P07, the Claude automation profile:** the Keychain control and the git metadata probes ran in the person profile only. The narrowed Codex profile ran under `codex sandbox`, not in a session.
+- **P13's isolation:** the shared Codex daemon (a bare `--remote unix://`), and killing a server's process group during a turn.
 
 ## P01 The Claude brain profile
 - **Method.** Start `claude -p --input-format stream-json --output-format stream-json --verbose --restricted --tools "" --strict-mcp-config --mcp-config <file> --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none --disable-slash-commands`, with a stub MCP server that lists two tools. Send one user line. Repeat with `--tools ToolSearch` added.
@@ -86,7 +91,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   |---|---|---|
   | `system/init` `tools` | `["mcp__glasscode__note","mcp__glasscode__status"]` | `["ToolSearch","mcp__glasscode__note","mcp__glasscode__status"]` |
   | `slash_commands`, `skills` | `[]`, `[]` | `[]`, `[]` |
-  | `apiKeySource` | `"none"` (subscription; `claude auth status`: `authMethod: claude.ai`, plan `max`) | `"none"` |
+  | `apiKeySource` | `"none"` (subscription; `claude auth status`: `authMethod: claude.ai`) | `"none"` |
   | Calls reaching the stub | 1 (`tools/call status`) | 1 (after one ToolSearch call) |
   | Answer | `STUB-STATUS-OK-7731` | `STUB-STATUS-OK-7731` |
   | Spawn to `init` | 651 ms | 457 ms |
@@ -123,7 +128,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     | `--disable shell_tool --disable apps --disable plugins --disable multi_agent --disable memories` | `apply_patch`, `list_mcp_resource_templates`, `list_mcp_resources`, `read_mcp_resource`, `view_image` |
     | the same with `-c sandbox_mode="read-only" -c sandbox_workspace_write.network_access=false` and the three `mcp_servers.glasscode.*` keys | the same |
 
-    - No `collaboration.*` or agent-spawning tool is visible with any set.
+    - No `collaboration.*` or agent-spawning tool is visible **in prompt-input** with any set. That does not show the pass rule: prompt-input leaves out the deferred tools (next line), and the live run did not record `ALL_TOOLS`. **Not verified.**
     - The MCP server's tools are *deferred*. They do not appear in prompt-input ("Some deferred nested tools may be omitted from this description. They are still available on the global `tools` object and listed in `ALL_TOOLS`"), so only the live run shows them.
     - `apply_patch` stays. Neither `-c include_apply_patch_tool=false`, `-c tools.apply_patch=false` nor `--disable code_mode_host` removes it.
     - **New finding.** Even with a scratch `CODEX_HOME`, the prompt lists the person's own skills from `~/.agents/skills` (skill root `r0`, 7 skills on this Mac). `-c skills.include_instructions=false -c skills.bundled.enabled=false` removes the list (42,837 to 38,353 characters). The brain profile needs both keys.
@@ -132,7 +137,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - `exec resume <thread>` kept the thread (the same `thread_id`) and answered the earlier marker.
     - Asked to create `probe.txt` with `apply_patch`, it answered "writing is blocked by the read-only sandbox". stderr showed `patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings`, and no file was written.
     - The login was ChatGPT (`codex login status`: "Logged in using ChatGPT"; no API key in the `env -i` environment).
-  - **Fallback applied.** The invariant is "read-only sandbox, network off; `apply_patch` and `view_image` are visible but cannot write, and no tool reaches the network". Design D4 and section 7 now say so, and D4 adds the two skills keys.
+  - **Fallback applied.** The invariant is "read-only sandbox, network off; `apply_patch` and `view_image` are visible but cannot write" (shown: the write was refused). Design D4 and section 7 now say so, and D4 adds the two skills keys. **Not verified:** that no model-visible tool reaches the network outside the sandbox. Codex's web search was not checked, and `codex features list` shows `browser_use` and `computer_use` as stable and on. M50 also passes `--disable browser_use --disable computer_use`, and checks the brain's tool list from `ALL_TOOLS` at its first start, not from prompt-input. The P02 method names `--ignore-user-config --ignore-rules`, which `prompt-input` does not accept; the probe used the `-c` forms of the sandbox keys, and the live run passed both flags.
 
 ## P03 Delivering the memory brief to interactive sessions
 - **Method.**
@@ -241,7 +246,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - `Notification.notification_type` takes values such as `permission_prompt`, `idle_prompt`, `auth_success`, `elicitation_dialog`, `agent_needs_input` and `agent_completed`.
     - `prompt_id` is a common field.
     - If the interrupt case confirms it, an interrupt shows no `Stop`, so M30 closes it from the watchdog (the terminal back at the prompt with the turn open) or from the transcript's interrupt marker.
-- **Result, the cases that need a turn: pass with the watchdog for two of them** (5 prompts, haiku, 2026-11-20). Script: `p05-hooks.sh <claude-dir> <codex-home> <scratch> interrupt|apierror|kill9|continue`. Every run had all the events of `claude-hooks.py`:
+- **Result, the cases that need a turn: pass with the watchdog for two of them** (6 prompts with the hand-back turn, haiku, 2026-11-20). Script: `p05-hooks.sh <claude-dir> <codex-home> <scratch> interrupt|apierror|kill9|continue`. Every run had all the events of `claude-hooks.py`:
 
   | Case | Events, in order (ms after `UserPromptSubmit`) | How M30 closes the turn |
   |---|---|---|
@@ -258,7 +263,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **`PermissionRequest`** (seen in P07's `-p` runs, with no approval surface): `tool_name`, `tool_input`, `permission_suggestions` (Claude's own suggested rules, written as `//<absolute path>/**`), `permission_mode`, `prompt_id`, `effort`, and no `tool_use_id`, as the docs say.
   - **`PermissionDenied`** fires only for denials by auto mode's classifier (docs). No run produced one, so it is still docs only, not run.
   - **The pass rule holds:** every case closes with one cause, from a hook or from the watchdog of the fallback (interrupt, crash).
-  - **Server and Windows lines of M01** (P03 and P05 in a tmux session on the Docker test server with stand-ins, and once on the owner's Windows machine) were not run: see "Could not verify".
+  - **Server and Windows lines of M01** (P03 and P05 in tmux on the Docker test server, and once on the owner's Windows machine): the Server line moves to M02, and the Windows run is an owner step (see "Run notes").
 
 ## P06 Codex turn ends and hooks without the trust bypass
 - **Method.** In a Codex session started by Glasscode, install a hook through `-c hooks…` and through a `hooks.json` in `CODEX_HOME`, and see whether it runs without `--dangerously-bypass-hook-trust`. Read the rollout for `task_complete`, `turn_aborted` and the user-message items. Check the `notify` setting: if a `notify` program is already configured, find out whether Glasscode can add its own without replacing it.
@@ -341,9 +346,10 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Read or write `authority/policy.json`; read `state.json` | refused | refused |
   | Read `memory/MEMORY.md` / write it | allowed / refused | allowed / refused |
   | Write `agent-notes/proj/codex/MEMORY.md` | allowed | allowed |
-  | Read `.env` in the worktree (deny glob `:workspace_roots."**/.env*"`) | refused | refused |
-  | List `~/.ssh`, read a key in it, read `~/.config/gh/hosts.yml` | refused | refused |
-  | Reach the Keychain service (`security find-generic-password -s <no such item>` answers "could not be found") | **reached** | **reached** |
+  | Read `.env` in the worktree (first by the deny glob `:workspace_roots."**/.env*"`; in the 2026-11-20 runs by its absolute path) | refused | refused |
+  | List `~/.ssh`, read `~/.config/gh/hosts.yml` | refused | refused |
+  | Read a key in `~/.ssh` by name (`id_ed25519`, `id_rsa`, `id_ecdsa`) | not tested: no file of those names on this Mac, and the folder listing is refused | the same |
+  | Keychain: `security default-keychain` / `security list-keychains` (control: both exit 0 outside the sandbox) | **refused**: "SecKeychainCopyDefault: A default keychain could not be found" / exit 0, listing nothing | the same |
   | `git status` in the linked worktree | allowed | allowed |
   | `git commit` in the linked worktree | **refused**: `Unable to create '<repo>/.git/worktrees/feature-a/index.lock'` | refused |
   | `gh api rate_limit` | **refused**: `failed to read configuration: open ~/.config/gh/config.yml: operation not permitted` | refused |
@@ -357,13 +363,33 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Denying a parent breaks lookups.** Denying `worktrees/` and allowing one worktree under it breaks `cd` into the own worktree ("Not a directory"). M22 denies sibling worktrees one by one, never their parent.
   - **A deny-read glob stops all new folders in the workspace.** `"**/.env*" = "deny"` under `:workspace_roots` makes Codex 0.167 refuse every new directory there, so `cargo build` fails. M22 cannot use the glob. It denies the `.env` files that exist at launch by absolute path, so a `.env` created later in the session is not covered. Section 7's row for credentials now says so.
   - **`.git` is read-only inside Codex's workspace sandbox** by default, in a linked worktree and in a plain clone alike ("Unable to create '<clone>/.git/index.lock'"). A first try with `write` on the gitdir's `worktrees/<name>`, `objects`, `refs` and `logs` printed `Unable to create '<repo>/.git/packed-refs.lock'`. That line was taken for a failure, but it is only git's warning: the 2026-11-20 re-run below shows the commit succeeds.
-  - **Decision (main agent, with the owner's authority, 2026-11-19), tested 2026-11-20** (no prompt; `p07-profile.sh … codex automation`). The automation profile makes the session's own repository's git metadata writable, and nothing else: the worktree's gitdir (`<repo>/.git/worktrees/<name>`), the common dir's `objects`, `refs` and `logs`, and `packed-refs` with its `.lock`. Commits stay local, so this does not leave the Mac.
-    - With those five entries as `write` in the `[permissions.<name>.filesystem]` table, `git commit` in the linked worktree ran without a warning (`COMMIT-OK`). With only the first four it also committed, with the `packed-refs.lock` warning.
-    - With the same profile, writes stayed refused to the main checkout's files, `.git/config`, `.git/hooks/pre-commit`, the other worktree, `authority/policy.json` and the home folder.
-    - The test used a permission profile (`default_permissions` and `-P`), because `codex sandbox` takes only `-P`, and `sandbox_workspace_write.writable_roots` is ignored under `-P :workspace` (the commit stayed refused). A session started with `--sandbox workspace-write --add-dir <path>` was not tried. M22 uses the permission-profile form that was tested.
-    - Design section 7 and M22 now say so.
-  - **`gh` cannot start** when `~/.config/gh` is denied, because it reads `config.yml` first. Person sessions get `GH_CONFIG_DIR` pointed at a Glasscode-made copy holding `config.yml` only, never `hosts.yml` (the token stays in the Keychain), or no `gh` at all. Automation sessions get no `gh` (D13 and P14).
-  - **The Keychain is reachable through its service**, although `~/Library/Keychains` is denied. Whether a stored secret can be read depends on the item's own access list, and this proof did not try to read one. Section 7 now says the sandbox denies the Keychain *files*, not the Keychain service.
+  - **Decision O16 (the main agent, on the owner's delegated authority, 2026-11-19; owner to confirm), narrowed and tested 2026-11-20** (no prompt; `p07-profile.sh … codex automation`, output in `raw/codex-automation.out`).
+    - **The decision.** The automation profile makes the session's own repository's git metadata writable, and nothing else. Commits stay local, so this does not leave the Mac.
+    - **What failed as decided.** With `write` for the gitdir, `objects`, `refs` and `logs` (and `packed-refs`), the commit works, but the session can also move **any** branch: `git update-ref refs/heads/main HEAD` and `refs/heads/feature-b` both succeeded (the reviewer found this first).
+    - **The narrowed profile.** The committed script writes only these, as `write` in `[permissions.<name>.filesystem]`:
+      - `<repo>/.git/worktrees/<name>`;
+      - `<repo>/.git/objects`;
+      - `<repo>/.git/refs/heads/<own branch>` and its `.lock`;
+      - `<repo>/.git/logs/refs/heads/<own branch>`.
+
+      No `packed-refs`: git then prints "Unable to create '…/packed-refs.lock'" and commits anyway. With `packed-refs` writable, a session could rewrite the refs that are packed.
+
+      | Probe under the narrowed automation profile (`codex sandbox -P glasscode`) | Result |
+      |---|---|
+      | `git commit` in the linked worktree | allowed |
+      | `git update-ref refs/heads/feature-b HEAD` (the other worktree's branch) / `refs/heads/main` | refused: "cannot lock ref … Unable to create '…/refs/heads/feature-b.lock': Operation not permitted" / the same for `main` |
+      | `git branch p07-new-branch` | refused |
+      | write `<repo>/.git/config`, `<repo>/.git/hooks/pre-commit`, the main checkout's `README.md` | refused ("Operation not permitted") |
+      | write the other worktree, `authority/`, the home folder | refused |
+
+    - **Limits of the test.** It ran with `codex sandbox -P`, never in a session. `codex sandbox` takes only `-P`, and `sandbox_workspace_write.writable_roots` was ignored under `-P :workspace`. A session's profile is the same permission profile, but that was not run, and neither was `--add-dir`.
+    - Design section 7 and M22 now carry the narrowed list, and slices section 11 has the decision as O16.
+  - **`gh` cannot start** when `~/.config/gh` is denied, because it reads `config.yml` first. By the docs, `gh`'s TLS can also fail under Seatbelt. **The fallback is applied, one way per profile:**
+    - **person:** `gh` runs outside the sandbox. For Claude that is `sandbox.excludedCommands: ["gh"]`, which the docs call "a convenience, not a security boundary". For Codex it is the `on-request` approval to run it unsandboxed. It is guarded.
+    - **automation and quarantine:** there is no `gh`. Forge reads and writes are Glasscode ops (D13).
+
+    Design section 7 has the row, and M22 step 8 says so.
+  - **The login keychain is not reachable inside Codex's sandbox.** `security default-keychain` exits 0 outside and fails inside: "A default keychain could not be found". The reviewer's control was a lookup of an existing item, exit codes only. It failed inside with "One or more parameters passed to a function were not valid", and failed the same way with the `~/Library/Keychains` deny removed, so the sandbox blocks the service itself. An earlier probe here looked up a missing item. It could not tell "searched" from "search failed", and its "reached" was wrong.
   - **Claude, by the docs (docs only, not run).**
     - Claude's sandbox covers shell commands only. File tools, MCP servers and hooks run outside it.
     - A `sandbox.filesystem.denyRead` entry does not stop the Read tool. A `permissions.deny` rule `Read(<path>)` does, and it also blocks Edit and Write on that path. M22 therefore writes each Credentials and Authority path twice: once as a sandbox `denyRead`, once as a `permissions.deny` rule.
@@ -390,8 +416,10 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Bash: read `authority/policy.json`, `state.json`, `.env`, `~/.ssh`, a key in it, `~/.config/gh/hosts.yml` | refused ("Operation not permitted") | refused |
   | Bash: write `authority/policy.json` / write `memory/MEMORY.md` | refused / refused (the Edit deny rules also bind the sandbox) | refused / refused |
   | Bash: read `memory/` / write agent notes | allowed / allowed | allowed / allowed |
-  | Bash: reach the Keychain service | reached | reached |
+  | Bash: Keychain, `security default-keychain` / `list-keychains` (control: both exit 0 outside) | **refused**: "A default keychain could not be found" / exit 0, listing nothing (resumed person session, 2026-11-20) | not run in the automation profile |
   | Bash: `git status`, `git commit` in the linked worktree | allowed, allowed | allowed, allowed |
+  | Bash: write `<repo>/.git/config`, `.git/hooks/pre-commit`, the main checkout's `README.md` | refused (resumed person session) | not run |
+  | Bash: `git update-ref` of the other worktree's branch and of `main`; `git branch <new>` | **allowed** (resumed person session) | not run |
   | Bash: `gh api rate_limit` | refused (`failed to read configuration: open ~/.config/gh/config.yml`) | refused |
   | Bash: `git ls-remote https://github.com/…` | allowed | **refused**: "CONNECT tunnel failed, response 403", with `<sandbox_violations> deny network-outbound github.com:443` |
   | Bash: `curl https://github.com` / `curl https://registry.npmjs.org/` | — | refused (403) / allowed |
@@ -404,7 +432,13 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   What it shows:
   - **Pass for both profiles.** Work in the own worktree runs, credentials and authority files are refused for both the shell and the file tools, and hooks arrive inside the sandbox (`PreToolUse` and `PostToolUse` for every tool call). The login works from the account folder (`apiKeySource: none`).
   - **`git commit` in a linked worktree works** in Claude's sandbox. The worktree's gitdir in the main repository was writable without an entry for it.
-  - **`gh` cannot start** inside either profile, as for Codex (`~/.config/gh` is a Credentials path). By the docs, `gh`'s TLS can also fail under Seatbelt. Person sessions therefore get `gh` outside the sandbox (the guarded case of the fallback), and automation sessions get no `gh` (D13).
+  - **But the session can move any branch.** In the resumed person session, `git update-ref` moved the other worktree's branch and `main`, and `git branch` created one. `.git/config`, `.git/hooks` and the main checkout stayed refused.
+    - So M22 and M23 treat every local branch tip as untrusted: before a brokered push, Glasscode compares the branch it pushes with the commits that session made.
+    - For Claude no narrower grant was found; the sandbox has no per-ref setting.
+    - Section 7 says so.
+  - **The Keychain is not reachable in Claude's sandbox either** (the control above).
+  - **exec-30's "resume of a stream-json chat", Claude half: pass.** `claude -p --input-format stream-json --resume <id>` of the person session, with the same settings, answered which file it had written in the earlier turn (`agent-notes/proj/claude/MEMORY.md`). Then it ran the probes (1 prompt).
+  - **`gh` cannot start** inside either profile, as for Codex (`~/.config/gh` is a Credentials path). The resolution is the one under the Codex half above: outside the sandbox for the person profile (guarded), none for automation (D13).
   - **The automation allowlist holds** (P14): `github.com` is refused through the sandbox's proxy while a listed registry is reached.
   - **Not run:** the `!` negation for a home-relative path. The docs mention `Read` and `Edit` rules "whose pattern starts with `!`" only for managed rules, and M22 does not plan to use one.
   - M01 notes "no sandbox" on Windows.
@@ -455,7 +489,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The facts are written down for the lifetime rules of design section 10.
 - **Waits.** M41.
 - **Result: proxy partly measured; the owner step is prepared** (4 prompts, 2026-11-20). Script: `p10-quit.sh <claude-dir> <codex-home> <scratch> proxy normal|force | watch`.
-  - **What the code does.** The app runs each session in a pseudo-terminal of its own (`alacritty_terminal`): the agent is a session leader on that terminal. On quit, `Workspace`'s `on_app_quit` only installs a waiting update and keeps unsaved editor text (`crates/glasscode/src/workspace.rs`). Nothing stops the sessions on purpose. A normal quit drops the terminals (SIGHUP to each agent), and a force quit closes them through the kernel (the same SIGHUP). P05 saw what Claude does on SIGHUP: `SessionEnd` with `reason: other`, exit 129.
+  - **What the code does (from reading it, not run).** The app runs each session in a pseudo-terminal of its own (`alacritty_terminal`): the agent is a session leader on that terminal. On quit, `Workspace`'s `on_app_quit` only installs a waiting update and keeps unsaved editor text (`crates/glasscode/src/workspace.rs`). Nothing stops the sessions on purpose. A normal quit drops the terminals (SIGHUP to each agent), and a force quit closes them through the kernel (the same SIGHUP). P05 saw what Claude does on SIGHUP: `SessionEnd` with `reason: other`, exit 129.
   - **Proxy, 4 prompts.** One Claude and one Codex session in `pty-drive.py`, each running `sh wait45.sh` (a 45 s foreground command) through its shell.
 
     | Agent | `normal`: the owner closes the terminal (SIGHUP) 8 s into the command | `force`: the owner is SIGKILLed |
@@ -465,7 +499,8 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 
     - **What is known.** A session whose terminal closes ends within a second, whichever way the owner goes. Codex writes `turn_aborted` into the rollout, so the reconciler can report the cut turn as `AppQuit`.
     - **Claude mid-turn.** No hook marks it. P05 showed that a `kill -9` of `claude` itself leaves its command running as an orphan; whether SIGHUP does the same mid-turn is what the owner step must show.
-    - **Lifetime rule (design section 10) without change.** Without a server, sessions do not outlive the app. 8 s into the turn, the terminal's owner either exits (`normal`) or is SIGKILLed (`force`). It then records for 20 s whether the agents and their `sleep` live on, and the last transcript and rollout lines.
+    - **Lifetime rule (design section 10) without change.** Without a server, sessions do not outlive the app.
+    - **The two Claude prompts measured nothing** about a cut turn, as the table says.
   - **Owner steps.** With the real app in a scratch `GLASSCODE_HOME`, start one Claude and one Codex session on a long task, and run `p10-quit.sh … watch` in a separate terminal. Then:
     1. quit the app (Cmd-Q), and note what `watch` prints;
     2. start the app again, open both sessions, and read their last lines;
@@ -498,7 +533,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Codex with the three trim keys of the table below (`p02-codex-brain.sh … wake-trim`) | 3: 7,415 + 7,535 + 7,592 | 22,443 (14,464 cached) | 99 | **22,542** | 6.1 s |
 
   - The trim made each request about 7,500 tokens, not the 4,700 estimated from characters: the code-mode tool block is dense. A wake with one tool call still takes three requests, so Codex stays above the limit.
-  - **Decision (main agent, with the owner's authority, 2026-11-19).** P11 gates wave 5 only; waves 1 to 4 continue. Wave 5's wake lane defaults to Claude's cheapest model (haiku: 10,727 tokens). A Codex wake lane is allowed only with the three trim keys and a re-measure at or under 20,000 tokens. **The re-measure gave 22,542, so the Codex wake lane stays off** in release 1. Design D6 now says so. The chat lane is not a fresh wake and is not gated by this rule.
+  - **Decision O15 (the main agent, on the owner's delegated authority, 2026-11-19; owner to confirm, slices section 11).** P11 gates wave 5 only; waves 1 to 4 continue. Wave 5's wake lane defaults to Claude's cheapest model (haiku: 10,727 tokens, a floor: one tool call, from a server with two tools). A Codex wake lane is allowed only with the three trim keys and a re-measure at or under 20,000 tokens. **The re-measure gave 22,542, so the Codex wake lane stays off** in release 1. Design D6 now says so. The chat lane is not a fresh wake and is not gated by this rule.
 
   The first measurement, before the trim: Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
 
@@ -517,7 +552,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 
   The trim has a price: `model_instructions_file` replaces Codex's own base instructions (how to use `exec`, `apply_patch` and the sandbox) with Glasscode's text. The brain then depends on Glasscode's instructions for tool use, which is a D4 and M50 decision. The code-mode tool block (11,313 characters) cannot be cut by any flag tried here.
 
-  **Costs without a model** (no prompt; `p11-costs.sh <claude-dir> <codex-home> <scratch> [app binary]`). The machine was an Apple M4 Pro with an APFS SSD, on macOS 27.0.1. Commands are timed from one Python process (`p11-time.py`), so the numbers include the process start (`/usr/bin/true`: p50 2.1 ms, p95 4.0 ms).
+  **Costs without a model** (no prompt; `p11-costs.sh <claude-dir> <codex-home> <scratch> [app binary]`). The machine was an Apple silicon Mac with an SSD, on macOS 27. Commands are timed from one Python process (`p11-time.py`), so the numbers include the process start (`/usr/bin/true`: p50 2.1 ms, p95 4.0 ms).
 
   | Path | p50 | p95 | Budget (design section 9) |
   |---|---|---|---|
@@ -585,7 +620,15 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Who answers.** The approval went to both clients; the first answer wins, and the TUI's own prompt closes. So a driver built on this must show the person that Glasscode answered, and must not answer while the person is looking at the prompt.
   - **Interrupting does not stop the command.** As with Claude's `kill -9` (P05), the reconciler must look at the turn's processes as well as its state.
   - **Isolation.** There is one server per socket path (above), and each server serves the account of its `CODEX_HOME`. Killing the server's process group was not tried.
-  - `--no-daemon` does not exist in 0.167's `app-server` help; `app-server daemon start|stop|…` manages a long-lived daemon instead.
+  - **`--no-daemon`.** `codex app-server` has no such flag. The top-level `codex` has one ("Run without the shared background server, even if it is already running"), and takes a bare `--remote unix://`. `daemon_auto_start` is stable and on.
+  - **A plain TUI's server** (no prompt; 2026-11-20). `codex -c check_for_update_on_startup=false` without `--remote`, for 10 s, in the scratch account A and in an empty account folder B:
+    - it started no separate app-server process and no socket in `/private/tmp/codex-daemon-<uid>/`, so the TUI's server runs inside its own process;
+    - the TUI was its own process-group leader with no children;
+    - `kill -TERM -<pgid>` ended it, and left nothing behind.
+  - **Not verified:**
+    - the shared daemon (a bare `--remote unix://` with `daemon_auto_start`);
+    - whether account folders stay separate on that daemon;
+    - killing a server's process group during a turn.
 
 ## P14 Brokered push
 - **Method.** Run an automation-profile Claude session whose sandbox network allowlist does not include github.com. Prototype `glasscode git push` as an op that pushes from the app's process with the branch rule.
@@ -596,10 +639,10 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The task finishes, and no other route reaches the forge.
 - **Fallback.** Use forge rules only (D29). Autopilot pushes only where branch protection holds.
 - **Waits.** Owner decision O7, then M23.
-- **Result: partial; the network wall holds; the brokered-op prototype is not done** (its live check is in P07's automation prompt).
-  - **The profile can be built from documented settings (docs only, not run).** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. In P07's Claude automation run (2026-11-20), `gh api rate_limit` could not start (`~/.config/gh` denied), and `git ls-remote https://github.com/…` and `curl https://github.com` were refused by the sandbox proxy ("CONNECT tunnel failed, response 403", `deny network-outbound github.com:443`), while `registry.npmjs.org` was reached. **So inside the sandbox, no route reaches the forge.** For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
+- **Result: not passed; the D29 fallback stands (O7).** The network wall held in all three tries (`gh`, `git ls-remote` over https, `curl https://github.com`), but the brokered-op prototype was not built, so "the task finishes" is not shown.
+  - **The profile can be built from documented settings (docs only, not run).** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. In P07's Claude automation run (2026-11-20), `gh api rate_limit` could not start (`~/.config/gh` denied), and `git ls-remote https://github.com/…` and `curl https://github.com` were refused by the sandbox proxy ("CONNECT tunnel failed, response 403", `deny network-outbound github.com:443`), while `registry.npmjs.org` was reached. **So inside the sandbox, none of those three tries reached the forge.** For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
   - **Other routes to the outside that are open by default.**
-    - **The claude.ai connectors of the person's account.** `claude mcp list` on the scratch account (signed in to the person's subscription) shows nine claude.ai connectors (mail, drive, calendar, an issue tracker and others), seven of them connected. Any session of that account has them unless it passes `--strict-mcp-config` (P01's init then listed only `glasscode`) or `disableClaudeAiConnectors: true`. Section 7 now requires both for automation and quarantine sessions.
+    - **The claude.ai connectors of the person's account.** `claude mcp list` on the scratch account (signed in to the person's subscription) shows the claude.ai connectors of the account, most of them connected. Any session of that account has them unless it passes `--strict-mcp-config` (P01's init then listed only `glasscode`) or `disableClaudeAiConnectors: true`. Section 7 now requires both for automation and quarantine sessions.
     - **The WebFetch and WebSearch tools** run in the CLI process, not under the Bash sandbox (docs only, not run: "the sandbox covers shell commands only"). They can read pages but carry no forge credentials. The automation profile denies them by permission rule (guarded).
     - **The browser.** Claude in Chrome is off without `--chrome`. The Glasscode browser's MCP server is added by `browser::agent_args`, and D28 already gives automation and quarantine sessions no signed-in browser.
     - **Codex** has its network off in the workspace sandbox (P07). Its web search tool was not checked.
@@ -680,7 +723,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Owner steps** (each about 3 minutes):
     1. On battery: run `p17-sleep.sh <claude-dir> <codex-home> <scratch> http://<test-server>/ 20`, wait 10 s, close the lid, wait 2 minutes, open it, then `p17-sleep.sh … report <log>`.
     2. The same on mains power.
-    3. Idle sleep: the same, but leave the Mac untouched until it sleeps by itself (`pmset -g` shows the idle sleep time; on this Mac sleep is currently "prevented by powerd, Claude, caffeinate", so the person may first need to end those).
+    3. Idle sleep: the same, but leave the Mac untouched until it sleeps by itself (`pmset -g` shows the idle sleep time; running programs can prevent idle sleep, so the person may first need to end them).
     4. Paste the three reports here. Pass needs a held window of at least 5 s with `net_ok` in it.
 
 ## Probe matrix (land-m2)
@@ -688,7 +731,8 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 Every feature of the plan that depends on a CLI surface names the probe that shows the surface is there, and the fallback when it is not. Probes run once per CLI version, at start and after an update, as M03's `cli-probe.sh` does for flags. None of them sends a prompt. The kinds of probe:
 - **help**: the flag is in `claude --help`, `codex --help` or `codex exec --help`. This is M03's `cli-flags.json`.
 - **features**: the name and stage in `codex features list`.
-- **doctor**: `claude doctor` run against the settings Glasscode would pass. It names rejected entries, such as an unknown hook event or a bad sandbox key, which an interactive start would otherwise show as a blocking dialog (P05).
+- **doctor**: `claude doctor`, run in a scratch folder whose `.claude/settings.json` holds the settings Glasscode would pass (it reads the settings files of the current folder; it has no `--settings`). In M01 it listed, with no prompt: `Invalid settings - …/.claude/settings.json › hooks.GlasscodeMadeUpEvent: Unknown hook event "GlasscodeMadeUpEvent" was ignored`. It did **not** flag an unknown `sandbox` key or an unknown top-level key, so it probes hook event names only.
+- **Unknown Codex keys pass.** `codex debug prompt-input -c glasscode_bogus_key=true hello` exits 0, and `--strict-config` is not supported for `codex debug`. So a Codex key is probed by its effect, or not at all.
 - **start**: a `claude -p --input-format stream-json` start with no user line. SessionStart hooks run and `--include-hook-events` reports them (P08, P12).
 - **prompt-input**: `codex debug prompt-input` with the flags (P02, P11).
 - **hooks/list**: app-server `hooks/list` (P06).
@@ -703,31 +747,31 @@ A failed probe turns the feature off with a visible reason naming the flag or ke
 | Claude brain on the plan, not a key (R6) | `init.apiKeySource` | at each start, `none` | brain off, with the reason shown | P01 |
 | MCP handshake of `glasscode mcp` (M34) | `server/discover` (MCP 2026-07-28) before `initialize` | the first message the stub receives | answer `initialize` only; the CLI falls back | P01 |
 | Usage windows (D6, advisory) | `rate_limit_event.unifiedWindows` | at each start, the keys present | Glasscode's own token ledger only | P01 |
-| Chat lane persistence (D8) | `--session-id`, `--resume`; Codex `exec resume` | help | replay the rollover summary | P02 |
-| Codex brain profile (M50) | `--disable shell_tool/apps/plugins/multi_agent/memories`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`, `-c skills.include_instructions=false`, `skills.bundled.enabled=false` | features, help, prompt-input (no `exec_command`, no person's skills) | the invariant "read-only sandbox, network off" (`apply_patch` and `view_image` visible) | P02 |
+| Chat lane persistence (D8) | `--session-id`, `--resume` of a stream-json session; Codex `exec resume` | help | replay the rollover summary | P02 (Codex), P07 (Claude `-p --resume`) |
+| Codex brain profile (M50) | `--disable shell_tool/apps/plugins/multi_agent/memories/browser_use/computer_use`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`, `-c skills.include_instructions=false`, `skills.bundled.enabled=false` | features, help; prompt-input for the person's skills; **`ALL_TOOLS` at the first start** for the tool list (prompt-input leaves out deferred tools) | the invariant "read-only sandbox, network off" | P02 |
 | Codex MCP calls without a prompt (M50) | `mcp_servers.<id>.default_tools_approval_mode="approve"`, `required=true` | prompt-input starts the server (`tools/list` in the stub log) | Codex brain off | P02 |
 | Codex wake within budget (D6) | `model_instructions_file`, `include_permissions_instructions`, `include_environment_context` | prompt-input size against the budget | Claude-only wakes, or a raised cap (owner) | P11 |
 | Brief to sessions (M20.2) | Claude `SessionStart` `additionalContext`, `source` `resume` and `compact`; Codex `developer_instructions` | start (a `hook_response` line); prompt-input for Codex (start only) | brief at start only, changes as the first lines of the next Glasscode prompt | P03 |
 | Fresh system prompt on resume (if used) | `--system-prompt-snapshot off` | help | the hook path | P03 |
-| Claude's auto-memory redirect (M22, D19) | `autoMemoryDirectory`, `autoMemoryEnabled` in `--settings` | doctor | native memories on, labelled as a second memory | P04 |
+| Claude's auto-memory redirect (M22, D19) | `autoMemoryDirectory`, `autoMemoryEnabled` in `--settings` | none without a prompt (doctor does not check keys); at first use, the first memory file lands outside the folder | native memories on, labelled as a second memory | P04 |
 | Codex memories off (D19) | `features.memories`, `--disable memories` | features (`memories` present, default `false`) | label in the brief; harvest as proposals | P04 |
 | Turn states (M30) | hook events `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `SessionEnd`, `CwdChanged`, `PostCompact`, `UserPromptSubmit`, `Notification` | doctor, with each event in the settings (an unknown one is "ignored") | leave the event out; M30's watchdog for the missing signal | P05 |
 | Turn text without the transcript (M30) | `Stop.last_assistant_message`, `prompt_id`, `background_tasks` | start, then the first real `Stop` of a session: check the fields | read the transcript after it settles | P05 |
 | Codex hooks without the bypass (M30) | `hooks.state."<key>".trusted_hash` in the account's `config.toml` | hooks/list shows `trusted` for each Glasscode hook | rollout tail and the reconciler | P06 |
 | Codex turn end (M30) | rollout `event_msg` `task_complete` / `turn_aborted` | schema of a recorded rollout (M02 fixtures) | the reconciler | P06 |
-| Codex `notify` (M30) | `notify` config key | doctor equivalent: `codex debug prompt-input -c notify=[…]` starts | rollout only | P06 |
-| Session profiles, Claude (M22) | `sandbox.*`, `permissions.deny`, `disableAllHooks: false`, `disableClaudeAiConnectors`, `--strict-mcp-config` | doctor; start (Glasscode's hooks run in a repository that disables hooks) | the row of section 7 becomes "guarded"; the session is marked "unreported" | P07, P08, P14 |
+| Codex `notify` (M30) | `notify` config key | none without a prompt (unknown keys pass); at the first turn, no notify line within 2 s of the rollout's `task_complete` | rollout only | P06 |
+| Session profiles, Claude (M22) | `sandbox.*`, `permissions.deny`, `disableAllHooks: false`, `disableClaudeAiConnectors`, `--strict-mcp-config` | start (Glasscode's hooks run in a repository that disables hooks); `failIfUnavailable` refuses a start without a sandbox; a rule that does not bind is **not detected** (P07's `/path` case), so M22's test checks the rule syntax (`//` for absolute paths) | the row of section 7 becomes "guarded"; the session is marked "unreported" | P07, P08, P14 |
 | Session profiles, Codex (M22) | `default_permissions`, `permissions.<name>.filesystem` and `network` (inline tables), `-P` | sandbox self-test (own worktree writable, `authority/` refused, socket connects) | `--sandbox workspace-write` without the deny rows; section 7 says guarded | P07 |
-| Cross-session messages refused (M22) | `crossSessionInbound: "refuse"` | doctor | a `PreToolUse` deny on the messaging tools (guarded) | P16 |
+| Cross-session messages refused (M22) | `crossSessionInbound: "refuse"` | none: not detected at use either (the sender sees success); M22's test checks the profile carries it | a `PreToolUse` deny on the messaging tools (guarded) | P16 |
 | Outside sessions listed (M14 reconciler) | `claude agents --json` | help | no outside sessions shown | P16 |
 | Transcripts kept (M24) | `cleanupPeriodDays` | none needed: the digest is always copied | digest only | P12 |
-| Op waits in a tool call (M34) | Codex `mcp_servers.<id>.tool_timeout_sec`; Claude's MCP timeout | doctor (key accepted) | the op returns `Waiting` with a pending id | P15 |
+| Op waits in a tool call (M34) | Codex `mcp_servers.<id>.tool_timeout_sec`; Claude's MCP timeout | none without a prompt (unknown keys pass); at use, `notifications/cancelled` arrives at the old timeout | the op returns `Waiting` with a pending id | P15 |
 | Codex driver by app-server (D14, after release 1) | `app-server --listen unix://`, `--remote unix://`, `thread/*`, `turn/*` | schema | PTY, rollout and hooks | P13 |
 | Today's session launch (M03) | Claude `--resume --session-id --model --permission-mode --settings --plugin-dir --allowedTools --mcp-config`; Codex `--model --sandbox --ask-for-approval -c resume` | help (`cli-flags.json`) | the session does not start, and says which flag | M03 |
 
 ## Stop conditions
 
-Wave 1 does not start, and the owner decides first, when any of these happens:
+The owner decides first when any of these happens. P01, P03 and P06 hold wave 1. P11 holds wave 5 only, as its own pass rule says ("stops wave 5 until the owner decides"):
 - P01 shows the brain cannot use the subscription in the restricted profile;
 - P03 has no path that delivers a current brief at start;
 - P06 shows a Codex turn end cannot be seen without the bypass;
@@ -737,4 +781,4 @@ Wave 1 does not start, and the owner decides first, when any of these happens:
 - **P01: not hit.** The brain uses the plan in the restricted profile.
 - **P03: not hit.** The SessionStart hook delivers the current brief on start, resume and compaction.
 - **P06: not hit.** In an interactive TUI session the turn end was known within 41 ms without the bypass flag: from the trusted Stop hook, `notify` and the rollout's `task_complete`.
-- **P11: hit, and decided.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each; with the three trim keys it took 22,542. Claude haiku took 10,727 and Claude's default model 9,197. It was reported to the main agent at once. The decision: waves 1 to 4 continue; wave 5's wake lane runs on Claude's cheapest model; the Codex wake lane stays off until a re-measure is at or under 20,000 (design D6).
+- **P11: hit, and decided.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each; with the three trim keys it took 22,542. Claude haiku took 10,727 and Claude's default model 9,197. It was reported to the main agent at once. Decision O15, taken by the main agent on the owner's delegated authority and awaiting the owner's confirmation: waves 1 to 4 continue; wave 5's wake lane runs on Claude's cheapest model; the Codex wake lane stays off until a re-measure is at or under 20,000 (design D6).
