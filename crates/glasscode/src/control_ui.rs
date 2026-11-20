@@ -395,6 +395,12 @@ pub struct ControlUi {
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
     pub profiles: bool,
+    /// The engine switch and the approved authority (who started which session) are read: at the
+    /// start that happens in the background, and an agent's start waits for it, so a session
+    /// restored at the start never runs without its profile (the live checks found one that did).
+    pub engine_read: bool,
+    /// The agent sessions whose start waited for that read, started once it is done.
+    pub held_starts: Vec<String>,
     /// The v2 features of the engine switch as saved (`authority/engine.json`'s `switches`): what
     /// Settings › Manager shows; a change takes effect from the next start.
     pub engine_features: std::collections::BTreeMap<String, bool>,
@@ -440,6 +446,8 @@ impl ControlUi {
             machine: None,
             expanded: HashSet::new(),
             profiles: false,
+            engine_read: false,
+            held_starts: Vec::new(),
             engine_features: Default::default(),
             profile_running: HashMap::new(),
         }
@@ -717,6 +725,21 @@ fn shell_line(args: &[String]) -> String {
 }
 
 impl Workspace {
+    /// The engine switch is read (or, with no socket, will not be: a second copy of Glasscode, a
+    /// socket that cannot be made, and its agents start as before): the held agents start, and
+    /// the one on screen takes the keys as it would have at the start (unless the person is in
+    /// something else by now).
+    fn control_engine_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.control.engine_read = true;
+        let held = std::mem::take(&mut self.control.held_starts);
+        for id in &held {
+            self.ensure_terminal(id, window, cx);
+        }
+        if self.state.active_session.as_ref().is_some_and(|active| held.contains(active)) {
+            self.focus_active_if_watching(window, cx);
+        }
+    }
+
     /// Open the socket (a named pipe on Windows), write the `glasscode` command and what tells
     /// agents about it.
     pub fn control_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -724,11 +747,13 @@ impl Workspace {
         // Another Glasscode already answers there (a second copy): leave it be.
         if sys::control::connect(&path).is_ok() {
             self.control.error = Some("Another Glasscode is running; the glasscode command talks to that one.".into());
+            self.control_engine_read(window, cx);
             return;
         }
         if let Err(e) = control::prepare_socket_dir(&path) {
             self.control.error = Some(format!("The glasscode command cannot reach this app ({e})."));
             log::warn!("control socket folder {}: {e}", path.display());
+            self.control_engine_read(window, cx);
             return;
         }
         let listener = match sys::control::listen(&path) {
@@ -736,6 +761,7 @@ impl Workspace {
             Err(e) => {
                 self.control.error = Some(format!("The glasscode command cannot reach this app ({e})."));
                 log::warn!("control socket {}: {e}", path.display());
+                self.control_engine_read(window, cx);
                 return;
             }
         };
@@ -790,6 +816,8 @@ impl Workspace {
                 this.control_set_authority(authority, cx);
                 this.control_restore_pending(pending, cx);
                 this.control_watch_authority(cx);
+                // The agents that waited for the profiles start now, each under its own.
+                this.control_engine_read(window, cx);
                 // The manager's wake lane, with the v2 engine (M51), and its chat's conversation
                 // (M52.1).
                 this.lanes_refresh();
