@@ -26,6 +26,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 
 - **Accounts.** `CLAUDE_CONFIG_DIR` and `CODEX_HOME` were scratch account folders, signed in once for the proofs (Claude: the person's plan, `authMethod: claude.ai`; Codex: ChatGPT). Every agent started under `env -i` with only `HOME`, `USER`, `PATH`, `TERM`, `LANG`, `TMPDIR`, the account variable and `DISABLE_AUTOUPDATER=1` (`lib.sh`). So no API key, no `CLAUDECODE` or `CLAUDE_CODE_*` variable of the calling session, and no messaging socket reached them. The person's own `~/.claude`, `~/.codex` and `~/.glasscode` were never used. The running Glasscode app was not touched; its installed binary ran only as `Glasscode cli hook`, with a scratch `GLASSCODE_HOME` and `GLASSCODE_EVENTS` (P11).
 - **A prompt** is one user turn submitted to a model: a line typed in an interactive session, one `stream-json` user message, one `codex exec` or `exec resume`. A `/compact` counts as one, because it makes a summary request. Starts that send no user line (SessionStart and SessionEnd hooks, `prompt-input`, `hooks/list`, `codex sandbox`, `claude doctor`, `claude mcp list`) count zero. The models were Claude `haiku` (`claude-haiku-5-5`) and Codex `gpt-5.6-luna` at reasoning `low`, listed by `codex debug models` ("Legacy fast model for simpler tasks").
+- **"Docs only, not run"** marks a statement that rests on the vendor docs (code.claude.com, learn.chatgpt.com, read 2026-11-19) or on strings in the CLI binary, and that no run in this proof checked. Everything else was measured.
 - **Raw captures** (transcripts, rollouts, hook logs, screens) stay on the owner's Mac under the scratch folders (`~/.glasscode-proofs/<proof>/raw/`). They are not committed (rule 13). M02's stand-ins can be recorded from them.
 
 **Prompts used: 9 of 40.**
@@ -153,7 +154,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **The SessionStart hook delivers the current brief** on start, on resume and after compaction. The transcript keeps each one as an `attachment` of type `hook_additional_context`.
   - **Old briefs stay** in the conversation after a resume, until a compaction drops them. A brief must therefore say that it replaces every earlier one, and name its memory commit.
   - **`--append-system-prompt` is stale on resume** by default. 2.1.328 records the system prompt in the transcript (an `attachment` of type `prompt_snapshot`, 127 KB here) and sends that record on every resume ("even when a later launch passes different text, until the conversation is compacted", `claude --help`). With `--system-prompt-snapshot off` the new text is used. A session can therefore get a current brief from either path. The hook is the one M20.2 uses, because it also runs after `/compact`, and the flag would change prompt caching for the person's own sessions.
-  - **Size.** The docs (code.claude.com/docs/en/hooks) cap `additionalContext` at 10,000 characters per string. Over the cap, the text is saved to a file and replaced by its path and a 2,000-character preview, and Claude is not told to read it. M20.2 keeps a brief under 10,000 characters. This proof did not test past the cap.
+  - **Size (docs only, not run).** The docs (code.claude.com/docs/en/hooks) cap `additionalContext` at 10,000 characters per string. Over the cap, the text is saved to a file and replaced by its path and a 2,000-character preview, and Claude is not told to read it. M20.2 keeps a brief under 10,000 characters. This proof did not test past the cap.
   - The fallback is not needed for Claude.
   - **Privacy.** A 2.1.328 transcript also holds `credential_org` and `session_context` attachments. Transcripts are never committed (rule 13), and M24's digest must leave them out.
 
@@ -172,7 +173,11 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - `codex features list` shows `memories  stable  false`: memories are off unless a person turns them on.
     - `--disable memories` (the same as `-c features.memories=false`) overrides the person's `config.toml` for that run. So D19's off switch for Careful and local-only projects is `--disable memories` on the session's command line.
   - **Not verified.** That a session with memories on actually injects them, and that `use_memories=false` stops it, needs two prompts. They are held back until the main agent answers the stop condition.
-  - The Claude half (`autoMemoryDirectory`, `autoMemoryEnabled`, `/memory`) also needs a prompt and is held the same way.
+  - **Claude (docs only, not run).**
+    - `autoMemoryDirectory` is honoured from `--settings`, among other scopes.
+    - `autoMemoryEnabled: false` turns auto memory off, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` does so per session.
+    - Whether Claude writes to the redirected folder without asking is not in the docs.
+    - The run (`p04-memories.sh … claude`, 1 prompt) needs the model and is held the same way.
 
 ## P05 New Claude hook events
 - **Method.** Add `StopFailure`, `PostCompact`, `SubagentStart`, `PermissionRequest`, `PermissionDenied`, `SessionEnd` and `CwdChanged` to the `--settings` hooks, plus one made-up event name. Then:
@@ -207,6 +212,12 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     | `SessionEnd` | `reason`: `prompt_input_exit` for `/exit`, `other` on SIGHUP (exit status 129) |
   - **`SubagentStop` also fires for Claude's own helpers,** with an empty `agent_type`: once during `/compact` (its `last_assistant_message` is the compaction analysis), and once 1.7 s after a resumed turn's `Stop`. M30 treats an empty `agent_type` as internal and opens no subagent for it.
   - **The lag between `Stop` and the transcript.** The `Stop` hook ran before the turn's assistant lines reached the transcript. At hook time the last record was `ai-title`, and `transcript-watch.py` (50 ms polling) saw the assistant lines 111 ms later. The docs agree: hooks "should use `last_assistant_message` on Stop and SubagentStop instead of reading the transcript". M30 closes a turn from `Stop`'s own fields, and reads the transcript only for its digest, after it settles.
+  - **The cases not run, by the docs (docs only, not run).**
+    - `Stop` does not run on a user interrupt, and API errors fire `StopFailure` instead.
+    - Fields: `StopFailure` has `error`, `error_details` and `last_assistant_message`; `PermissionRequest` has `tool_name`, `tool_input` and `permission_suggestions` (no `tool_use_id`); `PermissionDenied` has `tool_name`, `tool_input`, `tool_use_id` and `reason`; `CwdChanged` has `old_cwd` and `new_cwd`; `SubagentStart` has `agent_id` and `agent_type`.
+    - `Notification.notification_type` takes values such as `permission_prompt`, `idle_prompt`, `auth_success`, `elicitation_dialog`, `agent_needs_input` and `agent_completed`.
+    - `prompt_id` is a common field.
+    - If the interrupt case confirms it, an interrupt shows no `Stop`, so M30 closes it from the watchdog (the terminal back at the prompt with the turn open) or from the transcript's interrupt marker.
   - **Not run yet** (about 5 prompts, held back with the stop condition): an interrupt (Esc during a turn) and its transcript marker; a forced API error (`--model` with an invalid name) for `StopFailure`; a `kill -9` of the agent; a stop-hook continuation (`hook.py --stop-once`; two requests for one prompt); and `PermissionRequest`, `PermissionDenied`, `CwdChanged` and `SubagentStart` with their fields.
   - **Server and Windows lines of M01** (P03 and P05 in a tmux session on the Docker test server with stand-ins, and once on the owner's Windows machine) were not run: see "Could not verify".
 
@@ -297,6 +308,13 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **`.git` is read-only inside Codex's workspace sandbox**, in a linked worktree and in a plain clone alike ("Unable to create '<clone>/.git/index.lock'"). Granting `write` on the gitdir's `worktrees/<name>`, `objects`, `refs` and `logs` gets further, but writes at the top of `.git` (`packed-refs.lock`) are still refused. **No `git commit` ran in the Codex sandbox** with these grants. Person sessions should keep today's behaviour: with `--ask-for-approval on-request`, Codex asks to run the command outside the sandbox. That is expected and was not run here. P07's fallback covers that case: the commit runs outside the sandbox for the person profile, and the limit is guarded there. **Open for the owner (no written fallback):** how a Codex *automation* session commits, which by these probes it cannot do inside the sandbox. The options are a Glasscode commit op, as D13 plans for pushes; finer gitdir grants (the subfolder grants got further, so a complete list may work, untested); or Claude-only automation. The design is not changed for this.
   - **`gh` cannot start** when `~/.config/gh` is denied, because it reads `config.yml` first. Person sessions get `GH_CONFIG_DIR` pointed at a Glasscode-made copy holding `config.yml` only, never `hosts.yml` (the token stays in the Keychain), or no `gh` at all. Automation sessions get no `gh` (D13 and P14).
   - **The Keychain is reachable through its service**, although `~/Library/Keychains` is denied. Whether a stored secret can be read depends on the item's own access list, and this proof did not try to read one. Section 7 now says the sandbox denies the Keychain *files*, not the Keychain service.
+  - **Claude, by the docs (docs only, not run).**
+    - Claude's sandbox covers shell commands only. File tools, MCP servers and hooks run outside it.
+    - A `sandbox.filesystem.denyRead` entry does not stop the Read tool. A `permissions.deny` rule `Read(<path>)` does, and it also blocks Edit and Write on that path. M22 therefore writes each Credentials and Authority path twice: once as a sandbox `denyRead`, once as a `permissions.deny` rule.
+    - `allowUnixSockets` is macOS only.
+    - The defaults are `allowUnsandboxedCommands: true`, `failIfUnavailable: false` and `autoAllowBashIfSandboxed: false` (since 2.1.324). An automation profile must set the first two the other way.
+    - `excludedCommands` is "a convenience, not a security boundary".
+    - **On macOS, git over an SSH remote (fetch, pull, push) fails inside the sandbox, even with the host allowed, and Go programs such as `gh` may fail TLS under Seatbelt.** So inside Claude's sandbox, automation sessions get their `gh` and git network through Glasscode ops (brokered, D13), or use an https remote for git. Person sessions run them unsandboxed, the guarded case of this proof's fallback.
   - **Not covered here:** the Claude half (the file tools, hooks inside the sandbox, the login from an account folder, and the `!` negation) needs the model and waits for the live budget. M01 notes "no sandbox" on Windows.
 
 ## P08 Hook integrity against a hostile repository
@@ -425,6 +443,10 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Which process deletes, and when.** A `claude -p` process (print or SDK mode, as the brain and the auto-reviewer run) sweeps at start-up, unless the marker `.last-cleanup` in its config folder is recent (the binary calls it `tengu_cleanup_throttle_marker`). In two tries, an interactive 2.1.328 session did not sweep and wrote no marker. The interval was not read from the binary: a start 4 minutes after a sweep skipped it. During P08 later, `-p` runs in a repository with its own `.claude/settings.json` wrote no marker either; that case was not followed up.
   - **Whose setting counts.** The sweep uses the effective `cleanupPeriodDays` of the process that runs it. It sweeps every project of that config folder, not only its own: in the third run, project B's transcripts went too.
   - **So one session's `--settings` does not protect its transcripts.** The next `-p` process on the same account folder, such as the person's own scripts, the auto-reviewer, or a brain with the default, deletes them across all projects.
+  - **By the docs (docs only, not run).**
+    - The cleanup is a background sweep after a session starts. There is no per-session override.
+    - It deletes transcripts under `projects/<project>/`, plus `file-history`, `plans`, `debug` and `paste-cache` entries older than the period. `history.jsonl`, credentials and agent memory are kept.
+    - The runs above saw the sweep only from `-p` processes, so "after a session starts" did not hold for the interactive sessions tried. That difference is recorded, not resolved.
   - The binary also skips the sweep while a settings file cannot be read, and while server-managed settings have not loaded ("A later process that is not paused for this reason runs the cleanup").
   - **For M24.** The bounded digest stays the record. A full transcript can be kept only by copying it, or by setting `cleanupPeriodDays` in the account folder's own `settings.json`, which is the person's choice and changes their other sessions too. Copying is a consequence of D23 and needs no D-row change. `cleanupPeriodDays` must be at least 1; 0 is refused by the schema ("To disable transcript writes entirely … use --no-session-persistence").
 
@@ -455,10 +477,10 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Fallback.** Use forge rules only (D29). Autopilot pushes only where branch protection holds.
 - **Waits.** Owner decision O7, then M23.
 - **Result: partial; the brokered-op prototype is not done** (no prompt so far).
-  - **The profile can be built from documented settings.** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. Whether `gh` fails inside such a sandbox needs one Bash call by the model; it is folded into P07's Claude automation run (1 prompt, held). For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
+  - **The profile can be built from documented settings (docs only, not run).** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. Whether `gh` fails inside such a sandbox needs one Bash call by the model; it is folded into P07's Claude automation run (1 prompt, held). For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
   - **Other routes to the outside that are open by default.**
     - **The claude.ai connectors of the person's account.** `claude mcp list` on the scratch account (signed in to the person's subscription) shows nine claude.ai connectors (mail, drive, calendar, an issue tracker and others), seven of them connected. Any session of that account has them unless it passes `--strict-mcp-config` (P01's init then listed only `glasscode`) or `disableClaudeAiConnectors: true`. Section 7 now requires both for automation and quarantine sessions.
-    - **The WebFetch and WebSearch tools** run in the CLI process, not under the Bash sandbox. They can read pages but carry no forge credentials. The automation profile denies them by permission rule (guarded).
+    - **The WebFetch and WebSearch tools** run in the CLI process, not under the Bash sandbox (docs only, not run: "the sandbox covers shell commands only"). They can read pages but carry no forge credentials. The automation profile denies them by permission rule (guarded).
     - **The browser.** Claude in Chrome is off without `--chrome`. The Glasscode browser's MCP server is added by `browser::agent_args`, and D28 already gives automation and quarantine sessions no signed-in browser.
     - **Codex** has its network off in the workspace sandbox (P07). Its web search tool was not checked.
   - **Not done:** the `glasscode git push` op as a prototype, the "fix and push" task through it, and the count of extra turns.
@@ -473,7 +495,11 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - Codex with the default;
   - Codex with `mcp_servers.glasscode.tool_timeout_sec=900`.
 
-  The Codex docs give the default as 60 s per tool call ("Overrides the default 60s per-tool timeout"). So unless M34 sets `tool_timeout_sec`, an op that waits for the person cannot keep a Codex tool call open longer than that.
+  **By the docs (docs only, not run):**
+  - **Codex:** 60 s per tool call ("Overrides the default 60s per-tool timeout"). So unless M34 sets `tool_timeout_sec`, an op that waits for the person cannot keep a Codex tool call open longer than that.
+  - **Claude:** `MCP_TOOL_TIMEOUT` defaults to about 28 hours overall for a stdio server (HTTP connectors have a 60 s per-request timeout). So a Claude tool call could stay open while the person decides.
+
+  Until the runs confirm both, M34 plans for the shorter one: an op that waits returns `Waiting` with a pending id.
 
 ## P16 Claude sessions messaging each other
 - **Method.** Two Claude sessions of the same account. Try the native cross-session message features (`SendMessage`, the inbox socket), and the setting `crossSessionInbound: "refuse"` in `--settings`.
@@ -484,7 +510,13 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Result: partial, no prompt so far.**
   - **Sessions are scoped to the account folder.** `claude agents --json` on the scratch account lists 0 sessions, while the person's own account had many running on this Mac at the same time. A session of one account folder does not see another's.
   - **The inherited socket.** The route that stays is the environment: a `claude` started inside another Claude session inherits `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`. Glasscode already removes every `CLAUDE*`, `CODEX*` and `AI_AGENT*` variable from its own process at start (`env::SCRUBBED_PREFIXES`), and the proofs ran with `env -i` for the same reason.
-  - **The setting.** `crossSessionInbound` is documented with the ladder `accept` < `hold` < `refuse`. `--settings` can set it, and a project file can only make it stricter, never looser (settings docs, "Exceptions to managed settings precedence").
+  - **The setting (docs only, not run).**
+    - `crossSessionInbound` has the ladder `accept` < `hold` < `refuse`; `refuse` drops each message.
+    - When it is unset, the two sessions' permission modes decide.
+    - `--settings` can set it, and a project file can only make it stricter, never looser (settings docs, "Exceptions to managed settings precedence").
+    - Messages travel over a same-machine socket, with `CLAUDE_CODE_MESSAGING_SOCKET` and `_TOKEN` exported to hooks and Bash.
+    - The receiver is told a message "came from another session, not from you", and a message cannot approve anything.
+    - M22 sets `refuse` for automation and quarantine profiles.
   - **Not run** (about 3 prompts): two sessions of the scratch account, one asked to message the other; then the receiver with `{"crossSessionInbound": "refuse"}`.
 
 ## P17 Sleep timing and the lease clock
