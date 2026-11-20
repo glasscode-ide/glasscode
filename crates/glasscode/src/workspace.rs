@@ -558,6 +558,7 @@ impl Workspace {
                                             review_files: Default::default(),
                                             model: None,
                                             mode: None,
+                                            held: None,
                                         };
                                         this.create_server_session(create, window, cx);
                                     }
@@ -916,6 +917,15 @@ impl Workspace {
 
     pub fn ensure_terminal(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminals.contains_key(session_id) {
+            return;
+        }
+        // Its worktree is being moved: nothing starts until the move ends.
+        if self.switch_moving(session_id) {
+            return;
+        }
+        // Its worktree runs on the server now: it comes back first, then the session starts.
+        if self.runs_elsewhere(session_id) {
+            self.bring_worktree_home(session_id.to_string(), cx);
             return;
         }
         let Some(session) = self.state.session(session_id).cloned() else { return };
