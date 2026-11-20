@@ -19,7 +19,7 @@ manager_chat.rs 14
 manager_settings.rs 30
 manager_ui.rs 57
 movein_ui.rs 22
-notify_ui.rs 12
+notify_ui.rs 14
 pair_ui.rs 10
 palette_ui.rs 7
 project_setup.rs 12

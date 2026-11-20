@@ -1654,6 +1654,31 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Verify:** every row of section 13 is "yes".
 - **Demonstration:** the acceptance list, done by the owner.
 - **Addresses:** exec-24, exec-25
+- **Result:** the code parts of the gate.
+  - **The soak** (`testkit::soak`). It runs seven simulated days on the virtual clock, three seeds, with the reference load of `testkit::load` (the small reference), plus sleeps, restarts, crashes and partitions at random points. The load goes through the turn machine (M30), each report's effect key (M31), and the wake queue with its budget (M51), on a fresh vendor reading.
+    - It asserts: no duplicate effect; one report per turn; routine wakes start only below the hour's cap of six, and some hour reaches it; one turn machine per session; the queue within its bound; no growth in this process's open files or threads.
+    - Retention is checked on `journal::rotate` alone (30 day files). Nothing goes through the effect ledger or the journal writer.
+    - A day of it (`one_day_soak`) runs with the core tests. CI's new soak job runs the seven days, then the other automated gates by name: `fault_injection_for_every_store`, `restore_after_damage` and `forget_person_removes_everywhere`.
+  - **exec-24.**
+    - `runtime::driver::command` refuses any folder but `paths::manager_work_dir` before anything starts.
+    - The headless runs (`agents::headless_run`: moving in's study passes and the automatic reviews) also run there now, instead of the temporary folder.
+    - Tests check the folder and the flags of the brain's Claude and Codex spawns and of each headless run, and that a repository as the brain's folder is refused.
+  - **exec-25.**
+    - `versions::MIN_CLAUDE` (2.1.322) and `MIN_CODEX` (0.167.0). Below them a brain's first turn of a process stops with the new health state `VersionTooOld`, which says once which version it needs. The version is read with `--version`, once per build of the program.
+    - `cli-versions.example.json` and the Docker server's stand-ins report those versions.
+    - The compatibility checklist has headless items 10 to 16.
+  - **Evals.**
+    - The local-only scope case runs against the server's memory copy, with a proposal for the project waiting in the inbox. Without #143's filter, that proposal reaches the server.
+    - The unsigned-phone case has its gate half (`an_unpaired_phone_decides_nothing`). Its sshd half stays ignored: it needs the Docker test server.
+    - `only_the_listed_cases_wait` fails on any other ignored case.
+  - **Docs.** A Manager v2 section in `architecture.md`; "What Manager v2 cannot do" in `manager.md`; and in the acceptance list, the gates, what only tests check, and what is left before release 1.
+  - **Left out, so section 13 is not claimed:**
+    - the three security reviews (their own review pull requests, by a reviewer who built none of the slices);
+    - the owner's 48-hour run;
+    - the live evals, and checklist items 10 to 16 on the real CLIs;
+    - the phone case on the Docker server;
+    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change).
+    - For the security review of session profiles and hooks: a headless run's Claude gets no `--settings` with the profile's `disableAllHooks` (`headless_args` passes only `claude_args`).
 
 ### M56 Switch to v2 and remove v1 (wave 5, M)
 

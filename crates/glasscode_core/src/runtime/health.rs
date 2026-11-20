@@ -30,6 +30,9 @@ pub enum BrainHealth {
     Overloaded { tries: u32 },
     /// The CLI's version is not one the team approved.
     VersionNotApproved { version: String },
+    /// The CLI is older than the manager needs (`versions::MIN_CLAUDE`, `MIN_CODEX`): it does not
+    /// start on it.
+    VersionTooOld { version: String, needs: String },
     /// It stopped by itself.
     Crashed { why: String },
     /// Its tools are not exactly Glasscode's (D4): it was stopped before it could act.
@@ -56,6 +59,7 @@ impl BrainHealth {
             BrainHealth::OutOfUsage { until: None } => format!("The manager's {cli} plan is used up for now. Rules, playbooks and notifications keep working."),
             BrainHealth::Overloaded { .. } => format!("{cli} is overloaded; the manager tries again in a moment."),
             BrainHealth::VersionNotApproved { version } => format!("{cli} {version} is not a version your team approved, so the manager does not run on it. Settings › Updates has the approved ones."),
+            BrainHealth::VersionTooOld { version, needs } => format!("{cli} {version} is older than the manager needs, so it does not start: it needs {cli} {needs} or newer. Update it in Settings › Updates."),
             BrainHealth::Crashed { why } => format!("The manager's {cli} stopped ({why}). It starts again with the next question."),
             BrainHealth::ToolListWrong { extra, missing } => {
                 let mut parts = Vec::new();
@@ -80,7 +84,7 @@ impl BrainHealth {
             BrainHealth::OutOfUsage { until: Some(at) } => Some(Duration::from_secs(((*at - crate::clock::now_ms() as i64 / 1000).max(60)) as u64)),
             BrainHealth::OutOfUsage { until: None } => Some(Duration::from_secs(30 * 60)),
             BrainHealth::Crashed { .. } => Some(Duration::from_secs(5)),
-            BrainHealth::NotInstalled | BrainHealth::SignedOut | BrainHealth::VersionNotApproved { .. } | BrainHealth::ToolListWrong { .. } | BrainHealth::SwitchedOff => None,
+            BrainHealth::NotInstalled | BrainHealth::SignedOut | BrainHealth::VersionNotApproved { .. } | BrainHealth::VersionTooOld { .. } | BrainHealth::ToolListWrong { .. } | BrainHealth::SwitchedOff => None,
         }
     }
 
@@ -94,6 +98,7 @@ impl BrainHealth {
             BrainHealth::OutOfUsage { .. } => "out_of_usage",
             BrainHealth::Overloaded { .. } => "overloaded",
             BrainHealth::VersionNotApproved { .. } => "version_not_approved",
+            BrainHealth::VersionTooOld { .. } => "version_too_old",
             BrainHealth::Crashed { .. } => "crashed",
             BrainHealth::ToolListWrong { .. } => "tool_list_wrong",
             BrainHealth::SwitchedOff => "switched_off",
@@ -181,6 +186,7 @@ mod tests {
             BrainHealth::OutOfUsage { until: None },
             BrainHealth::Overloaded { tries: 2 },
             BrainHealth::VersionNotApproved { version: "9.9.9".into() },
+            BrainHealth::VersionTooOld { version: "2.0.1".into(), needs: "2.1.322".into() },
             BrainHealth::Crashed { why: "exit 1".into() },
             BrainHealth::ToolListWrong { extra: vec!["Bash".into()], missing: vec![] },
             BrainHealth::SwitchedOff,
@@ -193,7 +199,7 @@ mod tests {
                 sentences.insert(sentence);
             }
             // Only the person ends these; the others are tried again.
-            let person_ends = matches!(state, BrainHealth::NotInstalled | BrainHealth::SignedOut | BrainHealth::VersionNotApproved { .. } | BrainHealth::ToolListWrong { .. } | BrainHealth::SwitchedOff);
+            let person_ends = matches!(state, BrainHealth::NotInstalled | BrainHealth::SignedOut | BrainHealth::VersionNotApproved { .. } | BrainHealth::VersionTooOld { .. } | BrainHealth::ToolListWrong { .. } | BrainHealth::SwitchedOff);
             assert_eq!(state.backoff().is_none(), person_ends, "{state:?}");
         }
         // Each state says something of its own for each CLI, but "switched off", which names none.

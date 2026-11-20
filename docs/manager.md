@@ -62,6 +62,39 @@ glasscode manager message list
   Automation applies to it as to any agent.
 - In its first round after you switch it on it says nothing about what was already there.
 
+## Manager v2
+
+A new manager is being built beside this one. It is off for everyone until it ships (release 1).
+A scratch home can try it with `GLASSCODE_MANAGER_ENGINE=v2`. It keeps one memory per project
+that every agent shares, gives every turn of every session one report, follows each project's
+level (Careful, Standard or Autopilot), and asks you on a card before anything the level does not
+allow. [`architecture.md`](architecture.md#manager-v2) says how it is built.
+
+### What Manager v2 cannot do
+
+- It cannot act on a project beyond its level. In a Careful project it asks before anything but
+  reading, the board and its own notes. In Standard it starts and drives sessions, and asks
+  before anything that leaves the Mac or removes work. Only in Autopilot does it act on the
+  forge, and only where the forge's own rules (branch protection, required reviews) hold.
+- It cannot approve, decide a pending card, or change its own level, playbooks or settings.
+  Only you can, in the app (a paired phone may confirm an approval).
+- Its brain has no shell and no file tools beyond its own folder. It runs in
+  `~/.glasscode/manager/work`, never in a repository, so a cloned repository's hooks and MCP
+  servers never run as you. It reads code through Glasscode's tools only.
+- It cannot remember what nobody said. A fact about you, your people or your decisions comes from
+  your own typed words, or waits in the inbox for your tick. Text from a pull request, a tool's
+  output or a pasted block is never a fact by itself, and what a session learns about code holds
+  only while the lines it cites stay the same.
+- It cannot send anything of a project marked "stays on this Mac" to the server: not its memory,
+  sessions, words, journal or cards.
+- It cannot run past its budget: at most six routine wakes an hour, a daily token cap, and
+  nothing on paid overage unless you allow it. With no budget left, or signed out, it answers
+  from what it knows and says why.
+- It cannot start on a Claude Code older than 2.1.322 or a Codex older than 0.167.0. It says
+  which version it needs.
+- It cannot do the same thing twice. Each effect (a message, a report, a push) is done once,
+  under its key, also after a crash or a restart.
+
 ## Where its data lives
 
 | What | Where |

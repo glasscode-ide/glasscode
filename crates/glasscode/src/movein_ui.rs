@@ -52,6 +52,10 @@ pub struct MoveIn {
     pub answer: Option<gpui::Entity<crate::text_input::TextInput>>,
     /// A study runs now.
     pub studying: bool,
+    /// The wait of a paused study; dropping it stops the wait.
+    pub resume: Option<gpui::Task<()>>,
+    /// The dialog is not shown: a paused study resumed at start.
+    pub quiet: bool,
 }
 
 impl Workspace {
@@ -61,14 +65,56 @@ impl Workspace {
             self.show_toast("Moving in fills Glasscode's memory, which comes with the new manager.", cx);
             return;
         }
-        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None, projects: Vec::new(), progress: None, answer: None, studying: false });
-        self.modal = Some(Modal::MoveIn);
+        // A study under way is shown as it is, not started again.
+        if let Some(form) = self.movein.as_mut()
+            && (form.stage == Stage::Study || form.studying)
+        {
+            form.quiet = false;
+            self.modal = Some(Modal::MoveIn);
+            cx.notify();
+            return;
+        }
+        self.load_move_in(false, cx);
+    }
+
+    /// At start (v2): a study left paused or questions left open go on by themselves, without the
+    /// dialog. It reads the progress in the background; nothing shows unless there is something.
+    pub fn resume_move_in(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.movein.is_some() {
+            return;
+        }
+        let task = cx.background_spawn(async move { movein::Progress::load().map(|p| p.run.is_some() && !p.studied()).unwrap_or(false) });
+        cx.spawn(async move |this, cx| {
+            if task.await {
+                let _ = this.update(cx, |ws, cx| {
+                    if ws.movein.is_none() {
+                        ws.load_move_in(true, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn load_move_in(&mut self, quiet: bool, cx: &mut Context<Self>) {
+        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None, projects: Vec::new(), progress: None, answer: None, studying: false, resume: None, quiet });
+        if !quiet {
+            self.modal = Some(Modal::MoveIn);
+        }
         cx.notify();
+        // The projects used most recently first: their levels are asked, and they are studied first.
+        let mut last_used: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for session in &self.state.sessions {
+            let at = last_used.entry(session.project_id.as_str()).or_insert(0);
+            *at = (*at).max(session.created_at);
+        }
+        let mut order: Vec<&glasscode_core::model::Project> = self.state.projects.iter().collect();
+        order.sort_by_key(|p| std::cmp::Reverse(last_used.get(p.id.as_str()).copied().unwrap_or(0)));
+        let order: Vec<String> = order.into_iter().map(|p| p.id.clone()).collect();
         // What looking needs, from the window: no IO here.
-        let projects: Vec<(String, String, std::path::PathBuf, Vec<std::path::PathBuf>, Option<String>, Option<glasscode_core::paths::ProjectKey>)> = self
-            .state
-            .projects
+        let projects: Vec<(String, String, std::path::PathBuf, Vec<std::path::PathBuf>, Option<String>, Option<glasscode_core::paths::ProjectKey>)> = order
             .iter()
+            .filter_map(|id| self.state.project(id))
             .filter(|p| !self.state.is_hidden(&p.id))
             .map(|p| {
                 let worktrees = self.worktrees.get(&p.id).map(|list| list.iter().map(|w| w.path.clone()).collect()).unwrap_or_default();
@@ -95,8 +141,8 @@ impl Workspace {
                 }
             }
             let found = movein::look(&ins, &claude, &codex, &logins);
-            // A study left paused resumes where it was.
-            let progress = movein::Progress::load().ok().filter(|p| p.run.is_some() && (!p.studied() || !p.open().is_empty()));
+            // A study left paused, or questions left open, go on where they were.
+            let progress = movein::Progress::load().ok().filter(movein::Progress::unfinished);
             (ins, found, progress)
         });
         cx.spawn(async move |this, cx| {
@@ -134,11 +180,39 @@ impl Workspace {
         let levels = movein::level_questions(&progress, 3);
         progress.ask(levels);
         form.run = Some(run);
-        form.progress = Some(progress);
+        form.progress = Some(progress.clone());
         form.stage = Stage::Study;
         self.move_in_answer_box(cx);
-        self.move_in_study_step(cx);
+        // Kept before the first step runs; the step's change lands on it.
+        let task = cx.background_spawn(async move { movein::keep(&movein::Delta::Start(progress)) });
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = task.await {
+                log::warn!("movein: the study's progress could not be kept: {err}");
+            }
+            let _ = this.update(cx, |ws, cx| ws.move_in_study_step(cx));
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Apply a change to the dialog's progress (the store gets the same change in the background).
+    fn move_in_apply(&mut self, delta: &movein::Delta) {
+        if let Some(progress) = self.movein.as_mut().and_then(|f| f.progress.as_mut()) {
+            progress.apply(delta);
+        }
+    }
+
+    /// A paused study tries again by itself: when its budget opens again (checked at least every
+    /// half hour, as a cap can be raised), until the dialog's state goes.
+    fn move_in_wait(&mut self, until: u64, cx: &mut Context<Self>) {
+        let wait = until.saturating_sub(glasscode_core::clock::now_ms()).clamp(60_000, 30 * 60_000);
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+            let _ = this.update(cx, |ws, cx| ws.move_in_study_step(cx));
+        });
+        if let Some(form) = self.movein.as_mut() {
+            form.resume = Some(task);
+        }
     }
 
     /// The answer box for the question asked now (made once).
@@ -160,14 +234,19 @@ impl Workspace {
             return;
         }
         form.studying = true;
+        form.resume = None;
         let projects = form.projects.clone();
         let agent = self.state.manager.brain;
         let config_dir = self.state.default_account(agent).and_then(|a| a.config_dir());
         let env = self.env.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
+            use glasscode_core::runtime::budget::Ledger;
             let memory = Memory::open();
-            let mut ledger = glasscode_core::runtime::budget::Ledger::load().unwrap_or_default();
+            // The step's own copy of the ledger; what it records joins the stored one after, as
+            // the manager's lanes do.
+            let before = Ledger::load().unwrap_or_default();
+            let mut ledger = before.clone();
             let mut run = |project: &ProjectIn, input: &str| -> Result<String, String> {
                 let dir = glasscode_core::paths::cache_dir().join("movein").join(project.key.as_str());
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -178,27 +257,49 @@ impl Workspace {
                 glasscode_core::agents::headless_run(agent, config_dir.as_deref(), &profile, input, Some(&answer_file), &env).map_err(|e| format!("{e:#}"))
             };
             let step = movein::study_next(&mut progress, &projects, &mut ledger, glasscode_core::clock::now_ms(), &memory, &mut run);
+            if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
+                log::warn!("movein: the token ledger could not be kept: {err}");
+            }
             post_questions(&mut progress);
-            let _ = ledger.save();
-            let _ = progress.save();
-            let waiting = progress.run.as_deref().map(|run| movein::waiting(&memory, run).unwrap_or_default()).unwrap_or_default();
-            (progress, step, waiting)
+            let delta = movein::Delta::Study(progress);
+            if let Err(err) = movein::keep(&delta) {
+                log::warn!("movein: the study's progress could not be kept: {err}");
+            }
+            let run = match &delta {
+                movein::Delta::Study(p) => p.run.clone(),
+                _ => None,
+            };
+            let waiting = run.as_deref().map(|run| movein::waiting(&memory, run).unwrap_or_default()).unwrap_or_default();
+            (delta, run, step, waiting)
         });
         cx.spawn(async move |this, cx| {
-            let (progress, step, waiting) = task.await;
+            let (delta, run, step, waiting) = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let go_on = matches!(step, movein::Step::Studied { .. } | movein::Step::Failed { .. });
-                if let Some(form) = ws.movein.as_mut() {
-                    form.studying = false;
-                    form.progress = Some(progress);
-                    form.waiting = waiting;
-                    form.error = match &step {
-                        movein::Step::Failed { key, why } => Some(format!("The study of {key} did not work: {why}")),
-                        _ => None,
-                    };
+                let Some(form) = ws.movein.as_mut() else { return };
+                form.studying = false;
+                // The run was undone while it studied: what this step proposed goes too.
+                if form.progress.as_ref().and_then(|p| p.run.clone()) != run {
+                    if let Some(run) = run {
+                        cx.background_spawn(async move {
+                            if let Err(err) = movein::undo(&Memory::open(), &run) {
+                                log::warn!("movein: a late step of an undone run could not be undone: {err}");
+                            }
+                        })
+                        .detach();
+                    }
+                    cx.notify();
+                    return;
                 }
-                if go_on {
-                    ws.move_in_study_step(cx);
+                form.waiting = waiting;
+                form.error = match &step {
+                    movein::Step::Failed { key, why } => Some(format!("The study of {key} did not work: {why}")),
+                    _ => None,
+                };
+                ws.move_in_apply(&delta);
+                match step {
+                    movein::Step::Studied { .. } | movein::Step::Failed { .. } => ws.move_in_study_step(cx),
+                    movein::Step::Paused { until, .. } => ws.move_in_wait(until, cx),
+                    movein::Step::Done => {}
                 }
                 cx.notify();
             });
@@ -212,11 +313,26 @@ impl Workspace {
         let Some(mut progress) = form.progress.clone() else { return };
         let Some(question) = progress.open().first().map(|q| (*q).clone()) else { return };
         let Some(input) = form.answer.clone() else { return };
+        let _ = window;
+        // "Skip" is a click, not words: nothing goes to the words ledger or the conversation.
+        if skip {
+            input.update(cx, |i, cx| i.set_text("", cx));
+            let Ok(delta) = movein::skip(&mut progress, &question.id) else { return };
+            self.move_in_apply(&delta);
+            cx.background_spawn(async move {
+                if let Err(err) = movein::keep(&delta) {
+                    log::warn!("movein: a skipped question could not be kept: {err}");
+                }
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
         let (text, untyped) = {
             let input = input.read(cx);
-            let all = if skip { "skip".to_string() } else { input.text() };
+            let all = input.text();
             let (text, untyped) = glasscode_core::words::trimmed(&all, input.typing());
-            (text.to_string(), if skip { Vec::new() } else { untyped })
+            (text.to_string(), untyped)
         };
         if text.is_empty() {
             return;
@@ -229,17 +345,19 @@ impl Workspace {
             let record = glasscode_core::words::find(&id).ok_or_else(|| "the answer was not recorded".to_string())?;
             let done = movein::answer(&mut progress, &question.id, &record, &memory)?;
             post_answer(&progress, &question, &record);
-            let _ = progress.save();
-            Ok::<_, String>((progress, done))
+            let delta = done.delta(&question.id, &record.text);
+            if let Err(err) = movein::keep(&delta) {
+                log::warn!("movein: an answer could not be kept: {err}");
+            }
+            Ok::<_, String>((delta, done))
         });
-        let _ = window;
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
                 match result {
-                    Ok((progress, done)) => {
+                    Ok((delta, done)) => {
+                        ws.move_in_apply(&delta);
                         if let Some(form) = ws.movein.as_mut() {
-                            form.progress = Some(progress);
                             form.error = None;
                         }
                         // A level is a policy change: its preview, confirmed in Settings' own dialog.
@@ -320,11 +438,39 @@ impl Workspace {
     fn move_in_undo(&mut self, cx: &mut Context<Self>) {
         self.move_in_change(cx, move |memory, run| {
             movein::undo(memory, run).map_err(|e| e.to_string())?;
+            // Its study and questions go too, so opening again does not resume an undone run.
+            movein::keep(&movein::Delta::Reset).map_err(|e| e.to_string())?;
             Ok(0)
         });
         if let Some(form) = self.movein.as_mut() {
             form.accepted = 0;
+            form.progress = None;
+            form.resume = None;
+            if form.stage == Stage::Study {
+                form.stage = Stage::Review;
+            }
         }
+    }
+
+    /// The person confirmed a level in its preview: the question it answered is answered.
+    pub fn move_in_level_confirmed(&mut self, project: glasscode_core::paths::ProjectKey, level: glasscode_core::gate::Level, cx: &mut Context<Self>) {
+        let asked = self.movein.as_ref().and_then(|f| f.progress.as_ref()).is_some_and(|p| p.questions.iter().any(|q| q.ask == movein::Ask::Level && q.project.as_ref() == Some(&project) && q.answer.is_none()));
+        if !asked {
+            return;
+        }
+        let delta = movein::Delta::Confirmed { project, level };
+        self.move_in_apply(&delta);
+        cx.background_spawn(async move {
+            if let Err(err) = movein::keep(&delta) {
+                log::warn!("movein: a confirmed level could not be kept: {err}");
+            }
+        })
+        .detach();
+        // Back to the questions, when the dialog was where the level was said.
+        if self.movein.as_ref().is_some_and(|f| f.stage == Stage::Study && !f.quiet) && self.modal.is_none() {
+            self.modal = Some(Modal::MoveIn);
+        }
+        cx.notify();
     }
 
     /// A change of the run's proposals, in the background; then the list again.
@@ -531,7 +677,7 @@ fn render_study(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
         rows.push(line(error.clone(), theme::removed()));
     }
     if let Some(why) = &progress.paused {
-        rows.push(line(format!("Paused: {why} It goes on by itself when the budget allows."), theme::modified()));
+        rows.push(line(format!("Paused: {why} It goes on by itself."), theme::modified()));
     }
     for project in &progress.projects {
         let state = match &project.state {
@@ -547,7 +693,12 @@ fn render_study(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
     match (open.first(), &form.answer) {
         (Some(question), Some(input)) => {
             rows.push(div().pt_2().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(format!("{} ({})", question.text, question.project_name)).into_any_element());
-            rows.push(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(format!("If you skip it: {}. {} more after this one.", question.default, open.len() - 1)).into_any_element());
+            let hint = match (&question.said, &question.ask) {
+                (Some(level), _) => format!("You said {level}: it changes once you confirm it in the preview. Answer again to choose another."),
+                (None, movein::Ask::Other) => format!("Your answer is kept as you write it, so make it a whole sentence. If you skip it: {}.", question.default),
+                _ => format!("If you skip it: {}.", question.default),
+            };
+            rows.push(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(format!("{hint} {} more after this one.", open.len() - 1)).into_any_element());
             rows.push(
                 div()
                     .flex()

@@ -281,7 +281,15 @@ impl Workspace {
                     match result {
                         Ok(messages) if on && wanted && !messages.is_empty() => {
                             let actions = self.manager.harness.on_inbox(&self.state.manager, messages, now());
-                            self.manager_apply(actions, cx);
+                            // The inbox notifies only for an urgent message from a teammate allowed
+                            // to alarm the person: in a v2 home that passes quiet hours (M42).
+                            let (urgent, rest): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| self.control.engine_v2 && matches!(a, Action::Notify { session: None, .. }));
+                            for alarm in urgent {
+                                if let Action::Notify { title, body, .. } = alarm {
+                                    self.notify_manager_urgent(title, body, cx);
+                                }
+                            }
+                            self.manager_apply(rest, cx);
                             changed = true;
                         }
                         Ok(_) => {}

@@ -428,17 +428,21 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 ### Moving in, part 2 (M54)
 
-After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, most recently used first, within the manager's own token budget.
+After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, the projects with the newest sessions first, within the manager's own token budget.
 
 - **The study.** Glasscode reads the project itself (`movein::study_reads`): the README, `AGENTS.md`, `CLAUDE.md`, the scripts, three CI files and the last 50 commits, each through `reads::file_read`. It runs the manager's brain once with `headless_profile(Study)`: no tool at all, Codex read-only, the reads on stdin as data, and the answer bound to `runtime::study::schema`.
 - **The draft** holds PROJECT.md lines, know-how and people, each naming the read it came from. A line that names no read it was given is dropped. The rest are proposals in memory's inbox under the run, so "Undo this move-in" takes them back too.
-- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Above the budget the study pauses and says why. `manager/movein.json` keeps where it is, so it resumes after a restart.
+- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Its tokens join `manager/tokens.json` under the store's lock (`add_since`), as the lanes' do.
+- **Pause and resume.** Above the budget the study pauses, says why and when it tries again: the next UTC day for the daily cap, the window's reset for a vendor window, else a quarter of an hour. The app waits that long (at most half an hour between checks) and goes on by itself. A run that does not work (a CLI logged out, an answer that cannot be read) pauses ten minutes; after three the project is left out. `manager/movein.json` keeps where it is, and at start a study left paused goes on without the dialog.
+- **One copy, many changes.** A study step and an answer each finish in the background. Each returns a `movein::Delta`, which the dialog applies to its copy and `movein::keep` applies to the stored one under its lock, so neither overwrites the other. A step of a run undone meanwhile changes nothing, and what it proposed is undone too.
 - **The questions.** There are at most eight, in order of value:
   1. the level of the projects used most recently;
   2. who owns what;
   3. what is off limits.
 
-  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). A level answer opens the Settings preview of that policy change to confirm.
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
+  A level answer must name exactly one level. It opens the Settings preview of that policy change, and the question stays open until the person confirms it there. "Skip" is a click: it records no words.
+- **Forget.** Forgetting a person drops the questions and answers that name them; forgetting a project or an employer drops their studies and questions.
 
 ### Backdrop and glass
 
@@ -704,6 +708,20 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
     - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
   - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
+- **Taking an op back** (M33.2, ops-18, v2 engine).
+  - **The record.** An op whose answer carries `data.undo` (the inverse call, `ops::undo_of`) is kept with a number (`data.undo_id`), whose it was (`Caller::origin`), and a version of what it touched as it left it (`ops_v2::undo_version`). The app keeps the last 200 until it quits.
+  - **`undo [<id>]`** (`ops.undo`; none means the caller's last) runs that inverse as the caller's own call, through the gate under the caller's own rule and never as the person's. The card, the claim and the journal therefore name the real op.
+  - **When it is refused.** It refuses another caller's op (the person may take back any). It refuses an op taken back already, and one whose target changed since. The version is compared when `undo` is asked, and again when its card is approved.
+  - **What has a version.** A version is read from what the app holds:
+    - a board task, with its mark and Focus;
+    - a session, which must be still there in the same worktree, or for a rename its title;
+    - a project;
+    - the sessions in a worktree;
+    - a setting's value;
+    - a work item's state.
+    A place shown needs none.
+  - **What is not taken back from here.** Glasscode cannot see whether a label on GitHub, a ticket's status in Linear or memory changed since, so the reply names the inverse, which the caller makes under its own rule.
+  - **No redo.** The taking back has no undo of its own (`data.undid`), and marks the op it took back.
 - **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
   - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
   - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.
@@ -981,6 +999,70 @@ Before adding a new version to `cli-versions.json`:
    pass: every flag of `cli-flags.json` is still in the real CLIs' help. Commit the recorded help;
    CI probes every file in `script/cli-help/`. Delete the recorded help of a version that is no
    longer approved, and re-check `known_failures` when approving a version.
+
+The manager's brain runs the CLIs headless (Manager v2), so a new version also needs:
+
+10. **Print mode on the subscription login.** With a signed-in scratch account, `claude -p
+    --input-format stream-json --output-format stream-json --verbose` answers one prompt: its
+    `system`/`init` line has `session_id`, `tools` (only `ToolSearch` and `mcp__glasscode__*`
+    with the brain's arguments), `permissionMode` and `claude_code_version`, and its `result`
+    line has `usage`. `codex exec --json` answers one prompt on the ChatGPT login.
+11. **The brain's flags.** Every argument of `runtime::claude::args` and `runtime::codex::args`
+    (their golden tests list them) is in the recorded help of item 9: `--restricted`, `--tools`,
+    `--strict-mcp-config`, `--allowedTools`, `--permission-mode dontAsk`, `--permission-prompts`,
+    `--disable-slash-commands`, `--mcp-config`, `--settings`, `--append-system-prompt-file`,
+    `--include-partial-messages`, `--session-id` and `--resume`; for Codex `exec --json`, `exec
+    resume`, `--skip-git-repo-check`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`,
+    `--disable <feature>` and the `-c` keys.
+12. **The hook inputs the turn reports read** (`turns::TurnMachine`, with fixtures in its tests):
+    `hook_event_name` and `prompt_id` on each; `prompt` on `UserPromptSubmit`;
+    `last_assistant_message` and `background_tasks` on `Stop`; `error` on `StopFailure`;
+    `notification_type` and `message` on `Notification`; and `SessionEnd`.
+13. **Codex's turn ends.** The rollout's `event_msg` lines `task_started`, `task_complete` (with
+    `turn_id` and `last_agent_message`), `turn_aborted` and `error` still mark where a turn
+    starts and ends (`agents::codex_turn_line`).
+14. **`codex exec --json` events.** `thread.started` (with `thread_id`), `turn.completed` (with
+    `usage`), `turn.failed`, `item.started`, `item.completed` and `error` keep their names and
+    fields (`runtime::codex::parse_line`).
+15. **The rate limit event.** Claude's stream still sends `rate_limit_event` with
+    `rate_limit_info.status`, `rateLimitType`, `resetsAt` and `utilization`
+    (`runtime::budget::Ledger::record_window_at`). The wake budget reads it.
+16. **The minimum versions.** The manager does not start below `versions::MIN_CLAUDE` and
+    `versions::MIN_CODEX` (now Claude Code 2.1.322 and Codex 0.167.0, the versions on which items
+    10 to 15 were checked). Instead it says which version it needs. Raise them only after items 10
+    to 15 pass on the newer version, and raise `cli-versions.example.json` with them.
+
+## Manager v2
+
+Manager v2 is built beside the first manager. It runs only where the engine switch says so
+(`store::EngineSwitch`, `~/.glasscode/authority/engine.json`, or `GLASSCODE_MANAGER_ENGINE=v2`
+in a scratch home). With the switch at v1, none of it runs. The plan is
+[`manager-v2-design.md`](manager-v2-design.md) and [`manager-v2-slices.md`](manager-v2-slices.md).
+Each slice's "Result" note there says what it built.
+
+- **Stores.** Every file of the manager is a `store::Store`: one writer at a time, atomic saves
+  that keep the previous generation, a path class, and a row of the data map (`ALL_STORES`).
+- **Commands are ops.** Everything a session, the brain, the phone or the person can do is an op
+  of the registry (`ops`). One gate (`gate::decide`) decides each op from who calls (`caller`)
+  and the project's level (Careful, Standard, Autopilot). An op beyond what the caller may do
+  waits as a card (`gate::pending`). Every effect is done once, under its key (`effects`).
+- **Journal and turns.** Hooks, rollouts, git, the forge and the clock become events of the
+  journal (`journal`: one file per UTC day, 30 days kept). The turn machine (`turns`) gives each
+  turn of each session exactly one report. The work ledger (`work`) keeps what each item waits
+  for.
+- **Memory.** One git repository of Markdown files (`memstore`). The words ledger (`words`) is
+  the only source of the person's facts. The server gets a filtered copy that holds nothing of a
+  project that stays on the Mac (`memory_copy`).
+- **The brain.** `runtime` runs `claude -p` or `codex exec` with only Glasscode's tools. It runs
+  in `~/.glasscode/manager/work` and nowhere else: a repository as its folder is refused before
+  anything starts, because `claude -p` runs a folder's hooks and MCP servers without asking. It
+  does not start on a CLI older than `MIN_CLAUDE` or `MIN_CODEX`. The study passes of moving in
+  and the automatic reviews (`agents::headless_run`) run in the same folder. A chat lane answers the person.
+  A wake lane runs queued wakes within the budget: six routine wakes an hour, a daily token cap,
+  and the vendor's windows.
+- **Tests.** No test calls a model; the stand-ins of `script/test-agents` play the CLIs. CI's
+  evals job runs the eval suites in `crates/glasscode_core/tests/evals` (adversarial, memory
+  poisoning, retrieval, op selection). Its soak job runs the seven-day soak (`testkit::soak`).
 
 ## Server: glasscoded
 
