@@ -154,6 +154,10 @@ impl Workspace {
                 let remove = crate::ui::button(format!("trust-remove-{}-{index}", project.id), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::RemoveCondition { project: key.clone(), index }, cx)));
                 rows.push(row(format!("    {}", condition.describe()), "", Some(remove.into_any_element())));
             }
+            // M60: what it picks up by itself on Autopilot, when the person set it.
+            if let Some(intake) = &current.intake {
+                rows.push(row(format!("    {}", intake.describe()), format!("`glasscode policy set {} --intake-off` stops it; --intake-linear and --intake-github change the labels.", project.name), None));
+            }
             let (key_add, input) = (key.clone(), condition.clone());
             let add = crate::ui::button(format!("trust-add-{}", project.id), "Add the condition").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 let text = input.read(cx).text();

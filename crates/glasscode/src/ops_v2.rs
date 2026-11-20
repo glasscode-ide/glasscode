@@ -268,11 +268,16 @@ fn trust_set(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let word = text(op, "project");
             let project = ws.state.projects.iter().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| error(ErrorCode::NotFound, format!("No project “{word}”. `glasscode project list` lists them.")))?;
             let key = ws.control.project_keys.get(&project.id).cloned().ok_or_else(|| failed(format!("{} has no project key yet, so its policy cannot change.", project.name)))?;
-            let given = [op.text("level").is_some(), op.text("condition").is_some(), op.number("remove_condition").is_some()].iter().filter(|g| **g).count();
+            let intake = op.args.get("intake_linear").is_some() || op.args.get("intake_github").is_some() || op.on("intake_off");
+            let given = [op.text("level").is_some(), op.text("condition").is_some(), op.number("remove_condition").is_some(), intake].iter().filter(|g| **g).count();
             if given != 1 {
-                return Err(usage("Say one change: --level, --condition or --remove-condition."));
+                return Err(usage("Say one change: --level, --condition, --remove-condition, or the intake's --intake-linear, --intake-github and --intake-off."));
             }
-            if let Some(level) = op.text("level") {
+            if intake {
+                // M60: what the project picks up by itself on Autopilot.
+                let label = |name: &str| op.args.get(name).and_then(serde_json::Value::as_str).map(str::to_string);
+                Change::Intake { project: key, linear: label("intake_linear"), github: label("intake_github"), off: op.on("intake_off") }
+            } else if let Some(level) = op.text("level") {
                 let level = glasscode_core::gate::Level::parse(level).ok_or_else(|| usage(format!("“{level}” is no level: careful, standard or autopilot.")))?;
                 Change::Level { project: key, level }
             } else if let Some(condition) = op.text("condition") {

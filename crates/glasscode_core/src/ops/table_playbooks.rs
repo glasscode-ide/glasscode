@@ -65,13 +65,16 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["policy", "set"],
         summary: "a project's trust level or conditions: shows what the change does, and makes it with --confirm (you only)",
         args: &[
-            ArgSpec { name: "project", kind: ArgKind::Project, required: true, help: "the project", at: At::Word(0), missing: "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--confirm]", default: None },
+            ArgSpec { name: "project", kind: ArgKind::Project, required: true, help: "the project", at: At::Word(0), missing: "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]", default: None },
             ArgSpec { name: "level", kind: ArgKind::Word, help: "careful, standard or autopilot", at: At::Flag(&["level"]), ..ArgSpec::OPTION },
             ArgSpec { name: "condition", kind: ArgKind::Text, help: "a condition to add: not on main, never secrets/**, hours 09:00-18:00 weekdays, only Sam", at: At::Flag(&["condition"]), ..ArgSpec::OPTION },
             ArgSpec { name: "remove_condition", kind: ArgKind::Number, help: "the number of a condition to remove (1 is the first)", at: At::Flag(&["remove-condition"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "intake_linear", kind: ArgKind::Word, help: "on Autopilot, pick up Linear tickets with this label (\"\" stops)", at: At::Flag(&["intake-linear"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "intake_github", kind: ArgKind::Word, help: "on Autopilot, pick up GitHub issues with this label by trusted authors (\"\" stops)", at: At::Flag(&["intake-github"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "intake_off", kind: ArgKind::Switch, help: "stop picking up work by itself", at: At::Flag(&["intake-off"]), ..ArgSpec::OPTION },
             CONFIRM,
         ],
-        examples: &["policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--confirm]"],
+        examples: &["policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]"],
         ..CHANGE
     },
     OpSpec {
