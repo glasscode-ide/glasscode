@@ -121,6 +121,9 @@ impl Workspace {
             today_acks: self.mirror.today_acks.clone(),
             cli_acks: self.mirror.cli_acks.clone(),
             skill_off: self.state.agents.skill_off,
+            // The approved authority goes one way, to a server that keeps it (crit-5).
+            authority: (self.control.engine_v2 && self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "authority")))
+                .then(|| glasscode_core::gate::FromMac::of(&self.control.authority, None)),
         };
         let (syncer, client) = (self.mirror.syncer.clone(), self.mirror.client.clone());
         let task = cx.background_spawn(async move {

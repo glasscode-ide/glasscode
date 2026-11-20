@@ -326,7 +326,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Protocol** (`glasscode_core::control`): the command sends `Request { args, session, sig,
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
-  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`). A failure's `data` says
+  `--no-wait`, `--timeout`) and the help text, which the registry makes (`ops::help`). A failure's `data` says
   which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
   its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
   (with the v2 engine an object also gets `op`).
@@ -344,10 +344,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   asked, what was decided, the exit code) for the journal of M14. Tests keep it honest: a golden
   corpus of command lines recorded from the app before the registry (`ops_golden`), a source scan
   that each `plan(Kind::…)` is its op's v1 kind, and the sentences of the approvals checked
-  against what v1 said. GPUI actions stay for key bindings and text editing; from M33.1 they, and
-  the Jump commands, call ops, and each list the registry absorbs is deleted by the slice that
-  absorbs it (`HELP` in M33.1, `past_tense` with M14's Activity, the manager's `VIEWS` and
-  `SECTIONS` with M33.2's `ui.open`). Only the person names a session, a project or a task by the
+  against what v1 said. `glasscode help` is made from the table (`ops/help.rs`: each command's
+  line is its op's example and summary; the file keeps only the layout), with a golden of its
+  text. GPUI actions stay for key bindings and text editing; a key bound to an op uses the one
+  action `RunOp { name, args }`, and a Jump command that is an op runs it. Both go through
+  `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
+  `ops::typed`) by the same rules as the command, so the person's own actions leave the
+  journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
+  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
+  `SECTIONS` with M33.2's `ui.open`).
+- **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
+  person can do in the app, by screen, in one class: an op, an op planned for later, the
+  person's alone (with what the manager says and where it takes them), or view-local. Tests
+  with no window keep it whole: every op has a row, every Settings card a settings key (or only
+  actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
+  command a row, and every row names a function of the app. A committed count of the raw click
+  handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
@@ -372,6 +385,28 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
   `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
   the person only.
+- **The gate** (`glasscode_core::gate`, Manager v2's M21.1) decides with the v2 engine; with v1,
+  Settings › Permissions decides as before. `gate::decide(caller, op, targets, policy, grant)` is
+  pure: a hard limit (a project that stays on this Mac never goes to the server, for the person
+  too), then `never` (the project's list, its one model account (D17), a path it keeps out of
+  reach, a pause), then the level's ceiling, then an explicit ask (the list, the branch, hours and
+  person conditions), then a chat grant (M21.2), then the level's default in `gate::TABLE`
+  (Careful, Standard, Autopilot, per op group, for the manager and for the sessions it drives).
+  The strictest of the caller's own project (from the app's record of its session) and every
+  target's project wins. Sessions the person started keep their Settings › Permissions rules in
+  their own project; reaching into another, they get the stricter of those and that project's.
+  Person-only ops (`human_only`) run only from the window; a shell tab confirms them there, and a
+  phone only answers an approval, and only one this Mac paired itself. The app parses the words,
+  resolves the targets, and decides before the op's handler is called (`control_handle_v2`); a
+  refused op never reaches it. The authority store is `authority/`: the live policy the app
+  writes, the approved snapshot the gate reads (`approved/policy.json`), the phones this Mac
+  paired (`devices.json`), the pause, and who started or drives each session (`origins.json`).
+  A live file that differs counts as the snapshot at most Careful, and the app shows the change
+  in plain words with "Import this change" or "Keep what I approved". Each store fails closed and
+  never reads its `.prev`. The server gets the approved copy inside `mirror.sync` (without the
+  projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
+  never allows, and never sends authority back. Levels, playbooks and approvals get their
+  Settings screens in M53; until then a policy is set by writing the live file and importing it.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.

@@ -80,6 +80,8 @@ pub struct Extras {
     pub today_acks: Vec<u64>,
     pub cli_acks: Vec<u64>,
     pub skill_off: bool,
+    /// The approved authority for the server (v2 homes, and servers that announce "authority").
+    pub authority: Option<crate::gate::FromMac>,
 }
 
 #[derive(Default)]
@@ -275,6 +277,8 @@ impl Syncer {
             today_acks: extras.today_acks,
             cli_acks: extras.cli_acks,
             skill_off: extras.skill_off,
+            // Stamped with this Mac's id, which is read here, off the main thread.
+            authority: extras.authority.map(|copy| crate::gate::FromMac { from: machine.clone(), ..copy }),
         };
         let mut params = serde_json::to_value(&sync)?;
         params["mac_id"] = json!(mac_id);
@@ -333,7 +337,8 @@ impl Syncer {
 
 /// This Mac, for the server: a stable local id made once, and its name.
 pub fn identity() -> (String, String) {
-    let device: Option<String> = None;
+    // One id for this machine: M10's (made from this older one when it was there, M57 step 1).
+    let device: Option<String> = crate::paths::MachineId::this().ok().map(|id| id.as_str().to_string());
     let id = device.unwrap_or_else(|| {
         let path = crate::paths::root().join("machine-id");
         std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {

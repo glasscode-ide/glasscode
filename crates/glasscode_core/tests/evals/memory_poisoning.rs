@@ -130,12 +130,29 @@ fn a_local_only_project_never_reaches_the_server() {
     needs("M20.3", "build the server's copy and check that no object of it holds the local-only project's text");
 }
 
+/// The gate's part of D17: a session on another account than the one the project allows reads
+/// nothing of it through Glasscode (the manager's memory, its sessions). That the brief leaves the
+/// fact out is M20.2's, which reads the same setting.
 #[test]
-#[ignore = "needs M21.1"]
 fn another_account_does_not_read_the_project() {
+    use glasscode_core::caller::Caller;
+    use glasscode_core::gate::{self, Decision, Policy, PolicySet, ProjectPolicy, SessionFacts, SessionOrigin};
     let cases: Vec<Case> = of(&["scope"]).into_iter().filter(|case| case.needs == "M21.1").collect();
     assert_eq!(cases.len(), 1);
-    needs("M21.1", "check that the project's model account setting (D17) keeps the fact from a session of another account");
+    let case = &cases[0];
+    let project = glasscode_core::paths::ProjectKey::parse(&case.project).unwrap();
+    let allowed = case.expect.more["model_account"].as_str().unwrap();
+    let account = case.probe["account"].as_str().unwrap();
+    assert_ne!(allowed, account);
+    let mut set = PolicySet { policy: Policy { projects: [(project.clone(), ProjectPolicy { model_account: Some(allowed.into()), ..ProjectPolicy::default() })].into(), ..Policy::default() }, ..PolicySet::default() };
+    let facts = |account: &str| SessionFacts { project: Some(project.clone()), origin: SessionOrigin::Person, account: Some(account.into()), ..SessionFacts::default() };
+    set.sessions.insert("s-probe".into(), facts(account));
+    let read = glasscode_core::ops::Op { spec: glasscode_core::ops::find("manager.memory").unwrap(), args: serde_json::json!({}) };
+    let targets = glasscode_core::ops::Targets { projects: vec![project.clone()], ..Default::default() };
+    let caller = Caller::Session { id: "s-probe".into(), project: None };
+    assert!(matches!(gate::decide(&caller, &read, &targets, &set, None), Decision::Never { .. }), "{}", case.id);
+    set.sessions.insert("s-probe".into(), facts(allowed));
+    assert_eq!(gate::decide(&caller, &read, &targets, &set, None), Decision::Allow, "{}", case.id);
 }
 
 #[test]

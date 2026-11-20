@@ -1,5 +1,5 @@
-//! The ops that change projects and worktrees (M12.2). Summaries and examples are `cli.rs`'s
-//! `HELP`, word for word (a test checks); the words, options and messages are those of
+//! The ops that change projects and worktrees (M12.2). Summaries and examples are the
+//! help's (`help.rs`), word for word (a test checks); the words, options and messages are those of
 //! `project_plan` and `worktree_plan` in `commands2.rs`, which these replace.
 
 use super::spec::{ArgKind, ArgSpec, At, EffectClass, OpGroup, OpHost, OpSpec, Retry, Undo};

@@ -565,11 +565,12 @@ impl Workspace {
         let mut items: Vec<Item> = vec![
             command("New session…", icons::PLUS, "", keymap::label(&NewSession), |ws, window, cx| ws.open_new_session(None, None, window, cx)),
             command("Go to Today", icons::TODAY, "Your day", String::new(), |ws, window, cx| ws.open_today(window, cx)),
-            command("Go to the Board", icons::TICKETS, "Tickets from Linear", String::new(), |ws, _, cx| ws.show_tickets(cx)),
+            // The commands that are ops run as the person's ops (`run_op`), so they reach the journal.
+            command("Go to the Board", icons::TICKETS, "Tickets from Linear", String::new(), |ws, window, cx| ws.run_op_named("app.open", serde_json::json!({ "place": "tickets" }), window, cx)),
             command("Go to Pull requests", icons::PULL_REQUEST, "Yours, and those that ask for your review", String::new(), |ws, window, cx| {
                 ws.go(View::PullRequests, window, cx)
             }),
-            command("Go to Usage", icons::USAGE, "Claude and Codex", String::new(), |ws, _, cx| ws.show_view(View::Usage, cx)),
+            command("Go to Usage", icons::USAGE, "Claude and Codex", String::new(), |ws, window, cx| ws.run_op_named("app.open", serde_json::json!({ "place": "usage" }), window, cx)),
             command("Go back", icons::BACK, "", keymap::label(&GoBack), |ws, window, cx| ws.go_back(window, cx)),
             command("Go forward", icons::FORWARD, "", keymap::label(&GoForward), |ws, window, cx| ws.go_forward(window, cx)),
             command("Open Settings", icons::SETTINGS, "", keymap::label(&OpenSettings), |ws, window, cx| ws.go(View::Settings, window, cx)),

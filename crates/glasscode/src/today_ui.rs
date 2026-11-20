@@ -761,8 +761,14 @@ impl Workspace {
         if key.is_empty() || sig.is_empty() {
             return false;
         }
-        // The key must be one Glasscode added to the server for a phone (authorized_keys).
-        let known = self.phones.as_ref().is_some_and(|phones| phones.iter().any(|p| p.key.split_whitespace().take(2).eq(key.split_whitespace().take(2))));
+        // The key must be one this Mac paired itself: with the v2 engine, one pinned in the
+        // authority store at pairing (trust-m5), never one the server merely lists; with v1, one
+        // Glasscode added to the server for a phone (authorized_keys), as before.
+        let known = if self.control.engine_v2 {
+            self.control.authority.devices.contains(&glasscode_core::gate::device_id(key))
+        } else {
+            self.phones.as_ref().is_some_and(|phones| phones.iter().any(|p| p.key.split_whitespace().take(2).eq(key.split_whitespace().take(2))))
+        };
         known && glasscode_core::remote::verify_phone_signature(key, message.as_bytes(), sig)
     }
 
