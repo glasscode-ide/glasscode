@@ -1268,7 +1268,11 @@ the epoch changed or another move is under way), then one push and one `worktree
 the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
 the same move tag gives the same session, so a retry after a lost reply never starts a
 second), then `owners.commit`, which starts them. A failure before the commit sends
-`owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
+`owners.abort`: the held sessions go, and the unit stays where it was. A commit whose reply is
+lost is settled by the owner record; when the record cannot be read either (the connection went
+with the reply), the outcome is unknown (`switch::Unsettled`): the move's note
+(`State::worktrees_moving`) stays, nothing of the unit starts on the Mac, and `switch::recover`
+settles it by the record once the server answers again. A move that makes no
 progress for 2 minutes is given up by the server's clock. Every runner checks the record:
 glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
 a session whose worktree the server owns now, but keeps the session listed. Opening it brings

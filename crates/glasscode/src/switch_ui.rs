@@ -584,8 +584,14 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result: anyhow::Result<Moved> = task.await;
             let _ = this.update(cx, |this, cx| {
-                // The move ended, one way or the other: its note goes.
-                this.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
+                // The move ended, one way or the other: its note goes. Unless its commit went
+                // unanswered with the connection: it may have moved, so nothing of it starts
+                // here, and `switch_recover` settles it by the owner record once the server
+                // answers again.
+                let unsettled = matches!(&result, Err(err) if recorded && switch::outcome_unknown(err));
+                if !unsettled {
+                    this.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
+                }
                 match result {
                     Ok(Moved::ToServer(sessions, not_started)) => {
                         if recorded && !this.state.worktrees_elsewhere.contains(&unit.key) {
