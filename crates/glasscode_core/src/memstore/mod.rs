@@ -537,7 +537,36 @@ impl Memory {
         }
     }
 
-    /// Know-how from work (step 3) into a know-how or work file: labelled agent-written (`learned`,
+    /// The person's answer to a question Glasscode asked for memory (moving in, M54): tier-one words
+    /// the person typed in Glasscode's own window, given for memory, are confirmed at once, as
+    /// "Remember that …" is. `fact` is the statement kept (the question's subject with the answer);
+    /// `answer` must be in the record, in spans the person typed.
+    pub fn remember_answer(&self, record: &WordsRecord, answer: &str, fact: &str, file: &MemFile, section: Option<&str>) -> Result<Remembered> {
+        if !holds_facts(file) {
+            return Err(MemoryError::NotAllowed(format!("{} holds know-how, not facts", file.rel())));
+        }
+        if record.tier() != crate::words::Tier::One || entry::typed_quote(record, answer).is_none() {
+            return Err(MemoryError::NotAllowed("Not kept: an answer counts only as the person's own typed words".into()));
+        }
+        let text = entry::clean_text(fact);
+        if text.is_empty() {
+            return Err(MemoryError::NotAllowed("an answer needs some words".into()));
+        }
+        let source = Source::Words(record.id.to_string());
+        let (id, written) = self.write(&Who::You, "Remember an answer", std::slice::from_ref(&text), |tx| {
+            tx.scan_with(file.project(), &text, section)?;
+            let stamp = tx.stamp()?;
+            if let Some(same) = duplicate(tx.doc(file)?, &text) {
+                return Ok(same.header.id.clone());
+            }
+            let id = tx.new_id()?;
+            tx.doc(file)?.add(section, Entry { text: text.clone(), header: Header::new(id.clone(), Status::Confirmed, Kind::Fact, source.clone(), stamp) });
+            Ok(id)
+        })?;
+        Ok(Remembered::Entry { id, status: Status::Confirmed, written })
+    }
+
+    /// Know-how from work (step 3) into a know-how or work file    /// Know-how from work (step 3) into a know-how or work file: labelled agent-written (`learned`,
     /// `source=session:<id>`), with no authority. From the person it is confirmed. A know-how file
     /// the person edited is not overwritten: the text becomes a proposal for it.
     pub fn learn(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, code: Option<CodeRef>) -> Result<Remembered> {

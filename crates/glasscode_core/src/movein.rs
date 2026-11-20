@@ -36,6 +36,8 @@ pub enum SourceKind {
     RulesFile,
     CodeOwners,
     GitHistory,
+    /// The study of a project (M54): a line a headless run drafted from what Glasscode read there.
+    Study,
 }
 
 impl SourceKind {
@@ -46,6 +48,7 @@ impl SourceKind {
             SourceKind::RulesFile => "rules file",
             SourceKind::CodeOwners => "CODEOWNERS",
             SourceKind::GitHistory => "90 days of git history",
+            SourceKind::Study => "the study of the project",
         }
     }
 
@@ -227,9 +230,9 @@ fn small(path: &Path) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Target {
     /// `PROJECT.md`, under a heading.
-    Project(&'static str),
+    Project(String),
     /// A know-how topic.
-    Knowhow(&'static str),
+    Knowhow(String),
     /// The person's profile.
     Profile,
 }
@@ -256,17 +259,18 @@ pub fn harvest(found: &[Found]) -> Vec<Proposal> {
     for source in found.iter().filter(|f| f.ticked) {
         let lines: Vec<(Target, String)> = match source.kind {
             SourceKind::ClaudeMemory | SourceKind::CodexMemory => {
-                let target = if source.project.is_some() { Target::Knowhow("from-agents") } else { Target::Profile };
+                let target = if source.project.is_some() { Target::Knowhow("from-agents".into()) } else { Target::Profile };
                 markdown_files(&source.path).iter().flat_map(|text| lines_of(text)).map(|line| (target.clone(), line)).collect()
             }
             SourceKind::RulesFile => {
                 let texts = if source.path.is_dir() { markdown_files(&source.path) } else { small(&source.path).into_iter().collect() };
-                texts.iter().flat_map(|text| lines_of(text)).map(|line| (Target::Knowhow("conventions"), line)).collect()
+                texts.iter().flat_map(|text| lines_of(text)).map(|line| (Target::Knowhow("conventions".into()), line)).collect()
             }
             SourceKind::CodeOwners => small(&source.path)
-                .map(|text| text.lines().filter_map(codeowners_line).map(|line| (Target::Project("Owners"), line)).collect())
+                .map(|text| text.lines().filter_map(codeowners_line).map(|line| (Target::Project("Owners".into()), line)).collect())
                 .unwrap_or_default(),
-            SourceKind::GitHistory => committers(&source.path).into_iter().map(|line| (Target::Project("People"), line)).collect(),
+            SourceKind::GitHistory => committers(&source.path).into_iter().map(|line| (Target::Project("People".into()), line)).collect(),
+            SourceKind::Study => Vec::new(),
         };
         for (target, text) in lines.into_iter().take(MOST_PER_SOURCE) {
             let key = dedupe_key(&text);
@@ -411,7 +415,7 @@ pub fn run_id(at_ms: u64) -> String {
 fn target_file(project: Option<&ProjectKey>, target: &Target) -> MemFile {
     match (project, target) {
         (Some(key), Target::Project(_)) => MemFile::Project(key.clone()),
-        (Some(key), Target::Knowhow(topic)) => MemFile::Knowhow(key.clone(), topic.to_string()),
+        (Some(key), Target::Knowhow(topic)) => MemFile::Knowhow(key.clone(), memstore::layout::topic(topic).unwrap_or_else(|| "notes".into())),
         _ => MemFile::Profile,
     }
 }
@@ -439,7 +443,7 @@ pub fn propose(memory: &Memory, run: &str, proposals: &[Proposal]) -> Result<(us
                     more.push(("contradicts".into(), "yes".into()));
                 }
                 let section = match &p.target {
-                    Target::Project(heading) => Some(heading.to_string()),
+                    Target::Project(heading) => Some(heading.clone()),
                     _ => None,
                 };
                 memstore::Proposed { file: target_file(project.as_ref(), &p.target), section, text: p.text.clone(), source: memstore::Source::Import(path.display().to_string()), more }
@@ -478,6 +482,318 @@ pub fn accept_all(memory: &Memory, run: &str, source: Option<&str>) -> Result<us
 /// Undo a run: its waiting proposals leave the inbox, and what was accepted of it is forgotten.
 pub fn undo(memory: &Memory, run: &str) -> Result<usize, MemoryError> {
     memory.undo_run(run)
+}
+
+// ----- part 2: the study pass, the questions and the answers (M54) -----------------------------
+
+use serde::{Deserialize, Serialize};
+
+use crate::gate::Level;
+use crate::runtime::budget::{Ledger, Turn};
+use crate::runtime::study;
+use crate::store::{OnDamage, Store};
+
+/// The most a study reads of one file.
+const READ_BYTES: usize = 20 * 1024;
+
+/// What a project's study reads, by Glasscode itself and with no model: its README, its agents'
+/// instructions, its CI files, its scripts and its last 50 commits. Each read is the source a
+/// drafted line must name. Files go through `reads::file_read`, which refuses credentials and
+/// anything outside the project. It reads the disk and runs git: never on the main thread.
+pub fn study_reads(root: &Path) -> Vec<(String, String)> {
+    let roots = [root.to_path_buf()];
+    let mut out = Vec::new();
+    let mut take = |rel: &str| {
+        let path = rel.split('/').fold(root.to_path_buf(), |p, part| p.join(part));
+        if path.is_file()
+            && let Ok(text) = crate::reads::file_read(&path, &roots)
+        {
+            out.push((rel.to_string(), crate::reads::clip(&text, READ_BYTES)));
+        }
+    };
+    if let Some(readme) = ["README.md", "README", "readme.md", "Readme.md"].iter().find(|name| root.join(name).is_file()) {
+        take(readme);
+    }
+    for name in ["AGENTS.md", "CLAUDE.md", "package.json", "Makefile", "Cargo.toml", "pyproject.toml", "CODEOWNERS", ".github/CODEOWNERS"] {
+        take(name);
+    }
+    let mut workflows: Vec<String> = std::fs::read_dir(root.join(".github").join("workflows")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".yml") || n.ends_with(".yaml")).collect();
+    workflows.sort();
+    for name in workflows.into_iter().take(3) {
+        take(&format!(".github/workflows/{name}"));
+    }
+    if let Ok(log) = crate::reads::git_log(root, 50) {
+        let lines: Vec<String> = log.as_array().into_iter().flatten().map(|c| format!("{} {} {}", c["date"].as_str().unwrap_or(""), c["author"].as_str().unwrap_or(""), c["subject"].as_str().unwrap_or(""))).collect();
+        if !lines.is_empty() {
+            out.push(("git log".into(), lines.join("\n")));
+        }
+    }
+    out
+}
+
+/// The profile of a study run: the one headless profile, with no tool at all (`headless_profile`,
+/// `HeadlessKind::Study`), its answer bound to the study's schema.
+pub fn study_profile(agent: crate::model::AgentKind, schema_file: &Path, answer_file: &Path) -> crate::profile::SessionProfile {
+    crate::profile::headless_profile(crate::profile::HeadlessKind::Study, agent, &study::schema(), schema_file, answer_file)
+}
+
+/// One project's study, as moving in keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Studied {
+    pub key: ProjectKey,
+    pub name: String,
+    pub state: StudyState,
+    /// How many proposals it made.
+    #[serde(default)]
+    pub proposed: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudyState {
+    Waiting,
+    Done,
+    Failed(String),
+}
+
+/// What a question asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ask {
+    /// The project's level (Careful, Standard, Autopilot): a policy proposal.
+    Level,
+    /// Who owns a part of the project.
+    Owner { area: String },
+    /// What sessions must not touch.
+    OffLimits,
+    Other,
+}
+
+/// A question of moving in, asked in the chat's topic "Moving in".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    pub project: Option<ProjectKey>,
+    pub project_name: String,
+    pub ask: Ask,
+    pub text: String,
+    /// What holds when it is not answered.
+    pub default: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// Its item in the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+}
+
+/// The most questions moving in asks.
+pub const MOST_QUESTIONS: usize = 8;
+
+/// The progress of moving in (`manager/movein.json`): its run, each project's study, the questions
+/// and their answers, and why it is paused. It survives a restart, so a paused study resumes where
+/// it was. Damaged, it starts again (the proposals it made are in memory's inbox).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Progress {
+    pub run: Option<String>,
+    pub projects: Vec<Studied>,
+    pub questions: Vec<Question>,
+    pub paused: Option<String>,
+    /// Tokens the studies used.
+    pub tokens: u64,
+    /// The conversation topic of the questions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+}
+
+impl Store for Progress {
+    const NAME: &'static str = "manager/movein";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: OnDamage = OnDamage::Empty;
+
+    fn path() -> PathBuf {
+        crate::paths::root().join("manager").join("movein.json")
+    }
+}
+
+impl Progress {
+    /// A study of `projects` (most recently used first), with the run's id.
+    pub fn start(run: &str, projects: &[ProjectIn]) -> Progress {
+        Progress { run: Some(run.to_string()), projects: projects.iter().map(|p| Studied { key: p.key.clone(), name: p.name.clone(), state: StudyState::Waiting, proposed: 0 }).collect(), ..Progress::default() }
+    }
+
+    /// Whether every project was studied (or failed).
+    pub fn studied(&self) -> bool {
+        self.projects.iter().all(|p| p.state != StudyState::Waiting)
+    }
+
+    /// The questions not answered yet.
+    pub fn open(&self) -> Vec<&Question> {
+        self.questions.iter().filter(|q| q.answer.is_none()).collect()
+    }
+
+    /// Add questions, in order of value, up to [`MOST_QUESTIONS`] in all: a project's level first
+    /// (for the projects used most recently), then who owns what and what is off limits.
+    pub fn ask(&mut self, more: Vec<Question>) {
+        let mut more = more;
+        more.sort_by_key(|q| match q.ask {
+            Ask::Level => 0,
+            Ask::Owner { .. } => 1,
+            Ask::OffLimits => 2,
+            Ask::Other => 3,
+        });
+        for q in more {
+            if self.questions.len() >= MOST_QUESTIONS {
+                break;
+            }
+            let same = self.questions.iter().any(|old| old.project == q.project && (old.ask == q.ask || memstore::entry::fold(&old.text) == memstore::entry::fold(&q.text)));
+            if !same {
+                self.questions.push(q);
+            }
+        }
+    }
+}
+
+fn question(project: &Studied, ask: Ask, text: String, default: &str) -> Question {
+    let mut bytes = [0u8; 4];
+    crate::sys::random_bytes(&mut bytes);
+    Question { id: bytes.iter().map(|b| format!("{b:02x}")).collect(), project: Some(project.key.clone()), project_name: project.name.clone(), ask, text, default: default.into(), answer: None, item: None }
+}
+
+/// The level questions of the first projects (the ones used most recently): asked first.
+pub fn level_questions(progress: &Progress, most: usize) -> Vec<Question> {
+    progress
+        .projects
+        .iter()
+        .take(most)
+        .map(|p| question(p, Ask::Level, format!("How much may the manager do in {} on its own? Careful (it asks before anything but reading), Standard (it starts and drives sessions; what leaves this Mac asks), or Autopilot.", p.name), "Careful"))
+        .collect()
+}
+
+/// What one step of the study pass did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// A project was studied: its proposals, and its questions asked.
+    Studied { key: ProjectKey, proposed: usize, questions: usize },
+    /// Over the budget: it waits, and says why.
+    Paused(String),
+    Failed { key: ProjectKey, why: String },
+    /// Every project was studied.
+    Done,
+}
+
+/// Study the next project waiting: when the budget allows (`Turn::Study`: today's cap and the
+/// plan's windows), read it, run the study on it (`run`: the headless run with the study's profile;
+/// a stand-in in tests), propose what it drafted to memory's inbox with each line's source, and
+/// ask its questions. Above the budget it pauses, and the next call resumes. It reads the disk and
+/// runs a model through `run`: never on the main thread.
+pub fn study_next(progress: &mut Progress, projects: &[ProjectIn], ledger: &mut Ledger, now_ms: u64, memory: &Memory, run: &mut dyn FnMut(&ProjectIn, &str) -> Result<String, String>) -> Step {
+    let Some(at) = progress.projects.iter().position(|p| p.state == StudyState::Waiting) else {
+        progress.paused = None;
+        return Step::Done;
+    };
+    if let Err(blocked) = ledger.allow(Turn::Study, now_ms) {
+        let why = blocked.sentence();
+        progress.paused = Some(why.clone());
+        return Step::Paused(why);
+    }
+    progress.paused = None;
+    let key = progress.projects[at].key.clone();
+    let fail = |progress: &mut Progress, why: String| {
+        progress.projects[at].state = StudyState::Failed(why.clone());
+        Step::Failed { key: key.clone(), why }
+    };
+    let Some(project) = projects.iter().find(|p| p.key == key) else { return fail(progress, "its folder is not here".into()) };
+    let reads = study_reads(&project.root);
+    if reads.is_empty() {
+        return fail(progress, "nothing to read there".into());
+    }
+    let sources: Vec<String> = reads.iter().map(|(source, _)| source.clone()).collect();
+    let input = study::input(&project.name, &reads);
+    let reply = match run(project, &input) {
+        Ok(reply) => reply,
+        Err(why) => return fail(progress, why),
+    };
+    let usage = study::usage(&reply, input.len());
+    ledger.record_study(usage, now_ms);
+    progress.tokens += usage.total();
+    let draft = match study::parse(&reply, &sources) {
+        Ok(draft) => draft,
+        Err(why) => return fail(progress, why),
+    };
+    let path_of = |source: &str| if source == "git log" { project.root.clone() } else { source.split('/').fold(project.root.clone(), |p, part| p.join(part)) };
+    let mut proposals = Vec::new();
+    let mut add = |target: Target, line: &study::Line| {
+        proposals.push(Proposal { project: Some(key.clone()), target, text: line.text.clone(), sources: vec![(SourceKind::Study, path_of(&line.source))], contradicts: Vec::new() });
+    };
+    for line in &draft.project {
+        add(Target::Project(if line.section.trim().is_empty() { "Overview".into() } else { line.section.trim().to_string() }), line);
+    }
+    for line in &draft.knowhow {
+        add(Target::Knowhow(if line.section.trim().is_empty() { "study".into() } else { line.section.trim().to_string() }), line);
+    }
+    for line in &draft.people {
+        add(Target::Project("People".into()), line);
+    }
+    flag_contradictions(&mut proposals);
+    let run_id = progress.run.clone().unwrap_or_else(|| run_id(now_ms));
+    let proposed = match propose(memory, &run_id, &proposals) {
+        Ok((proposed, _)) => proposed,
+        Err(err) => return fail(progress, err.to_string()),
+    };
+    let studied = progress.projects[at].clone();
+    let asked: Vec<Question> = draft
+        .questions
+        .iter()
+        .map(|q| match q.about.as_str() {
+            "owner" if !q.area.trim().is_empty() => question(&studied, Ask::Owner { area: q.area.trim().to_string() }, q.question.trim().to_string(), "unanswered: memory says nothing"),
+            "off_limits" => question(&studied, Ask::OffLimits, q.question.trim().to_string(), "nothing beyond what the project's level says"),
+            _ => question(&studied, Ask::Other, q.question.trim().to_string(), "unanswered: memory says nothing"),
+        })
+        .collect();
+    let before = progress.questions.len();
+    progress.ask(asked);
+    progress.projects[at].state = StudyState::Done;
+    progress.projects[at].proposed = proposed;
+    Step::Studied { key, proposed, questions: progress.questions.len() - before }
+}
+
+/// What an answer did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answered {
+    /// It became a confirmed fact (its text).
+    Kept(String),
+    /// A level for a project: a policy proposal, which the person confirms in Settings.
+    Level(ProjectKey, Level),
+    /// "skip": the default holds.
+    Skipped,
+}
+
+/// The person's answer to question `id`: their words `record` (tier one: typed in Glasscode's own
+/// window, the composer of the topic "Moving in"). An owner or an "off limits" answer becomes a
+/// confirmed fact of the project; a level becomes a policy proposal; "skip" leaves the default.
+pub fn answer(progress: &mut Progress, id: &str, record: &crate::words::WordsRecord, memory: &Memory) -> Result<Answered, String> {
+    let Some(q) = progress.questions.iter_mut().find(|q| q.id == id) else { return Err(format!("no question {id}")) };
+    let said = record.text.trim().to_string();
+    if said.is_empty() || matches!(said.to_lowercase().as_str(), "skip" | "pass" | "later" | "-") {
+        q.answer = Some("skipped".into());
+        return Ok(Answered::Skipped);
+    }
+    let file_of = |kind: fn(ProjectKey) -> MemFile| q.project.clone().map_or(MemFile::Profile, kind);
+    let (fact, file, section) = match &q.ask {
+        Ask::Level => {
+            let level = said.split(|c: char| !c.is_alphanumeric()).find_map(Level::parse).ok_or_else(|| "say Careful, Standard or Autopilot (or skip)".to_string())?;
+            let key = q.project.clone().ok_or_else(|| "this question has no project".to_string())?;
+            q.answer = Some(said);
+            return Ok(Answered::Level(key, level));
+        }
+        Ask::Owner { area } => (format!("Owner of {area}: {said}"), file_of(MemFile::Project), "Owners"),
+        Ask::OffLimits => (format!("Off limits: {said}"), file_of(MemFile::Policy), "Off limits"),
+        Ask::Other => (format!("{} {said}", q.text.trim_end_matches('?').trim()), file_of(MemFile::Project), "Notes"),
+    };
+    memory.remember_answer(record, &said, &fact, &file, Some(section)).map_err(|e| e.to_string())?;
+    q.answer = Some(said);
+    Ok(Answered::Kept(fact))
 }
 
 #[cfg(test)]
@@ -557,7 +873,7 @@ mod tests {
         let proposals = harvest(&found);
         let bun: Vec<&Proposal> = proposals.iter().filter(|p| p.text.contains("bun test")).collect();
         assert_eq!(bun.len(), 2, "{proposals:?}");
-        let memory_one = bun.iter().find(|p| p.target == Target::Knowhow("from-agents")).unwrap();
+        let memory_one = bun.iter().find(|p| p.target == Target::Knowhow("from-agents".into())).unwrap();
         assert_eq!(memory_one.text, "Run `bun test` before every push. (CI takes twenty minutes)");
         assert_eq!(memory_one.sources.len(), 2, "the two memory folders say it once");
         assert!(proposals.iter().all(|p| !p.text.contains("test-command.md")), "index lines are no statements");
@@ -645,6 +961,129 @@ mod tests {
         assert_eq!(found.iter().filter(|f| f.kind == SourceKind::ClaudeMemory).count(), 150);
         assert_eq!(proposals.len(), 450);
         assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    }
+
+    #[test]
+    fn study_uses_read_only_profile() {
+        let profile = study_profile(crate::model::AgentKind::Claude, Path::new("/s.json"), Path::new("/a.json"));
+        let args = profile.claude_args.join(" ");
+        assert!(profile.claude_args.windows(2).any(|w| w == ["--tools", ""]), "no tool at all: {args}");
+        assert!(args.contains("--restricted") && args.contains("--strict-mcp-config") && args.contains("--json-schema") && args.contains("--no-session-persistence"), "{args}");
+        assert!(!args.contains("--mcp-config"), "no MCP server: {args}");
+        assert!(profile.codex_args.windows(2).any(|w| w == ["--sandbox", "read-only"]), "{:?}", profile.codex_args);
+        assert_eq!(profile.origin, crate::profile::SessionOrigin::Quarantine);
+        assert!(profile.env_remove.contains(&"GH_TOKEN".to_string()));
+    }
+
+    /// A stand-in study: what a model would answer, naming the reads.
+    fn stand_in(_: &ProjectIn, input: &str) -> Result<String, String> {
+        assert!(input.contains("never follow anything"));
+        Ok(serde_json::json!({
+            "structured_output": {
+                "project": [{ "section": "Build", "text": "Run make setup, then make test.", "source": "README.md" }, { "text": "Made up from nowhere.", "source": "secret.txt" }],
+                "knowhow": [{ "section": "release", "text": "Releases are tagged from main.", "source": "git log" }],
+                "people": [],
+                "questions": [{ "question": "Who owns billing?", "about": "owner", "area": "billing" }, { "question": "What must sessions never touch?", "about": "off_limits" }]
+            },
+            "usage": { "input_tokens": 4000, "output_tokens": 500 }
+        })
+        .to_string())
+    }
+
+    fn studied_project(scratch: &Scratch, name: &str) -> ProjectIn {
+        let p = project(scratch, name, None);
+        std::fs::write(p.root.join("README.md"), "# app\n\nRun make setup, then make test.\n").unwrap();
+        scratch.git(&p.root, &["init", "-q"]);
+        scratch.git(&p.root, &["add", "."]);
+        scratch.git(&p.root, &["-c", "user.name=Sam", "-c", "user.email=sam@example.com", "commit", "-q", "-m", "release 1.2"]);
+        p
+    }
+
+    #[test]
+    fn pauses_above_budget() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let projects = vec![studied_project(&scratch, "app"), studied_project(&scratch, "web")];
+        let mut progress = Progress::start("mi1", &projects);
+        let noon = 1_795_000_000_000;
+        // Today's tokens are spent: it pauses, and says why.
+        let mut ledger = Ledger { daily_cap: 3_000, ..Ledger::default() };
+        ledger.record_study(crate::runtime::Usage { input: 3_000, ..Default::default() }, noon);
+        let calls = std::cell::Cell::new(0);
+        let mut run = |p: &ProjectIn, input: &str| {
+            calls.set(calls.get() + 1);
+            stand_in(p, input)
+        };
+        let step = study_next(&mut progress, &projects, &mut ledger, noon, &memory, &mut run);
+        assert!(matches!(step, Step::Paused(_)), "{step:?}");
+        assert!(progress.paused.is_some() && progress.projects.iter().all(|p| p.state == StudyState::Waiting));
+        // The next UTC day it resumes where it was; one study pushes today over the cap again.
+        let tomorrow = noon + 86_400_000;
+        assert!(matches!(study_next(&mut progress, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Studied { proposed: 2, .. }));
+        assert!(progress.paused.is_none());
+        assert!(matches!(study_next(&mut progress, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Paused(_)), "4,500 of 3,000 tokens today");
+        assert_eq!(calls.get(), 1);
+        // It survives a restart: the store keeps where it is.
+        progress.save().unwrap();
+        let mut again = Progress::load().unwrap();
+        assert_eq!(again.projects[0].state, StudyState::Done);
+        ledger.daily_cap = 1_000_000;
+        assert!(matches!(study_next(&mut again, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Studied { .. }));
+        assert_eq!(study_next(&mut again, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Done);
+    }
+
+    #[test]
+    fn the_study_proposes_with_sources_and_answers_become_facts() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let projects = vec![studied_project(&scratch, "app")];
+        let mut progress = Progress::start("mi2", &projects);
+        progress.ask(level_questions(&progress, 3));
+        let mut ledger = Ledger::default();
+        assert!(matches!(study_next(&mut progress, &projects, &mut ledger, crate::clock::now_ms(), &memory, &mut stand_in), Step::Studied { proposed: 2, questions: 2, .. }));
+        // Every proposal names the file it came from; the line from no read is gone.
+        let waiting = waiting(&memory, "mi2").unwrap();
+        assert_eq!(waiting.len(), 2);
+        assert!(waiting.iter().any(|(_, text, to, source)| text == "Run make setup, then make test." && to.ends_with("PROJECT.md") && source.ends_with("README.md")));
+        assert!(waiting.iter().all(|(_, text, ..)| !text.contains("Made up")));
+        // The person's answers: tier-one words typed in the topic "Moving in".
+        let words = |text: &str| crate::memstore::tests_support::chat(text);
+        let owner = progress.questions.iter().find(|q| matches!(q.ask, Ask::Owner { .. })).unwrap().id.clone();
+        assert_eq!(answer(&mut progress, &owner, &words("Sam and Priya"), &memory).unwrap(), Answered::Kept("Owner of billing: Sam and Priya".into()));
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Project(projects[0].key.clone())).unwrap();
+        let kept = doc.entries().find(|e| e.text == "Owner of billing: Sam and Priya").unwrap();
+        assert_eq!(kept.header.status, memstore::Status::Confirmed);
+        let level = progress.questions.iter().find(|q| q.ask == Ask::Level).unwrap().id.clone();
+        assert_eq!(answer(&mut progress, &level, &words("standard, please"), &memory).unwrap(), Answered::Level(projects[0].key.clone(), Level::Standard));
+        let off = progress.questions.iter().find(|q| q.ask == Ask::OffLimits).unwrap().id.clone();
+        assert_eq!(answer(&mut progress, &off, &words("skip"), &memory).unwrap(), Answered::Skipped);
+        assert!(progress.open().is_empty());
+        // Words of no one (text Glasscode typed) are no answer.
+        let mut other = Progress::start("mi3", &projects);
+        other.ask(level_questions(&other, 1));
+        other.questions[0].ask = Ask::OffLimits;
+        let injected = crate::memstore::tests_support::said(crate::words::Origin::Injected(crate::words::InjectKind::Playbook), "the deploy script", None);
+        let id = other.questions[0].id.clone();
+        assert!(answer(&mut other, &id, &injected, &memory).is_err());
+    }
+
+    #[test]
+    fn at_most_eight_questions() {
+        let scratch = Scratch::new();
+        let projects: Vec<ProjectIn> = (0..12).map(|n| project(&scratch, &format!("p{n:02}"), None)).collect();
+        let mut progress = Progress::start("mi4", &projects);
+        progress.ask(level_questions(&progress, 12));
+        let first = progress.projects[0].clone();
+        let more: Vec<Question> = (0..10).map(|n| question(&first, Ask::Owner { area: format!("area {n}") }, format!("Who owns area {n}?"), "none")).collect();
+        progress.ask(more);
+        assert_eq!(progress.questions.len(), MOST_QUESTIONS);
+        // The levels come first, for the projects used most recently.
+        assert!(progress.questions.iter().all(|q| q.ask == Ask::Level));
+        assert_eq!(progress.questions[0].project_name, "p00");
+        // A question asked once is not asked again.
+        let before = progress.questions.clone();
+        progress.ask(level_questions(&progress, 2));
+        assert_eq!(progress.questions, before);
     }
 
     #[test]
