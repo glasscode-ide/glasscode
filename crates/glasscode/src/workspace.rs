@@ -150,6 +150,8 @@ pub struct Workspace {
     pub switch: Option<crate::switch_ui::SwitchForm>,
     /// Moving in (M35): its dialog's state, kept while it is hidden.
     pub movein: Option<crate::movein_ui::MoveIn>,
+    /// The scheduled export, as last read (M25).
+    pub export_schedule: Option<glasscode_core::portability::ExportSchedule>,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
@@ -292,6 +294,7 @@ impl Workspace {
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
             movein: None,
+            export_schedule: None,
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
@@ -1103,6 +1106,7 @@ impl Workspace {
         let removed = self.state.sessions.remove(index);
         self.stop_terminal(session_id);
         agents::remove_session_files(session_id);
+        self.state.pr_of.remove(session_id);
         if self.state.active_session.as_deref() == Some(session_id) {
             self.state.active_session = self
                 .state
@@ -1377,6 +1381,7 @@ impl Workspace {
             self.stop_terminal(id);
             glasscode_core::agents::remove_session_files(id);
             self.state.ticket_of.remove(id);
+            self.state.pr_of.remove(id);
             self.state.custom_titles.remove(id);
         }
         self.state.sessions.retain(|s| s.project_id != project_id);

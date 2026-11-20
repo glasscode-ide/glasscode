@@ -659,6 +659,21 @@ impl Memory {
         self.commit(&head, &[(file, Some(text))], &Who::Manager, "Update a work file", &[])
     }
 
+    /// A project's `POLICY.md` with `header` as its generated header (M21.1 step 6), its prose
+    /// kept: one commit, for the policy the person approved; nothing when it is the same.
+    pub fn write_policy(&self, key: &ProjectKey, header: &str) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let file = MemFile::Policy(key.clone());
+        let existing = snap.text(&file)?;
+        let text = crate::gate::with_policy_header(existing.as_deref(), header);
+        if existing.as_deref() == Some(text.as_str()) {
+            return Ok(Written::Unchanged);
+        }
+        self.commit(&head, &[(file, Some(text))], &Who::You, "The policy's header, from the policy you approved", &[])
+    }
+
     /// A branch was renamed (exec-12): the work file of `from` moves to the name of `item`'s key, in
     /// one commit (git follows it as a rename), its marker naming the new id and its notes kept.
     pub fn move_work(&self, from: &WorkKey, item: &crate::work::WorkItem) -> Result<Written> {
@@ -950,10 +965,14 @@ impl Memory {
     /// told that history before that point is gone (mem-13). Human only.
     pub fn forget(&self, ids: &[&str], secret: bool) -> Result<Forgot> {
         let mut texts = Vec::new();
+        let mut words = Vec::new();
         let ((), written) = self.write(&Who::You, "Forget", &[], |tx| {
             for id in ids {
                 let (file, found) = tx.find(id)?;
                 texts.push(found.text.clone());
+                if let Source::Words(record) = &found.header.source {
+                    words.push(record.clone());
+                }
                 let stamp = tx.stamp()?;
                 tx.doc(&file)?.forget(id, stamp);
             }
@@ -963,7 +982,22 @@ impl Memory {
         if !secret {
             return Ok(Forgot { written, history_restarted: false });
         }
-        self.restart_history(&texts)
+        let forgot = self.restart_history(&texts)?;
+        Self::ask_server_to_restart();
+        // The words the secret came from go from the words ledger too: the record it cites, and
+        // any record that holds its text.
+        let folded: Vec<String> = texts.iter().map(|t| entry::fold(t)).filter(|t| t.trim().chars().count() >= 4).collect();
+        if let Err(err) = crate::words::forget(|record| words.contains(&record.id.as_str().to_string()) || folded.iter().any(|t| entry::fold(&record.text).contains(t.as_str()))) {
+            log::warn!("memory: a forgotten secret's words could not be taken from the words ledger: {err}");
+        }
+        Ok(forgot)
+    }
+
+    /// Restart this memory's history from its current tree (the server, when the Mac forgot a
+    /// secret, a person, a project or an employer: M25, M57), so what was forgotten is in no
+    /// object here either.
+    pub fn forget_history(&self) -> Result<Forgot> {
+        self.restart_history(&[])
     }
 
     /// Forget every entry whose words hold `words` (ignoring case), in every file, and rebuild the
@@ -1003,7 +1037,9 @@ impl Memory {
             Ok(())
         })?;
         search::forget_cache();
-        self.restart_history(&[])
+        let forgot = self.restart_history(&[])?;
+        Self::ask_server_to_restart();
+        Ok(forgot)
     }
 
     /// Rebuild memory's history from its current tree into one fresh commit, delete every other
@@ -1036,6 +1072,13 @@ impl Memory {
         }
         search::forget_cache();
         Ok(Forgot { written: Written::Commit(fresh), history_restarted: true })
+    }
+
+    /// A server that has this memory's entries restarts its history at the next sync (M57).
+    fn ask_server_to_restart() {
+        if let Err(err) = crate::store::update::<sync::ServerForget, _>(|request| request.restart = true) {
+            log::warn!("memory: the server will not be asked to forget: {err}");
+        }
     }
 
     /// Bring files of another memory in (M25 import): each merged with this memory's copy entry by

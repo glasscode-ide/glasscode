@@ -137,6 +137,63 @@ pub fn outgoing(memory: &Memory, since: Option<&str>, left: &LeftOut, machine: &
     Ok((out, Some(head)))
 }
 
+/// What the server is asked to forget at the next sync (`manager/server-forget.json`): after this
+/// Mac forgot a secret, a person, a project or an employer, its history restarts there too, and
+/// the folders of a forgotten project or employer go. It holds no forgotten text, only that and
+/// which folders. A sync that the server answered clears what it sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ServerForget {
+    pub restart: bool,
+    pub drop: Vec<String>,
+}
+
+impl crate::store::Store for ServerForget {
+    const NAME: &'static str = "manager/server-forget";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::paths::root().join("manager").join("server-forget.json")
+    }
+}
+
+impl ServerForget {
+    /// Ask for folders to go too (`projects/<key>`, `org/<employer>`).
+    pub fn drop_folders(&mut self, folders: impl IntoIterator<Item = String>) {
+        for folder in folders {
+            if !self.drop.contains(&folder) {
+                self.drop.push(folder);
+            }
+        }
+    }
+
+    /// The server did what `sent` asked: only what was asked since stays.
+    pub fn done(&mut self, sent: &ServerForget) {
+        if sent.restart {
+            self.restart = false;
+        }
+        self.drop.retain(|folder| !sent.drop.contains(folder));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.restart && self.drop.is_empty()
+    }
+}
+
+/// The server's side of a forget the Mac asks for at a sync: the folders go, then (after the Mac's
+/// files with their tombstones are taken) the history restarts. It reads and writes the disk.
+pub fn forget_here(memory: &Memory, request: &ServerForget) -> Result<bool> {
+    if !request.drop.is_empty() {
+        memory.drop_folders(&request.drop)?;
+    }
+    if request.restart {
+        memory.forget_history()?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// What [`Memory::take_synced`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taken {

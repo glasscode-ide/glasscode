@@ -429,6 +429,23 @@ impl Workspace {
                         Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
                     ),
                     row(
+                        "Export by itself",
+                        self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
+                        Some(
+                            segments()
+                                .children([(0u32, "Off"), (1, "Daily"), (7, "Weekly")].into_iter().map(|(days, label)| {
+                                    let on = self.export_schedule.as_ref().map_or(0, |s| s.every_days) == days;
+                                    segment(format!("data-schedule-{days}"), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
+                                }))
+                                .into_any_element(),
+                        ),
+                    ),
+                    row(
+                        "Move out",
+                        "Give Claude its notes back: what Glasscode kept as Claude's memory of each project goes to that project's memory folder in each Claude account. Nothing there is written over.",
+                        Some(crate::ui::button("data-move-out", "Move out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_move_out_now(cx))).into_any_element()),
+                    ),
+                    row(
                         "Uninstall",
                         "First a list of everything Glasscode made, and what it would leave for you; nothing goes before you confirm.",
                         Some(crate::ui::button("data-uninstall", "Uninstall…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_uninstall_ask(cx))).into_any_element()),

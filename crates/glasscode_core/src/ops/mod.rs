@@ -668,6 +668,8 @@ mod tests {
         work.drop Board LocalWrite Idempotent Core board work.reopen person v2
         work.reopen Board LocalWrite Idempotent Core board work.done person v2
         data.export Settings LocalWrite Verifiable Core settings - person v2
+        data.schedule Settings LocalWrite Verifiable Core settings - person v2
+        data.move_out Settings LocalWrite Verifiable Core settings - person v2
         data.import Settings LocalWrite Verifiable Core settings - person v2
         data.forget Settings Destructive Verifiable Core settings - person v2
         data.uninstall Settings Destructive Verifiable Core settings - person v2

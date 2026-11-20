@@ -59,6 +59,9 @@ pub struct CiFix {
     not_before: HashMap<EffectKey, u64>,
     /// v2 (M40): the person's playbooks, run from the journal's new events.
     runner: Runner,
+    /// v2, once it took over from v1's harness (`handover`): the native built-ins' state
+    /// (`manager/builtins.json`).
+    pub natives: Option<glasscode_core::playbooks::native::Native>,
 }
 
 /// The playbook runner's place in the journal.
@@ -67,6 +70,20 @@ struct Runner {
     cursor: Option<glasscode_core::journal::Cursor>,
     read_at: Option<Instant>,
     busy: bool,
+    /// The built-ins switched on in the playbooks' file, as last read (None: not read yet; they
+    /// count as on, as a built-in is until switched off).
+    builtins_on: Option<std::collections::BTreeSet<String>>,
+}
+
+/// What one read of the journal gives the runner.
+#[derive(Default)]
+struct RunnerRead {
+    cursor: Option<glasscode_core::journal::Cursor>,
+    firings: Vec<glasscode_core::playbooks::engine::Firing>,
+    trips: Vec<(Option<String>, String)>,
+    /// The events the native built-ins read (only once v2 took over).
+    natives: Vec<glasscode_core::journal::Event>,
+    builtins_on: Option<std::collections::BTreeSet<String>>,
 }
 
 /// A CI ask waiting in the delivery queue (v2).
@@ -698,26 +715,30 @@ impl Workspace {
         let home = self.acts_as_home();
         let policy = self.control.authority.policy.clone();
         let confirmed: Vec<String> = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+        let natives = self.ci_fix.natives.is_some();
         let task = cx.background_spawn(async move {
             use glasscode_core::playbooks::{self, engine, limits::{Held, LedgerCounts}, model};
             // The first round starts at the journal's end: old events are not acted on.
-            let Some(cursor) = cursor else { return (Some(glasscode_core::journal::end()), Vec::new(), Vec::new()) };
+            let Some(cursor) = cursor else { return RunnerRead { cursor: Some(glasscode_core::journal::end()), ..RunnerRead::default() } };
             let (events, next) = glasscode_core::journal::read_from(&cursor, 500);
             if events.is_empty() || !home {
-                return (Some(next), Vec::new(), Vec::new());
+                return RunnerRead { cursor: Some(next), ..RunnerRead::default() };
             }
+            // The native built-ins read their kinds whatever the person's playbooks want.
+            let native: Vec<glasscode_core::journal::Event> = if natives { events.iter().filter(|e| playbooks::native::KINDS.contains(&e.kind.as_str())).cloned().collect() } else { Vec::new() };
             let schema = model::journal_schema();
             let book = match playbooks::load(&schema) {
                 Ok(book) => book,
                 Err(err) => {
                     log::warn!("playbooks: {err}; the person's playbooks do not run until it is repaired");
-                    return (Some(next), Vec::new(), Vec::new());
+                    return RunnerRead { cursor: Some(next), natives: native, ..RunnerRead::default() };
                 }
             };
+            let builtins_on = Some(playbooks::builtins::switched_on(&book.playbooks));
             let live = book.live();
             let kinds: std::collections::BTreeSet<&str> = live.iter().filter_map(|p| p.trigger.filter().map(|f| f.kind.as_str())).collect();
             if !events.iter().any(|event| kinds.contains(event.kind.as_str())) {
-                return (Some(next), Vec::new(), Vec::new());
+                return RunnerRead { cursor: Some(next), natives: native, builtins_on, ..RunnerRead::default() };
             }
             let mut counts = glasscode_core::effects::load().map(|ledger| LedgerCounts::of(&ledger)).unwrap_or_default();
             if let Some(at) = book.all_released_ms {
@@ -777,15 +798,19 @@ impl Workspace {
             let stopped: Vec<&str> = trips.iter().filter_map(|(id, _)| id.as_deref()).collect();
             let all = trips.iter().any(|(id, _)| id.is_none());
             firings.retain(|f| !all && !stopped.contains(&f.playbook.as_str()));
-            (Some(next), firings, trips)
+            RunnerRead { cursor: Some(next), firings, trips, natives: native, builtins_on }
         });
         cx.spawn(async move |this, cx| {
-            let (cursor, firings, trips) = task.await;
+            let RunnerRead { cursor, firings, trips, natives, builtins_on } = task.await;
             let _ = this.update(cx, |ws, cx| {
                 let runner = &mut ws.ci_fix.runner;
                 runner.busy = false;
                 runner.read_at = Some(Instant::now());
                 runner.cursor = cursor;
+                if builtins_on.is_some() {
+                    runner.builtins_on = builtins_on;
+                }
+                ws.native_events(&natives, cx);
                 for (id, why) in trips {
                     let text = match &id {
                         Some(id) => format!("Playbook “{id}” is paused: {why}. It waits for you to release it."),
@@ -806,7 +831,104 @@ impl Workspace {
     /// One firing: watch records it, tell tells the person, ask and act claim the effect and run
     /// the op through the gate as the manager's wake (the project's level decides whether a card
     /// asks first). The playbooks that gave way to it are recorded as fired too, for their limits.
-    fn playbook_fire(&mut self, firing: glasscode_core::playbooks::engine::Firing, cx: &mut Context<Self>) {
+/// Who does which of the manager's rules now (`handover`).
+    pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
+        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
+    }
+
+    fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
+        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some() }
+    }
+
+    fn builtin_on(&self, id: &str) -> bool {
+        self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
+    }
+
+    /// v2 takes over from v1's harness, once in a run, when it may: the engine is v2, the manager
+    /// on, this Mac its home (and not v1's server copy), the journal runs and this run moved v1's
+    /// data (M44). The built-ins' state comes from v1's `seen` the first time, else from
+    /// `manager/builtins.json`.
+    pub(crate) fn manager_take_over(&mut self, _cx: &mut Context<Self>) {
+        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() || self.manager_on_server() {
+            return;
+        }
+        if !self.lifetime.migrated_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        use glasscode_core::playbooks::native::{Native, NativeFile};
+        use glasscode_core::store::Store as _;
+        let native = match self.manager.harness.take_over(glasscode_core::model::now()) {
+            Some(seeded) => {
+                if let Err(err) = (NativeFile { native: seeded.clone() }).save() {
+                    log::warn!("manager: the built-ins' state could not be written ({err})");
+                }
+                seeded
+            }
+            None => NativeFile::load().map(|file| file.native).unwrap_or_else(|err| {
+                log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
+                Native::default()
+            }),
+        };
+        // One outbox per mode: from now on v2's (`manager/outbox.json`, filled by M44 from v1's).
+        let outbox = glasscode_core::manager::messages::Outbox::load().map(|file| file.messages).map_err(|err| err.to_string());
+        if let Err(why) = &outbox {
+            let text = format!("The manager's outbox could not be read ({why}). No message goes out until it is repaired.");
+            self.mtick_line(glasscode_core::manager::Who::System, text.clone(), None);
+            self.notify_manager("Messages are held".to_string(), text, _cx);
+        }
+        self.manager.harness.use_v2_outbox(outbox);
+        self.manager.harness.dirty = true;
+        self.manager.harness.save();
+        log::info!("manager: v2 took over from v1's harness ({} reviews wait to be told)", native.pending());
+        self.ci_fix.natives = Some(native);
+    }
+
+    /// The journal's events for the native built-ins: what each says, for the rules that are v2's.
+    fn native_events(&mut self, events: &[glasscode_core::journal::Event], cx: &mut Context<Self>) {
+        use glasscode_core::manager::handover::{self, Owner};
+        if events.is_empty() || self.ci_fix.natives.is_none() {
+            return;
+        }
+        let (mode, on) = (self.manager_mode(), self.ci_fix.runner.builtins_on.clone());
+        let switched = |id: &str| on.as_ref().is_none_or(|on| on.contains(id));
+        let wanted: Vec<&glasscode_core::journal::Event> = events.iter().filter(|e| handover::rule_of_kind(e.kind.as_str()).is_some_and(|rule| handover::owner(rule, mode, &switched) == Owner::V2)).collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let snap = self.manager_snapshot();
+        let actions = self.native_with(&snap, |native, view| wanted.iter().flat_map(|e| native.on_event(*e, view)).collect());
+        self.manager_apply(actions, cx);
+    }
+
+    /// Each round of the manager, while review-tell is v2's: the reviews whose sessions are free
+    /// now.
+    pub(crate) fn native_tell_ready(&mut self, snap: &glasscode_core::manager::Snapshot) -> Vec<glasscode_core::manager::Action> {
+        use glasscode_core::manager::handover::{self, Owner, Rule};
+        if self.ci_fix.natives.is_none() || handover::owner(Rule::ReviewTell, self.manager_mode(), &|id| self.builtin_on(id)) != Owner::V2 {
+            return Vec::new();
+        }
+        self.native_with(snap, |native, view| native.tell_ready(view))
+    }
+
+    /// Run the built-ins on a view of now, and keep their state (on disk when it changed).
+    fn native_with(&mut self, snap: &glasscode_core::manager::Snapshot, run: impl FnOnce(&mut glasscode_core::playbooks::native::Native, &glasscode_core::playbooks::native::View) -> Vec<glasscode_core::manager::Action>) -> Vec<glasscode_core::manager::Action> {
+        let Some(mut native) = self.ci_fix.natives.take() else { return Vec::new() };
+        let before = native.clone();
+        let me: Vec<String> = snap.me.iter().cloned().collect();
+        let view = glasscode_core::playbooks::native::View { settings: &self.state.manager, sessions: &snap.sessions, me: &me, now_ms: glasscode_core::clock::now_ms() };
+        let actions = run(&mut native, &view);
+        // A few lines, and only when they changed: written here, in order.
+        if native != before {
+            use glasscode_core::store::Store as _;
+            if let Err(err) = (glasscode_core::playbooks::native::NativeFile { native: native.clone() }).save() {
+                log::warn!("manager: the built-ins' state could not be written ({err})");
+            }
+        }
+        self.ci_fix.natives = Some(native);
+        actions
+    }
+
+        fn playbook_fire(&mut self, firing: glasscode_core::playbooks::engine::Firing, cx: &mut Context<Self>) {
         use glasscode_core::playbooks::Autonomy;
         let what = format!("{} {}", firing.op, firing.args);
         match firing.autonomy {

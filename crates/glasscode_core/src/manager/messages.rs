@@ -242,6 +242,33 @@ pub fn send_intent(message: &OutMessage, launch: &str) -> crate::effects::Intent
     }
 }
 
+/// v2's send of an outbox message: claimed in the effect ledger ([`send_intent`]), then sent,
+/// then finished. Sent before (its claim done): sent, and not again. Cut off before (claimed, no
+/// result): it may have gone out, so it is not sent again; the person decides. It writes the disk.
+pub fn send_claimed(intent: &crate::effects::Intent, generation: u64, send: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    use crate::effects::{self, Claim, EffectState};
+    let home = crate::paths::MachineId::this().map_err(|err| format!("this Mac's id could not be read ({err}); it was not sent"))?;
+    match effects::claim_at(intent, &home, generation) {
+        Ok(Claim::New(key)) => {
+            let result = send();
+            let state = match &result {
+                Ok(()) => EffectState::Done(serde_json::Value::Null),
+                Err(why) => EffectState::Failed(why.clone()),
+            };
+            if let Err(err) = effects::finish(&key, state) {
+                log::error!("effects: the send of {key} could not be recorded ({err})");
+            }
+            result
+        }
+        Ok(Claim::Already(record)) => match record.state {
+            EffectState::Done(_) => Ok(()),
+            EffectState::Failed(why) => Err(why),
+            EffectState::Claimed | EffectState::Uncertain => Err("It may have gone out already: Glasscode stopped while sending it. Check with them before you allow it again.".to_string()),
+        },
+        Err(err) => Err(format!("the effect ledger could not be written ({err}); it was not sent")),
+    }
+}
+
 /// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
 /// none at all while the manager is switched off.
 pub fn ready(data: &Data, settings: &Settings) -> Vec<String> {
@@ -516,6 +543,32 @@ mod tests {
     }
 
     const SIG: &str = "Robo, on behalf of Alex";
+
+    /// A message's version is sent once: again, it is not sent; cut off before its result, it
+    /// is not sent again either, and the person hears why.
+    #[test]
+    fn a_claimed_send_goes_once() {
+        let _home = crate::testkit::home::Home::new();
+        let message = OutMessage { id: "o1".into(), to: "Sam".into(), body: "The fix is pushed.".into(), updated: 100, ..OutMessage::default() };
+        let intent = send_intent(&message, "run-1");
+        let mut sent = 0;
+        assert_eq!(send_claimed(&intent, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(send_claimed(&intent, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(sent, 1);
+        // A crash between the claim and the result.
+        let cut = send_intent(&OutMessage { updated: 200, ..message.clone() }, "run-1");
+        let home = crate::paths::MachineId::this().unwrap();
+        assert!(matches!(crate::effects::claim_at(&cut, &home, 0), Ok(crate::effects::Claim::New(_))));
+        let again = send_claimed(&cut, 0, || { sent += 1; Ok(()) });
+        assert!(again.as_ref().is_err_and(|why| why.contains("may have gone out")), "{again:?}");
+        assert_eq!(sent, 1);
+        // A failed one, allowed again, is a new version: it goes.
+        let failed = send_intent(&OutMessage { updated: 300, ..message.clone() }, "run-1");
+        assert_eq!(send_claimed(&failed, 0, || Err("the messenger said no".into())), Err("the messenger said no".into()));
+        let retried = send_intent(&OutMessage { updated: 400, ..message }, "run-1");
+        assert_eq!(send_claimed(&retried, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(sent, 2);
+    }
 
     #[test]
     fn ask_always_never_sends() {

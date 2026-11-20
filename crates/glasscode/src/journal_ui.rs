@@ -360,7 +360,7 @@ impl Workspace {
             .filter_map(|s| {
                 let project = self.control.project_keys.get(&s.project_id)?;
                 let ticket = self.state.ticket_of.get(&s.id).cloned();
-                Some((glasscode_core::identity::WorkKey::for_session(project, s, ticket.as_deref(), None), s.clone(), ticket))
+                Some((self.state.work_key(project, s), s.clone(), ticket))
             })
             .collect();
         // What the last status round confirmed: a pull request that existed before this run, or
@@ -524,7 +524,7 @@ impl Workspace {
     }
 
     /// A session's project key, for its events.
-    fn journal_key(&self, session: &str) -> Option<ProjectKey> {
+    pub(crate) fn journal_key(&self, session: &str) -> Option<ProjectKey> {
         let project = &self.state.session(session)?.project_id;
         self.control.project_keys.get(project).cloned()
     }

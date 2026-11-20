@@ -187,7 +187,7 @@ impl Workspace {
         input.worktree = Some(wt.path.clone());
         input.branch = (!wt.branch.is_empty()).then(|| wt.branch.clone());
         input.work = match sessions.first() {
-            Some(s) => Some(glasscode_core::identity::WorkKey::for_session(&key, s, None, None)),
+            Some(s) => Some(self.state.work_key(&key, s)),
             None => input.branch.clone().map(|id| glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Branch, id }),
         };
         for s in &sessions {

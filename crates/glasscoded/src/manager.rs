@@ -793,7 +793,7 @@ fn refresh_reviewers(shared: &Shared) {
                     .reviewers
                     .iter()
                     .filter(|r| !r.is_bot)
-                    .map(|r| ReviewerInfo { login: r.login.clone(), state: if r.state == "REQUESTED" { "PENDING".into() } else { r.state.clone() } })
+                    .map(|r| ReviewerInfo { login: r.login.clone(), state: if r.state == "REQUESTED" { "PENDING".into() } else { r.state.clone() }, association: r.association.clone() })
                     .collect();
                 found.insert(key, reviewers);
             }
@@ -1487,7 +1487,7 @@ mod tests {
         state.repos.insert("p1".into(), "acme/shop".into());
         let mut reviewers = HashMap::new();
         assert!(pr_info(&state.sessions[0], &state, &reviewers).is_none());
-        reviewers.insert(("acme/shop".to_string(), 12), vec![ReviewerInfo { login: "mira-example".into(), state: "CHANGES_REQUESTED".into() }]);
+        reviewers.insert(("acme/shop".to_string(), 12), vec![ReviewerInfo { login: "mira-example".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }]);
         let pr = pr_info(&state.sessions[0], &state, &reviewers).unwrap();
         assert_eq!((pr.repo.as_str(), pr.number, pr.state.as_str(), pr.ci.as_str()), ("acme/shop", 12, "draft", "failing"));
         assert!(pr.conflicting);

@@ -4,8 +4,10 @@
 //! through v1's harness and, as the events the journal writes of them, through these, and the
 //! actions are compared.
 //!
-//! - **needs-you**: a session stopped to ask the person something (`session.needs_input`): one
-//!   notification per stop; the stop ends when the session works again (`session.activity`).
+//! - **needs-you**: a session stopped to ask the person something: its activity became
+//!   `needs_input` (what v1's snapshot reads as `NeedsYou`), or it said so (`session.needs_input`,
+//!   counted only while it is in that state: Claude's idle reminder is no stop). One notification
+//!   per stop; the stop ends when the session works again (`session.activity`).
 //! - **review-tell**: someone reviewed a session's PR (`review.received`): the person hears it at
 //!   once; the session is told once it is free (idle), each review once, and only reviews whose
 //!   author passes `trusted_author` (D27) are told to the session at all. An approval is news for
@@ -16,7 +18,8 @@
 //!   told once a day per account, with the suggestion to hand its sessions to another.
 //!
 //! They run only while the manager runs (`builtins::runs`); v1's harness does the same while the
-//! engine is v1, and until the v2 manager takes over (M51), so the app does not run both. Their
+//! engine is v1, and until v2 takes over (`manager::handover`), so the app never runs both: from
+//! then on the harness keeps its bookkeeping and leaves these rules to them. Their
 //! state ([`Native`]) is what the runner keeps across a restart, as v1 keeps `Data::seen`: it
 //! serializes, and the parity tests carry it across their restarts.
 
@@ -27,6 +30,9 @@ use serde::{Deserialize, Serialize};
 use crate::manager::{Action, SessionInfo, SessionState, Settings};
 
 use super::engine::EventView;
+
+/// The kinds of events the built-ins read.
+pub const KINDS: &[&str] = &["session.needs_input", "session.activity", "review.received", "turn.ended", "usage.threshold"];
 
 /// What the person and the app know besides the event.
 pub struct View<'a> {
@@ -133,15 +139,15 @@ impl Native {
     /// What one event leads to, at once.
     pub fn on_event(&mut self, event: &dyn EventView, view: &View) -> Vec<Action> {
         match event.kind() {
-            "session.needs_input" => self.needs_you(event, view),
-            "session.activity" => {
-                if let Some(session) = event.session()
-                    && text(event, "activity").as_deref() == Some("working")
-                {
+            "session.needs_input" => self.needs_you(event, view, false),
+            "session.activity" => match (event.session(), text(event, "activity").as_deref()) {
+                (Some(session), Some("working")) => {
                     self.asked.remove(session);
+                    Vec::new()
                 }
-                Vec::new()
-            }
+                (Some(_), Some("needs_input")) => self.needs_you(event, view, true),
+                _ => Vec::new(),
+            },
             "review.received" => self.review(event, view),
             "turn.ended" => self.turn(event, view),
             "usage.threshold" => self.usage(event, view),
@@ -149,9 +155,14 @@ impl Native {
         }
     }
 
-    fn needs_you(&mut self, event: &dyn EventView, view: &View) -> Vec<Action> {
+    /// `stopped`: the session's activity says it waits; else only its word, which counts while
+    /// the person's view of it says it waits too.
+    fn needs_you(&mut self, event: &dyn EventView, view: &View, stopped: bool) -> Vec<Action> {
         let Some(id) = event.session() else { return Vec::new() };
         let Some(session) = view.session(id) else { return Vec::new() };
+        if !stopped && session.state != SessionState::NeedsYou {
+            return Vec::new();
+        }
         if !self.asked.insert(id.to_string()) {
             return Vec::new();
         }
@@ -275,7 +286,7 @@ mod tests {
             url: format!("https://github.com/acme/app/pull/{number}"),
             state: "open".into(),
             ci: "passing".into(),
-            reviewers: reviewers.iter().map(|(l, s)| ReviewerInfo { login: (*l).into(), state: (*s).into() }).collect(),
+            reviewers: reviewers.iter().map(|(l, s)| ReviewerInfo { login: (*l).into(), state: (*s).into(), ..ReviewerInfo::default() }).collect(),
             ..PrInfo::default()
         }
     }
@@ -336,7 +347,7 @@ mod tests {
         let mut prev: Option<Snapshot> = None;
         for round in rounds {
             let Some(round) = round else {
-                harness = Harness { data: harness.data.clone(), prev: None, dirty: false };
+                harness = Harness { data: harness.data.clone(), prev: None, dirty: false, ..Harness::default() };
                 native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
                 prev = None;
                 continue;
@@ -344,6 +355,45 @@ mod tests {
             old.extend(harness.step(&s, round, round.at).into_iter().filter(|a| matches!(a, Action::Notify { .. } | Action::TellSession { .. })));
             let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
             for e in events_of(prev.as_ref(), round, &mut reader) {
+                new.extend(native.on_event(&e, &view));
+            }
+            if prev.is_some() {
+                new.extend(native.tell_ready(&view));
+            }
+            prev = Some(round.clone());
+        }
+        (old, new)
+    }
+
+    /// The same rounds once v2 took over: v1's harness keeps its bookkeeping but leaves needs-you
+    /// and review-tell to these built-ins, its reader hands the reviews over as `review.received`
+    /// events, and together they say exactly what v1's harness alone says.
+    fn through_the_hand_over(rounds: &[Option<Snapshot>]) -> (Vec<Action>, Vec<Action>) {
+        use crate::manager::handover::{Mode, Owned, Owner};
+        let s = settings();
+        let owned = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true }, &|_| true);
+        assert_eq!((owned.needs_you, owned.review_tell), (Owner::V2, Owner::V2));
+        let (mut v1, mut v2) = (Harness::default(), Harness::default());
+        let mut native = Native::default();
+        let me = ["robin".to_string()];
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        let mut prev: Option<Snapshot> = None;
+        let keep = |a: &Action| matches!(a, Action::Notify { .. } | Action::TellSession { .. });
+        for round in rounds {
+            let Some(round) = round else {
+                v1 = Harness { data: v1.data.clone(), prev: None, dirty: false, ..Harness::default() };
+                v2 = Harness { data: v2.data.clone(), prev: None, dirty: false, ..Harness::default() };
+                native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
+                prev = None;
+                continue;
+            };
+            old.extend(v1.step(&s, round, round.at).into_iter().filter(keep));
+            let step = v2.step_with(&s, round, round.at, &owned);
+            new.extend(step.actions.into_iter().filter(keep));
+            let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
+            let mut events = events_of(prev.as_ref(), round, &mut crate::manager::Data::default()).into_iter().filter(|e| e.kind.as_str() != "review.received").collect::<Vec<_>>();
+            events.extend(step.events);
+            for e in events {
                 new.extend(native.on_event(&e, &view));
             }
             if prev.is_some() {
@@ -401,6 +451,8 @@ mod tests {
             let (old, new) = both(rounds);
             assert!(!old.is_empty(), "scenario {n} does something");
             assert_eq!(new, old, "scenario {n}");
+            let (old, new) = through_the_hand_over(rounds);
+            assert_eq!(new, old, "scenario {n}, through the hand-over");
         }
     }
 

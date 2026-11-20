@@ -63,6 +63,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("memory.pending", memory_pending),
     ("data.export", data_export),
     ("data.import", data_import),
+    ("data.schedule", data_schedule),
+    ("data.move_out", data_move_out),
     ("data.forget", data_forget),
     ("data.uninstall", data_uninstall),
     ("session.list", session_list),
@@ -1793,6 +1795,9 @@ struct MemoryAsk {
     project: Option<(String, std::path::PathBuf, Option<glasscode_core::paths::ProjectKey>)>,
     /// The session whose work it is.
     session: Option<glasscode_core::model::Session>,
+    /// What its work is keyed by beyond the session: the window's state's ticket and pull request
+    /// links (`State::work_key`).
+    links: glasscode_core::model::State,
     /// The policy header of the project (its level, from the gate).
     policy: Option<String>,
 }
@@ -1814,7 +1819,7 @@ impl MemoryAsk {
 
     /// The piece of work of the session, in project `key`.
     fn work(&self, key: &glasscode_core::paths::ProjectKey) -> Option<glasscode_core::identity::WorkKey> {
-        self.session.as_ref().map(|s| glasscode_core::identity::WorkKey::for_session(key, s, None, None))
+        self.session.as_ref().map(|s| self.links.work_key(key, s))
     }
 }
 
@@ -1896,7 +1901,13 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         let level = ws.control_policy_set().policy.of(key).level;
         format!("Project {key} is at the {level:?} level. Glasscode's gate decides what runs; this line only says so.")
     });
-    Ok(MemoryAsk { who, everywhere, project, session, policy })
+    // Only the session's own links go to the background thread, not the whole state.
+    let mut links = glasscode_core::model::State::default();
+    if let Some(s) = &session {
+        links.ticket_of.extend(ws.state.ticket_of.get(&s.id).map(|t| (s.id.clone(), t.clone())));
+        links.pr_of.extend(ws.state.pr_of.get(&s.id).map(|p| (s.id.clone(), p.clone())));
+    }
+    Ok(MemoryAsk { who, everywhere, project, session, links, policy })
 }
 
 /// A memory error as the command's reply.
@@ -2221,6 +2232,84 @@ impl Workspace {
         .detach();
     }
 
+    /// What moving out needs: each project's key and main folder, and the Claude accounts' folders.
+    pub(crate) fn move_out_inputs(&self) -> (Vec<(glasscode_core::paths::ProjectKey, std::path::PathBuf)>, Vec<std::path::PathBuf>) {
+        let projects = self.state.projects.iter().filter_map(|p| self.control.project_keys.get(&p.id).map(|key| (key.clone(), p.root.clone()))).collect();
+        let claude = self.state.accounts.iter().filter(|a| a.agent == glasscode_core::model::AgentKind::Claude).map(|a| a.effective_dir()).collect();
+        (projects, claude)
+    }
+
+    /// Settings › Manager › Your data: give Claude its notes back.
+    pub(crate) fn data_move_out_now(&mut self, cx: &mut Context<Self>) {
+        let (projects, claude) = self.move_out_inputs();
+        let task = cx.background_spawn(async move { glasscode_core::portability::move_out(&projects, &claude, false) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(done) => ws.show_toast(format!("Wrote {} notes into Claude's memory folders; {} were there already.", done.written.len(), done.same), cx),
+                Err(err) => ws.show_toast(format!("Could not move out: {err:#}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Settings › Manager › Your data: how often exports run by themselves (0: none).
+    pub(crate) fn data_schedule_set(&mut self, every_days: u32, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { glasscode_core::store::update::<glasscode_core::portability::ExportSchedule, _>(|s| { s.every_days = every_days; s.clone() }) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                match result {
+                    Ok(schedule) => {
+                        ws.show_toast(schedule.line(), cx);
+                        ws.export_schedule = Some(schedule);
+                    }
+                    Err(err) => ws.show_toast(format!("Could not keep the schedule: {err}"), cx),
+                }
+                ws.data_export_due(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// At start, and each hour after (v2): run the scheduled export when it is due.
+    pub(crate) fn data_export_schedule_start(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 {
+            return;
+        }
+        self.data_export_due(cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(3600)).await;
+                if this.update(cx, |ws, cx| ws.data_export_due(cx)).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The scheduled export, when it is due: in the background; a failure is said once.
+    fn data_export_due(&mut self, cx: &mut Context<Self>) {
+        let local_only = self.local_only_keys();
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            let done = glasscode_core::portability::scheduled_export(glasscode_core::clock::now_ms(), &local_only);
+            (done, glasscode_core::portability::ExportSchedule::load().ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let (done, schedule) = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.export_schedule = schedule;
+                if let Err(err) = done {
+                    ws.show_toast(format!("The scheduled export did not work: {err:#}"), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The projects that stay on this Mac (the gate's policy), as memory keys.
     pub(crate) fn local_only_keys(&self) -> Vec<glasscode_core::paths::ProjectKey> {
         self.control_policy_set().policy.projects.iter().filter(|(_, p)| p.local_only).map(|(k, _)| k.clone()).collect()
@@ -2249,6 +2338,62 @@ fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             Reply::ok(format!("Exported {} memory files and {} other files to {}.{left}", done.memory_files, done.other_files, done.path.display()), json!({ "path": done.path, "memory_files": done.memory_files, "other_files": done.other_files }))
         }
         Err(err) => failed(format!("Could not export: {err:#}")),
+    })
+}
+
+fn data_schedule(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::portability::ExportSchedule;
+    use glasscode_core::store::Store as _;
+    person_only(caller, "schedule exports")?;
+    let every = match op.text("every").map(|w| w.trim().to_lowercase()) {
+        None => None,
+        Some(word) => Some(match word.as_str() {
+            "off" | "none" | "never" | "0" => 0,
+            "day" | "daily" | "1" => 1,
+            "week" | "weekly" => 7,
+            other => other.parse::<u32>().ok().filter(|n| *n <= 365).ok_or_else(|| usage(format!("“{other}” is no interval: say day, week, a number of days, or off.")))?,
+        }),
+    };
+    let to = op.text("to").map(|t| std::path::PathBuf::from(t.trim()));
+    let keep = op.number("keep").map(|n| n.clamp(1, 100) as u32);
+    memory_plan(Kind::Settings, "schedule exports", move || {
+        let changed = every.is_some() || to.is_some();
+        let result = if changed {
+            glasscode_core::store::update::<ExportSchedule, _>(|s| {
+                if let Some(every) = every {
+                    s.every_days = every;
+                }
+                if to.is_some() {
+                    s.folder = to;
+                }
+                if let Some(keep) = keep {
+                    s.keep = keep;
+                }
+                s.clone()
+            })
+        } else {
+            ExportSchedule::load()
+        };
+        match result {
+            Ok(schedule) => Reply::ok(schedule.line(), json!({ "every_days": schedule.every_days, "folder": schedule.folder(), "keep": schedule.keep(), "last_file": schedule.last_file, "last_error": schedule.last_error })),
+            Err(err) => failed(format!("Could not keep the schedule: {err}")),
+        }
+    })
+}
+
+fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    person_only(caller, "move your notes out")?;
+    let dry = op.on("dry_run");
+    let (projects, claude) = ws.move_out_inputs();
+    memory_plan(Kind::Settings, if dry { "list what moving out would write" } else { "move your notes out to Claude" }, move || match glasscode_core::portability::move_out(&projects, &claude, dry) {
+        Ok(done) => {
+            let verb = if dry { "would write" } else { "wrote" };
+            Reply::ok(
+                format!("Moving out {verb} {} notes into Claude's memory folders; {} were there already.", done.written.len(), done.same),
+                json!({ "written": done.written, "same": done.same, "dry_run": dry }),
+            )
+        }
+        Err(err) => failed(format!("Could not move out: {err:#}")),
     })
 }
 
@@ -2499,8 +2644,19 @@ fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let filter = crate::journal_ui::filter_of(ws, op)?;
     let scope = crate::journal_ui::scope_of(ws, caller);
     let limit = op.number("limit").unwrap_or(50) as usize;
+    // `--actions` (land-21): from the effect ledger, kept a year.
+    let actions = op.on("actions").then(|| op.number("pr"));
     plan(Kind::Read, "read", move |_ws, r, _, cx| {
-        let task = cx.background_spawn(async move { glasscode_core::ops::core_reads::journal_query(&filter, &scope, limit) });
+        let task = cx.background_spawn(async move {
+            use glasscode_core::ops::core_reads;
+            match actions {
+                Some(pr) => match glasscode_core::effects::recent(core_reads::ACTIONS_DAYS) {
+                    Ok(records) => core_reads::actions_query(&records, &scope, filter.project.as_ref(), pr, filter.since_ms, limit),
+                    Err(err) => Reply::fail(code::FAILED, format!("The record of actions could not be read: {err}")),
+                },
+                None => core_reads::journal_query(&filter, &scope, limit),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let reply = task.await;
             let _ = this.update(cx, |ws, _| ws.reply(r, reply));

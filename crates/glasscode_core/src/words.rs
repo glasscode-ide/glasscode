@@ -954,6 +954,39 @@ pub fn find(id: &WordsId) -> Option<WordsRecord> {
     files.iter().find_map(|path| read_all(path).into_iter().find(|record| &record.id == id))
 }
 
+/// Drop the records `drop` names from every machine's folder (a secret forgotten from memory:
+/// the words it came from go too, mem-13). Each file is rewritten under its writers' lock through
+/// a temporary file; a line that is no record stays. How many went. It reads and writes the disk.
+pub fn forget(drop: impl Fn(&WordsRecord) -> bool) -> std::io::Result<usize> {
+    flush();
+    let Ok(folders) = std::fs::read_dir(crate::paths::root().join("words")) else { return Ok(0) };
+    let files: Vec<PathBuf> = folders.flatten().filter_map(|folder| std::fs::read_dir(folder.path()).ok()).flatten().flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|e| e == "jsonl")).collect();
+    let mut gone = 0;
+    for path in files {
+        let mut lock_name = path.as_os_str().to_owned();
+        lock_name.push(".lock");
+        let _lock = crate::sys::FileLock::take(Path::new(&lock_name)).map_err(|err| std::io::Error::other(err.to_string()))?;
+        let text = std::fs::read_to_string(&path)?;
+        let mut kept = String::with_capacity(text.len());
+        let mut here = 0;
+        for line in text.lines() {
+            if serde_json::from_str::<WordsRecord>(line).is_ok_and(|record| drop(&record)) {
+                here += 1;
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        if here > 0 {
+            let temp = path.with_extension("jsonl.forget.tmp");
+            std::fs::write(&temp, &kept)?;
+            std::fs::rename(&temp, &path)?;
+            gone += here;
+        }
+    }
+    Ok(gone)
+}
+
 /// Where `quote` is in record `id`, when the person typed all of it ([`WordsRecord::quote`]).
 pub fn quote_in(id: &WordsId, quote: &str) -> Option<(usize, usize)> {
     find(id)?.quote(quote)

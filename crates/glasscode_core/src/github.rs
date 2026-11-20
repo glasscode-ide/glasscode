@@ -243,6 +243,15 @@ pub fn pr_for_branch(
     Ok(list.into_iter().next())
 }
 
+/// The repository (`owner/name`) of a pull request's web address
+/// (`https://github.com/owner/name/pull/42`, an Enterprise host too).
+pub fn repo_of_pr_url(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, rest)| rest);
+    let mut parts = rest.split('/');
+    let (_host, owner, name, pull) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    (pull == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
 /// One pull request as the New session dialog lists it.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 pub struct PrHit {
@@ -831,6 +840,9 @@ pub struct Reviewer {
     pub state: String,
     pub submitted_at: String,
     pub is_bot: bool,
+    /// The review author's association with the repository (OWNER, MEMBER, COLLABORATOR, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub association: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, Deserialize)]
@@ -1266,12 +1278,13 @@ pub(crate) fn details_from_json(number: u64, pr: &serde_json::Value, threads: &s
     details.checks = parse_checks(&pr["statusCheckRollup"]);
     for review in pr["latestReviews"].as_array().into_iter().flatten() {
         let who = login(&review["author"]);
-        details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]) });
+        let association = review["authorAssociation"].as_str().filter(|a| !a.is_empty()).map(str::to_string);
+        details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]), association });
     }
     for request in pr["reviewRequests"].as_array().into_iter().flatten() {
         let who = request["login"].as_str().or(request["name"].as_str()).unwrap_or_default().to_string();
         if !who.is_empty() && !details.reviewers.iter().any(|r| r.login == who) {
-            details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new() });
+            details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new(), association: None });
         }
     }
     for comment in pr["comments"].as_array().into_iter().flatten() {
@@ -1430,6 +1443,15 @@ mod tests {
     use std::collections::HashMap;
 
     use super::parse_slug;
+
+    #[test]
+    fn the_repository_of_a_pull_requests_address() {
+        use super::repo_of_pr_url;
+        assert_eq!(repo_of_pr_url("https://github.com/Acme/app/pull/42").as_deref(), Some("Acme/app"));
+        assert_eq!(repo_of_pr_url("https://git.example.com/acme/app/pull/7/files").as_deref(), Some("acme/app"));
+        assert_eq!(repo_of_pr_url("https://github.com/acme/app/issues/7"), None);
+        assert_eq!(repo_of_pr_url(""), None);
+    }
 
     #[test]
     fn reads_review_requests() {

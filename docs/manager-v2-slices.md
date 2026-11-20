@@ -931,11 +931,14 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - Settings › Manager › Your data, drawn in `manager_settings.rs` with v2 only: Export to Downloads, and Uninstall… with a confirm dialog.
   - **Data map:** today's files are settled. An export does not hold them, they are this machine's, and they go with everything at uninstall. The cells nobody checked in their module now say "as its module does (not checked yet)".
   - **Left out:**
-    - asking the server's copy to forget at the next sync (M57);
-    - the scheduled local export;
-    - "move out", which would copy agent notes back to Claude's folders;
-    - removing the Codex trust entries and Keychain items for the person (uninstall lists them);
     - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the server forgets at the next sync (`ServerForget`);
+    - the scheduled export (`data.schedule`);
+    - move out (`data.move_out`);
+    - uninstall now removes the worktrees' Codex trust tables and the keychain keys.
+
+    Still left out: the server's words ledger after a person is forgotten (records the server took from the Mac still name them there), and the server's old read-only copy repository from M20.3 (removed once the server takes entries).
 
 ### M30 Turns and turn reports (wave 3, L)
 
@@ -978,7 +981,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** ConPTY exit codes.
 - **Addresses:** events-1, events-2, events-3, events-m2, events-23, events-25, events-m5, alt-5, land-9, land-15, exec-15
 - **Result:**
-  - **Rule 2.** Turns run where the journal runs (a v2 home). The hooks of P05 (`StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged`, `PostCompact`) are added only with the v2 feature `turn_hooks` too: an event an older CLI does not know stops an interactive start on a dialog (P05).
+  - **Rule 2.** Turns run where the journal runs (a v2 home). The hooks of P05 (`StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged`, `PostCompact`) are added only with the v2 feature `turn_hooks` too: an event an older CLI does not know stops an interactive start on a dialog (P05). (Later `StopFailure` alone reports in every v2 home on a Claude at least `MIN_CLAUDE`: M32's gaps.)
   - **Core (`turns.rs`).**
     - `TurnMachine` closes each opened turn once, by step 1's causes. A new prompt while a turn is open closes the open one as `Interrupted` (alt-5).
     - Repeated `Stop`s of one `prompt_id` collapse into the first, and `SubagentStart` and `SubagentStop` never open or close anything.
@@ -996,7 +999,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - glasscoded feeds the same machine from its hooks, rollouts and tmux, and keeps turns open across its own restarts.
   - **Tests.** `the_stand_ins_give_one_report_per_turn_with_its_cause` runs M02's `sim::cases` (both agents: completed, interrupted, rate-limited, killed; restart and sleep mid-turn) through the machine. Unit tests cover the continuation, background tasks, internal subagents, every end closing once, Codex from the rollout, and the self-report. `one_report_per_turn_over_the_reference_load` is the Verify line.
   - **Not built here.**
-    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it.
+    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it. (Built later with M32's gaps: see M32's Result.)
     - The recorded tapes need real CLI runs, which this plan does not make in tests, so `recorded_turns_are_replayed_byte_for_byte` stays ignored.
     - No OpenTelemetry or app-server spike (events-m5) was run.
     - Evidence lists (land-15) are M32's work ledger.
@@ -1088,6 +1091,13 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
     - glasscoded reports a turn whose session is gone, from what its end said.
   - **Review facts (leftovers sweep).** The status rounds read each pull request's author, its review requests and its reviewers' newest reviews (GitHub's `reviewRequests` and `latestReviews`, and `gh`'s `--json` alike). A pull-request session's review is asked for when a review is requested, or someone other than its author reviewed it. A review session's review is posted when its own GitHub account reviewed after the session started. Each is journaled once as `review.requested` or `review.posted` (`work::review_facts`, `review_events`), so `ReviewRequested` and `ReviewPosted` now have their source.
+  - **The gaps, closed later (this follow-up).**
+    - **Pull-request sessions.** A session started to carry on with a pull request (the New session dialog's "A pull request", `session new --pr`) is kept in `State::pr_of`, so its work is `Pr(owner/name#n)` with `CiGreen` and `ReviewRequested`. `State::work_key` is the one place a session's work key is made (the ledger, memory notes, the archive).
+    - **Activity.** Today's Activity shows the day's journal lines (`journal::activity_lines`): a line per turn (its report's line), and the work's events (pull requests, CI, reviews, `work.changed`, sessions outside Glasscode, the manager's messages).
+    - **Coming up.** Today's "Coming up" reads the work ledger after the board (`WorkLedger::coming_up`): work waiting on CI or a review, then what open work still waits for ("next: CI green, a review requested"). Stuck work stays in "Needs you".
+    - **`StopFailure`.** In every v2 home, Claude's `StopFailure` reports when the Claude on the session's PATH is at least `versions::MIN_CLAUDE`. The launch runs on the main thread, so it reads only the version already known (`versions::version_soon`: Settings › Updates' check fills it, or a read it starts in the background); a session launched before then starts without the hook, as before. The other hooks of P05 stay behind `turn_hooks`.
+    - The pull-request link is kept only with the engine at v2. `State::work_key` now also keys a ticket session's memory notes and its archive by the ticket, as the ledger did (they used the branch).
+    - Still not built: the work items of the server's sessions on the Mac (M57); the vendors' goal evaluators (step 5); and no test drives the app's wiring (the link at start, the review round, Coming up, Activity), only the core parts.
   - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
@@ -1203,10 +1213,13 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - Codex's memories go to the person's profile.
     - CODEOWNERS and the committers go to PROJECT.md (Owners, People).
   - **Left out:**
-    - GitHub teams, Linear teams and the board as sources (the first is a network call; all three are part 2);
-    - moving in "from an export" (M25's export);
-    - the progress panel that survives a restart, and the per-project time and usage estimate;
     - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the board, Linear teams (from the last fetch) and GitHub teams (online, unticked) as sources;
+    - "From an export…";
+    - the per-project estimate of the study, with today's budget.
+
+    The progress that survives a restart is M54's `manager/movein.json`. The harvest itself takes about a second, so it has no panel of its own.
 
 ### M40 Playbooks and built-ins (wave 4, L)
 

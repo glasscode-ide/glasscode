@@ -62,6 +62,11 @@ pub struct Lifetime {
     restart_now: bool,
     /// v1's data was moved into the v2 stores in this run (or it was done before) (M44).
     migrated: bool,
+    /// ... and the move worked: v2 may take over from v1's harness (`handover`).
+    pub migrated_ok: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The schedules that run here now (approved and on), from the last schedule round: a v1
+    /// check whose schedule runs is left to it.
+    pub scheduled: std::collections::BTreeSet<String>,
     /// When the migration was last looked at (it waits for this Mac to be home).
     migrate_at: Option<Instant>,
 }
@@ -101,9 +106,13 @@ impl Workspace {
             self.lifetime.migrate_at = Some(Instant::now());
             if self.acts_as_home() {
                 self.lifetime.migrated = true;
+                let ok = self.lifetime.migrated_ok.clone();
                 cx.background_spawn(async move {
                     match glasscode_core::manager::migrate_v2::run(true) {
-                        Ok(report) => log::info!("manager: v1's data is in the v2 stores ({report:?})"),
+                        Ok(report) => {
+                            log::info!("manager: v1's data is in the v2 stores ({report:?})");
+                            ok.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                         Err(why) => log::info!("manager: v1's data was not moved: {why}"),
                     }
                 })
@@ -226,11 +235,14 @@ impl Workspace {
         // holds the lease; the occurrence keys keep one missed across a switch to one run.
         let home = self.acts_as_home();
         let now = glasscode_core::clock::now_ms();
-        let task = cx.background_spawn(async move { schedule::round(now, home, clear, since_wake, last_late) });
+        let task = cx.background_spawn(async move { (schedule::round(now, home, clear, since_wake, last_late), schedule::running_ids()) });
         cx.spawn(async move |this, cx| {
-            let round = task.await;
+            let (round, running) = task.await;
             let _ = this.update(cx, |ws, cx| {
                 ws.lifetime.busy = false;
+                if let Ok(running) = running {
+                    ws.lifetime.scheduled = running;
+                }
                 match round {
                     Ok((due, skips, cut)) => {
                         for (id, occurrence) in cut {

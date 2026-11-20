@@ -171,12 +171,25 @@ impl Workspace {
             self.mtick_refresh_replies(cx);
             if !on_server {
                 let snap = self.manager_snapshot();
-                let actions = self.manager.harness.step(&self.state.manager, &snap, now());
+                // v2 takes over from this harness once it may (`handover`): from then on the
+                // harness leaves what v2's built-ins do to them.
+                self.manager_take_over(cx);
+                let owned = self.manager_owned();
+                let round = self.manager.harness.step_with(&self.state.manager, &snap, now(), &owned);
+                for event in round.events {
+                    let project = event.session.as_deref().and_then(|id| self.journal_key(id));
+                    glasscode_core::journal::append(if event.project.is_none() { event.project(project.as_ref()) } else { event });
+                }
+                let mut actions = round.actions;
+                actions.extend(self.native_tell_ready(&snap));
                 changed |= !actions.is_empty();
                 self.manager_apply(actions, cx);
-                // What it checks by itself goes to the brain when that is free and no walk is on.
+                // What it checks by itself goes to the brain when that is free and no walk is on;
+                // in v2, a check whose schedule runs (approved, M44) is the schedule's.
                 if self.manager.tick.open_asks.is_empty() && self.manager.tour.is_none() {
-                    for check in self.manager.harness.due_checks(&self.state.manager, now()) {
+                    let scheduled = if self.control.engine_v2 { self.lifetime.scheduled.clone() } else { Default::default() };
+                    let by_schedule = |id: &str| scheduled.contains(&glasscode_core::manager::migrate_v2::check_id(id));
+                    for check in self.manager.harness.due_checks_but(&self.state.manager, now(), &by_schedule) {
                         self.mtick_run_check(&check.what, &snap, cx);
                         changed = true;
                     }
@@ -268,7 +281,8 @@ impl Workspace {
                     let wanted = std::mem::take(&mut self.manager.reviews_running);
                     match result {
                         Ok(reviews) if on && wanted => {
-                            let actions = self.manager.harness.on_reviews(&self.state.manager, &reviews, now());
+                            let owned = self.manager_owned();
+                            let actions = self.manager.harness.on_reviews_with(&self.state.manager, &reviews, now(), &owned);
                             self.manager_apply(actions, cx);
                             changed = true;
                         }
@@ -761,7 +775,7 @@ impl Workspace {
     }
 
     /// Add a line to the conversation (the last `CHAT_MAX` are kept).
-    fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
+    pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
         let text = text.into();
         // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
         // still say goes there too (the person's own lines are posted by the chat, M52.1).
@@ -1011,8 +1025,14 @@ impl Workspace {
         let id = id.to_string();
         self.manager.tick.sending.insert(id.clone());
         let tx = self.manager.jobs.0.clone();
+        // v2's outbox (`handover`): each version of a message is one effect, claimed before the
+        // messenger is asked (at most once: it has no probe).
+        let claim = self.manager.harness.v1_outbox.is_some().then(|| (glasscode_core::manager::messages::send_intent(&message, &self.control.launch), self.home_generation()));
         cx.background_spawn(async move {
-            let result = messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e));
+            let result = match claim {
+                None => messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e)),
+                Some((intent, generation)) => messages::send_claimed(&intent, generation, || messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e))),
+            };
             let _ = tx.try_send(Done::Sent { id, result });
         })
         .detach();
@@ -1418,7 +1438,7 @@ fn pr_info(repo: String, pr: &PullRequest, ci: Option<&CiStatus>, details: Optio
         unresolved_threads: details.map(|d| d.threads.iter().filter(|t| !t.resolved).count() as u32).unwrap_or(0),
         // People only: a bot's review is not a teammate's.
         reviewers: details
-            .map(|d| d.reviewers.iter().filter(|r| !r.is_bot).map(|r| ReviewerInfo { login: r.login.clone(), state: if r.state == "REQUESTED" { "PENDING".into() } else { r.state.clone() } }).collect())
+            .map(|d| d.reviewers.iter().filter(|r| !r.is_bot).map(|r| ReviewerInfo { login: r.login.clone(), state: if r.state == "REQUESTED" { "PENDING".into() } else { r.state.clone() }, association: r.association.clone() }).collect())
             .unwrap_or_default(),
         // Known once the pull request was read in full.
         author: details.map(|d| d.author.clone()).unwrap_or_default(),
@@ -1615,7 +1635,7 @@ mod tests {
         assert!(info.conflicting);
         assert_eq!(info.unresolved_threads, 1);
         assert_eq!(info.author, "alex");
-        assert_eq!(info.reviewers, vec![ReviewerInfo { login: "sam".into(), state: "CHANGES_REQUESTED".into() }, ReviewerInfo { login: "mira".into(), state: "PENDING".into() }]);
+        assert_eq!(info.reviewers, vec![ReviewerInfo { login: "sam".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }, ReviewerInfo { login: "mira".into(), state: "PENDING".into(), ..ReviewerInfo::default() }]);
 
         // Only what the app found for the session: no reviewers yet, CI unknown.
         let bare = pr_info("acme/app".into(), &PullRequest { is_draft: true, ..pull() }, None, None);

@@ -32,6 +32,13 @@ pub fn use_test_root() -> PathBuf {
         .clone()
 }
 
+/// Whether this is a test run (the core's own tests, or another crate's that set the test root):
+/// what would reach outside the Glasscode folder (the person's own `~/.codex`, the Keychain)
+/// stays in the test's folder or is not done.
+pub fn testing() -> bool {
+    cfg!(test) || TEST_ROOT.get().is_some()
+}
+
 pub fn root() -> PathBuf {
     let set = std::env::var("GLASSCODE_HOME").ok().filter(|dir| !dir.is_empty()).map(PathBuf::from);
     if cfg!(test) {

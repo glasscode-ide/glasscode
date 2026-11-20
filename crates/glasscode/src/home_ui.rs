@@ -81,7 +81,7 @@ fn arbiter(ws: &Workspace) -> Option<std::sync::Arc<glasscode_core::remote::Remo
 impl Workspace {
     /// Whether the manager acts from this Mac now: no server is paired, or it holds the lease.
     pub fn home_here(&self) -> bool {
-        self.server.config.is_none() || self.home.generation().is_some()
+        self.acts_as_home()
     }
 
     /// Once a second (from the workspace tick): claim, renew or note where home is.
