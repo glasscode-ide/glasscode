@@ -680,6 +680,14 @@ fn headless_command(agent: AgentKind, config_dir: Option<&Path>, profile: &crate
     cmd.args(headless_args(agent, profile));
     let folder = crate::paths::manager_work_dir();
     std::fs::create_dir_all(&folder)?;
+    // The profile's Claude settings (`disableAllHooks: true`) must reach the run, or the hooks of
+    // the account's own settings would run in it. They go as a file in the work folder, so no
+    // command line (or cmd.exe on Windows) has to carry the JSON.
+    if agent == AgentKind::Claude && profile.claude_settings.as_object().is_some_and(|o| !o.is_empty()) {
+        let file = folder.join(format!("{}-settings.json", profile.label));
+        std::fs::write(&file, profile.claude_settings.to_string())?;
+        cmd.arg("--settings").arg(&file);
+    }
     cmd.current_dir(folder);
     Ok(cmd)
 }
@@ -1120,6 +1128,14 @@ mod tests {
                 };
                 for pair in wanted {
                     assert!(has(pair), "{kind:?} {agent:?}: {pair:?} in {argv:?}");
+                }
+                // The profile's settings reach Claude, so the account's own hooks stay off.
+                if agent == AgentKind::Claude {
+                    let at = argv.iter().position(|a| a == "--settings").unwrap_or_else(|| panic!("{kind:?}: no --settings in {argv:?}"));
+                    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&argv[at + 1]).unwrap()).unwrap();
+                    assert_eq!(settings["disableAllHooks"], true, "{kind:?}");
+                } else {
+                    assert!(!argv.iter().any(|a| a == "--settings"), "{kind:?} {agent:?}");
                 }
             }
         }
