@@ -859,6 +859,9 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
     if let Some(answer) = crate::home::dispatch(caller, method, &params) {
         return answer;
     }
+    if let Some(answer) = crate::memory_copy::dispatch(method, &params) {
+        return answer;
+    }
     match method {
         "hello" => {
             let env = lock(shared).env.clone();
