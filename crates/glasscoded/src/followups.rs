@@ -13,10 +13,13 @@
 //!   pull requests are the Mac's too (the server does not read its sessions).
 //! - **Every 5 min,** the reviews the person gave (`gh::given_reviews` for the login the Mac said,
 //!   with `gh` signed in here), then `followups::given`: "ready for you to look again", once on
-//!   either home (the "fixed" mark travels with the follow-up).
+//!   either home (the "fixed" mark travels with the follow-up). Only the reviews this server may
+//!   know of: one the Mac's follow-ups already have, or one in a repository checked out here. A
+//!   "stays on this Mac" project's follow-ups never come here, and are not made here either.
 //! - **What they say** goes in the manager's conversation (which syncs to the Mac) and as a
 //!   notice with the Mac's next sync.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -96,9 +99,17 @@ pub fn tick(shared: &crate::daemon::Shared) {
         }
         due
     };
-    let env = crate::daemon::lock(shared).env.clone();
+    let (env, roots) = {
+        let daemon = crate::daemon::lock(shared);
+        (daemon.env.clone(), daemon.projects_with_keys().into_iter().map(|(_, root)| root).collect::<Vec<_>>())
+    };
     let _ = std::thread::Builder::new().name("follow-ups".into()).spawn(move || {
-        let failed = round(generation, &said, reviews, &|me, known| gh::given_reviews(me, known, &env).map_err(|e| format!("{e:#}"))).err();
+        let here: HashSet<String> = if reviews { roots.iter().filter_map(|root| glasscode_core::github::repo_slug(root)).map(|slug| slug.to_lowercase()).collect() } else { HashSet::new() };
+        let read = |me: &str, known: &[(String, u64)]| -> Result<Vec<gh::GivenReview>, String> {
+            let found = gh::given_reviews(me, known, &env).map_err(|e| format!("{e:#}"))?;
+            Ok(may_know(found, known, &here))
+        };
+        let failed = round(generation, &said, reviews, &read).err();
         let mut last = FAILED.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(why) = &failed
             && last.as_deref() != Some(why.as_str())
@@ -112,6 +123,13 @@ pub fn tick(shared: &crate::daemon::Shared) {
         drop(last);
         RUNNING.store(false, Ordering::SeqCst);
     });
+}
+
+/// The reviews this server may follow: one the Mac's follow-ups already have (it sent them), or
+/// one in a repository checked out here (`here`, lower case). Any other may be of a project that
+/// stays on the Mac.
+fn may_know(found: Vec<gh::GivenReview>, known: &[(String, u64)], here: &HashSet<String>) -> Vec<gh::GivenReview> {
+    found.into_iter().filter(|r| known.iter().any(|(repo, number)| repo.eq_ignore_ascii_case(&r.repo) && *number == r.number) || here.contains(&r.repo.to_lowercase())).collect()
 }
 
 /// The teammates the Mac said, as the follow-ups' rules read them.
@@ -215,6 +233,17 @@ mod tests {
             state: "open".into(),
             updated: 0,
         }
+    }
+
+    #[test]
+    fn only_reviews_the_server_may_know_of_are_followed() {
+        let mut secret = review(7, "sam-dev", "aaa", false);
+        secret.repo = "acme/secret".into();
+        let mut checked_out = review(8, "sam-dev", "aaa", false);
+        checked_out.repo = "Acme/Here".into();
+        let found = vec![review(1111, "sam-dev", "aaa", false), review(1112, "sam-dev", "aaa", false), secret, checked_out];
+        let kept = may_know(found, &[("acme/app".into(), 1111)], &HashSet::from(["acme/here".to_string()]));
+        assert_eq!(kept.iter().map(|r| r.number).collect::<Vec<_>>(), [1111, 8]);
     }
 
     #[test]

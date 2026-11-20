@@ -182,6 +182,7 @@ impl KeptBack {
         };
         let projects: HashSet<crate::paths::ProjectKey> = local_only.iter().filter_map(|id| keys.key_of(machine, id).cloned()).collect();
         let topics = projects.iter().map(|key| crate::conversation::Ref::Project(key.clone()).topic_id()).chain(sessions.iter().map(|id| crate::conversation::Ref::Session(id.clone()).topic_id())).collect();
+        // (A project with no GitHub repository has no pull requests, so no follow-ups to keep.)
         let repos = local.projects.iter().filter(|p| local_only.contains(&p.id)).filter_map(|p| crate::github::repo_slug(&p.root)).map(|slug| slug.to_lowercase()).collect();
         KeptBack { all: false, projects, sessions, topics, repos }
     }
@@ -759,6 +760,18 @@ pub fn key_bytes(key: &str) -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_only_projects_follow_ups_stay_here() {
+        use crate::manager::FollowUp;
+        let kept = KeptBack { sessions: HashSet::from(["s-local".to_string()]), repos: HashSet::from(["acme/secret".to_string()]), ..KeptBack::default() };
+        let follow = |repo: &str, session: Option<&str>| FollowUp { repo: repo.into(), session: session.map(str::to_string), ..FollowUp::default() };
+        assert!(kept.hides_follow_up(&follow("Acme/Secret", None)), "by its repository, in any case");
+        assert!(kept.hides_follow_up(&follow("acme/app", Some("s-local"))), "by its session");
+        assert!(!kept.hides_follow_up(&follow("acme/app", Some("s-other"))));
+        assert!(!kept.hides_follow_up(&follow("", None)), "a follow-up of the person's own words names no repository");
+        assert!(KeptBack { all: true, ..KeptBack::default() }.hides_follow_up(&follow("acme/app", None)), "fails closed");
+    }
 
     #[test]
     fn fingerprint_follows_the_worktree() {

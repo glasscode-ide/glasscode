@@ -367,9 +367,15 @@ impl WorkLedger {
             .map(|f| f.id.clone())
             .collect();
         if !changed.is_empty() {
-            let stamps = crate::identity::next_stamps(machine, changed.len()).unwrap_or_default();
+            // Later than the stamps they had (another home's, from a clock ahead of this one):
+            // the change wins there too.
+            let seen = changed.iter().filter_map(|id| self.follow_stamps.get(id)).max().cloned();
+            let stamps = crate::identity::next_stamps_after(machine, changed.len(), seen.as_ref()).unwrap_or_default();
             for (i, id) in changed.into_iter().enumerate() {
-                let stamp = stamps.get(i).cloned().unwrap_or_else(|| stamp(machine));
+                let stamp = stamps.get(i).cloned().unwrap_or_else(|| match &seen {
+                    Some(seen) => Hlc::zero(machine.clone()).merge(seen),
+                    None => stamp(machine),
+                });
                 self.follow_stamps.insert(id, stamp);
             }
         }
@@ -1178,6 +1184,24 @@ mod tests {
         ahead.stamp = Hlc { wall_ms: crate::clock::now_ms() + 3 * 60 * 60 * 1000, count: 0, machine: server.clone() };
         assert!(!on_server.follow_merge(&[ahead]), "too far ahead");
         assert_eq!(on_server.follow_ups[0].state, FollowState::Done);
+
+        // The server's clock is a minute ahead: its change comes stamped then. The Mac's next
+        // change to it is stamped later still, so the server takes it; the Mac's stamps go on up.
+        let ahead_by = Hlc { wall_ms: crate::clock::now_ms() + 60_000, count: 3, machine: server.clone() };
+        let mut reopened = back[0].clone();
+        reopened.follow.state = FollowState::Open;
+        reopened.stamp = ahead_by.clone();
+        assert!(ledger.follow_merge(std::slice::from_ref(&reopened)));
+        let before = ledger.follow_changed(&mac, None).into_iter().map(|f| f.stamp).max().unwrap();
+        ledger.follow_edit(&mac, |l| l.follow_ups.iter_mut().find(|f| f.id == "fu-a").unwrap().state = FollowState::Dropped);
+        let after = ledger.follow_changed(&mac, Some(&before));
+        assert_eq!(after.len(), 1);
+        assert!(after[0].stamp > ahead_by, "{:?} after {:?}", after[0].stamp, ahead_by);
+        assert!(on_server.follow_merge(std::slice::from_ref(&reopened)));
+        assert!(on_server.follow_merge(&after), "the Mac's later change wins on the server");
+        assert_eq!(on_server.follow_ups[0].state, FollowState::Dropped);
+        ledger.follow_edit(&mac, |l| l.follow_ups.push(follow("fu-c")));
+        assert!(ledger.follow_changed(&mac, Some(&after[0].stamp)).iter().any(|f| f.follow.id == "fu-c"), "a later change of the Mac's is still sent");
     }
 
     /// M57: work items sync both ways. The newer stamp wins an item, the facts join, a renamed
