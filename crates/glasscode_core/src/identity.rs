@@ -210,7 +210,7 @@ pub fn matching(facts: &Facts, known: &[(ProjectKey, Aliases)]) -> KeyMatch {
     let shares_remote = |aliases: &Aliases| facts.project_remotes().iter().any(|remote| aliases.remotes.contains(remote));
     // The folder holds another repository than the project's.
     let other_history = |aliases: &Aliases| !facts.roots.is_empty() && !aliases.roots.is_empty() && !shares_root(aliases);
-    let other_remote = |aliases: &Aliases| !facts.remotes.is_empty() && !aliases.remotes.is_empty() && !shares_remote(aliases) && !shares_root(aliases);
+    let other_remote = |aliases: &Aliases| !facts.project_remotes().is_empty() && !aliases.remotes.is_empty() && !shares_remote(aliases) && !shares_root(aliases);
     let fresh = || fresh_key(facts, known);
 
     if let Some((key, _)) = known.iter().find(|(_, aliases)| here(&aliases.pinned) && !other_history(aliases) && !other_remote(aliases)) {
@@ -1047,6 +1047,12 @@ mod tests {
         git(&demo, &["init", "-q"]);
         git(&demo, &["remote", "add", "origin", "git@github.com:zed/lib.git"]);
         assert!(matches!(resolve(&demo, &projects.known(&mac())), KeyMatch::AskFork { by: Shared::Folder, .. }));
+        // The same with only an `upstream` remote, which would be the remote attached (review of PR
+        // 83, round 2).
+        git(&demo, &["remote", "rename", "origin", "upstream"]);
+        assert_eq!(facts(&demo).project_remotes(), ["github.com/zed/lib"]);
+        assert!(matches!(add(&mut projects, &mac(), "p2", &demo), KeyMatch::AskFork { by: Shared::Folder, .. }));
+        assert_eq!(projects.keys[&key].remotes, ["github.com/acme/app"], "nothing attached");
 
         // A pinned folder used again: by another history, a project of its own; by a repository
         // with no commit yet and another remote, asked.
@@ -1058,6 +1064,9 @@ mod tests {
         std::fs::remove_dir_all(&fork).unwrap();
         repo(&fork, Some("git@github.com:zed/unrelated.git"));
         assert!(matches!(resolve(&fork, &projects.known(&mac())), KeyMatch::New(new) if new != pinned));
+        std::fs::remove_dir_all(&fork).unwrap();
+        repo(&fork, None);
+        assert!(matches!(resolve(&fork, &projects.known(&mac())), KeyMatch::New(new) if new != pinned), "another history, no remote");
         std::fs::remove_dir_all(&fork).unwrap();
         std::fs::create_dir(&fork).unwrap();
         git(&fork, &["init", "-q"]);
@@ -1135,6 +1144,7 @@ mod tests {
         git(&fork, &["remote", "add", "backup", "git@gitlab.example.com:alex/app.git"]);
         let found = facts(&fork);
         assert!(found.remotes.is_empty() && found.others.len() == 2, "{found:?}");
+        assert!(found.project_remotes().is_empty(), "the upstream is not the project when other remotes are there");
         assert!(matches!(matching(&found, &projects.known(&mac())), KeyMatch::AskFork { by: Shared::Upstream, .. }));
     }
 

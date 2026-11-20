@@ -67,6 +67,8 @@ pub fn normalize_remote(remote: &str) -> Option<String> {
         Some(inside) => inside.split_once(']').map_or(host, |(address, _)| address),
         None => host.split(':').next().unwrap_or(host),
     }
+    // A name written with its root dot (`github.com.`) is the same host.
+    .trim_end_matches('.')
     .to_lowercase();
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/').to_lowercase();
@@ -1576,11 +1578,12 @@ mod tests {
             "git@github.com:acme/app.git/",
             "https://github.com/acme/app/tree/main",
             "  git@github.com:acme/app.git\n",
+            "git@github.com.:acme/app",
         ] {
             assert_eq!(normalize_remote(form).as_deref(), Some("github.com/acme/app"), "{form}");
         }
         // Other hosts keep their host, without the user, the port and the suffix.
-        for form in ["git@gitlab.example.com:team/app.git", "https://gitlab.example.com/Team/App", "ssh://git@gitlab.example.com:2222/team/app.git", "git+ssh://gitlab.example.com/team/app/"] {
+        for form in ["git@gitlab.example.com:team/app.git", "git@GitLab.example.com.:team/app.git", "https://gitlab.example.com/Team/App", "ssh://git@gitlab.example.com:2222/team/app.git", "git+ssh://gitlab.example.com/team/app/"] {
             assert_eq!(normalize_remote(form).as_deref(), Some("gitlab.example.com/team/app"), "{form}");
         }
         assert_eq!(normalize_remote("https://git.example.com/group/sub/app.git").as_deref(), Some("git.example.com/group/sub/app"));
