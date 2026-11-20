@@ -1647,7 +1647,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - the live evals, and checklist items 10 to 16 on the real CLIs;
     - the phone case on the Docker server;
     - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change).
-    - A headless run's Claude gets no `--settings` with `disableAllHooks` (the profile has it, but `headless_args` does not pass it), so the person's own user hooks still run. No folder of a repository's is read for them.
+    - For the security review of session profiles and hooks: a headless run's Claude gets no `--settings` with the profile's `disableAllHooks` (`headless_args` passes only `claude_args`).
 
 ### M56 Switch to v2 and remove v1 (wave 5, M)
 
