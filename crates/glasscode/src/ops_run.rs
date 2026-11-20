@@ -103,6 +103,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("app.log", app_log),
     ("journal.events", journal_events),
     ("journal.query", journal_query),
+    ("playbook.check", playbook_check),
+    ("playbook.test", playbook_test),
     ("app.approvals", app_approvals),
     ("app.wait", app_wait),
     ("approvals.list", approvals_list),
@@ -2232,6 +2234,107 @@ fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 let rows: Vec<Value> = events.iter().rev().map(crate::journal_ui::row).collect();
                 let text = if rows.is_empty() { "Nothing yet.".to_string() } else { rows.iter().map(crate::journal_ui::row_line).collect::<Vec<_>>().join("\n") };
                 ws.reply(r, Reply::ok(text, Value::Array(rows)));
+            });
+        })
+        .detach();
+    })
+}
+
+// ----- playbooks (M40) ---------------------------------------------------------------------------
+
+/// What a playbook is to this machine now, in a word or two.
+fn playbook_state(p: &glasscode_core::playbooks::Playbook, all_paused: bool) -> String {
+    if let Some(by) = &p.proposed_by {
+        return format!("proposed by {by}");
+    }
+    if let Some(paused) = &p.paused {
+        return format!("paused by {}: {}", paused.by, paused.why);
+    }
+    if all_paused && !p.builtin {
+        return "paused with every playbook".to_string();
+    }
+    match (p.enabled, p.builtin || p.approved()) {
+        (false, _) => "off".to_string(),
+        (true, false) => "not approved on this machine".to_string(),
+        (true, true) => "runs".to_string(),
+    }
+}
+
+/// `playbook check`: every playbook as this machine reads it, the built-ins first, and why the
+/// ones that do not run do not.
+fn playbook_check(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move { glasscode_core::playbooks::load(&glasscode_core::playbooks::model::journal_schema()) });
+        cx.spawn(async move |this, cx| {
+            let book = task.await;
+            let _ = this.update(cx, |ws, _| {
+                let reply = match book {
+                    Err(err) => failed(format!("The playbooks could not be read ({err}): none of the person's runs until it is repaired; the built-ins go on.")),
+                    Ok(book) => {
+                        let all_paused = book.all_paused.is_some();
+                        let mut lines: Vec<String> = glasscode_core::playbooks::builtins::BUILTINS.iter().map(|b| format!("{:<16} {} (built in{})", b.id, b.name, if b.needs_manager { ", with the manager" } else { "" })).collect();
+                        let mut rows: Vec<Value> = glasscode_core::playbooks::builtins::BUILTINS.iter().map(|b| json!({ "id": b.id, "name": b.name, "builtin": true, "needs_manager": b.needs_manager })).collect();
+                        for p in book.playbooks.iter().filter(|p| !p.builtin) {
+                            let state = playbook_state(p, all_paused);
+                            lines.push(format!("{:<16} {}: {state}", p.id, p.name));
+                            rows.push(json!({ "id": p.id, "name": p.name, "state": state, "autonomy": p.autonomy, "on": p.trigger.filter().map(|f| f.kind.clone()) }));
+                        }
+                        lines.extend(book.alerts.iter().cloned());
+                        Reply::ok(lines.join("\n"), json!({ "playbooks": rows, "alerts": book.alerts }))
+                    }
+                };
+                ws.reply(r, reply);
+            });
+        })
+        .detach();
+    })
+}
+
+/// `playbook test <id> [--since 7d]`: the playbook run against the journal's past events as if it
+/// were on and approved, acting on nothing: what it would have done, and what held it back.
+fn playbook_test(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if !ws.journal.on {
+        return Err(failed("The journal is off here (it runs with the v2 engine)."));
+    }
+    let id = arg(op, "playbook").to_string();
+    let mut filter = crate::journal_ui::filter_of(ws, op)?;
+    let now = glasscode_core::clock::now_ms();
+    let week = now.saturating_sub(glasscode_core::playbooks::simulate::DAYS * 86_400_000);
+    filter.since_ms = Some(filter.since_ms.unwrap_or(week).max(week));
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let policy = ws.control.authority.policy.clone();
+    let confirmed: Vec<String> = ws.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            use glasscode_core::playbooks::{self, engine::Facts, limits::LedgerCounts, model, simulate};
+            let book = playbooks::load(&model::journal_schema()).map_err(|err| format!("The playbooks could not be read ({err})."))?;
+            let mut playbook = book.playbooks.into_iter().find(|p| p.id == id && !p.builtin).ok_or_else(|| format!("No playbook “{id}” (built-ins are code; `playbook check` lists them)."))?;
+            // As if on and approved here: the question is what it would do.
+            playbook.enabled = true;
+            playbook.paused = None;
+            playbook.approved_hash = Some(playbook.hash());
+            let events = glasscode_core::journal::query(&filter, &scope, usize::MAX);
+            let counts = glasscode_core::effects::load().map(|ledger| LedgerCounts::of(&ledger)).unwrap_or_default();
+            let level = |key: Option<&glasscode_core::paths::ProjectKey>| key.map_or(policy.default.level, |key| policy.of(key).level);
+            let facts = |now_ms: u64| Facts { level: &level, me: &[], confirmed: &confirmed, now_ms };
+            let timed: Vec<(&glasscode_core::journal::Event, u64)> = events.iter().map(|event| (event, event.at.wall_ms)).collect();
+            Ok::<_, String>(simulate::dry_run(std::slice::from_ref(&playbook), timed, &model::journal_schema(), &facts, counts))
+        });
+        cx.spawn(async move |this, cx| {
+            let report = task.await;
+            let _ = this.update(cx, |ws, _| {
+                let reply = match report {
+                    Err(text) => failed(text),
+                    Ok(report) => {
+                        let mut lines = vec![format!("{} events read; it would have fired {} times, and held back {}.", report.events, report.fired.len(), report.held.len())];
+                        lines.extend(report.fired.iter().map(|f| format!("  {} on {}: {} {} ({:?})", f.event, f.target, f.op, f.args, f.autonomy)));
+                        lines.extend(report.held.iter().map(|(event, held)| format!("  held on {event}: {}", held.why.words())));
+                        let fired: Vec<Value> = report.fired.iter().map(|f| json!({ "event": f.event, "op": f.op, "args": f.args, "target": f.target, "autonomy": f.autonomy, "subject": f.subject })).collect();
+                        let held: Vec<Value> = report.held.iter().map(|(event, held)| json!({ "event": event, "why": held.why.words() })).collect();
+                        Reply::ok(lines.join("\n"), json!({ "events": report.events, "fired": fired, "held": held }))
+                    }
+                };
+                ws.reply(r, reply);
             });
         })
         .detach();

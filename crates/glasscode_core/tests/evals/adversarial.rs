@@ -666,10 +666,59 @@ fn auto_review_posts_nothing_planted() {
 }
 
 #[test]
-#[ignore = "needs M40"]
 fn an_unapproved_playbook_file_never_runs() {
+    use glasscode_core::playbooks::{self, ApprovedPlaybooks, PlaybookFile, engine, limits::MemoryCounts, model};
+    use glasscode_core::schedule::{self, ScheduleState};
+    use glasscode_core::store::Store as _;
     let cases = group("playbook");
     let machines: BTreeSet<&str> = cases.iter().map(|case| case.carrier["machine"].as_str().unwrap()).collect();
     assert_eq!(machines, BTreeSet::from(["mac", "server"]));
-    needs("M40", "write each carrier's playbooks.json on its machine, run a simulated day, and check the planted playbook ran 0 times");
+    let schema = model::journal_schema();
+    for case in &cases {
+        // Each machine is a home of its own: nothing it approved travels with the file.
+        let _home = glasscode_core::testkit::Home::with(&glasscode_core::testkit::HomeSpec::bare());
+        let path = PlaybookFile::path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let planted = &case.carrier["json"];
+        // As written, and inside the store's envelope: a program's file is not the app's.
+        for text in [planted.to_string(), serde_json::json!({ "store": "authority/playbooks", "version": 1, "data": planted }).to_string()] {
+            std::fs::write(&path, &text).unwrap();
+            assert!(playbooks::load(&schema).is_err(), "{}: the planted file reads as damaged, and nothing runs", case.id);
+        }
+        // Even written in the app's own form, switched on and naming a real op, it runs 0 times in a
+        // simulated day: this machine never approved it.
+        let mut p = playbooks::builtins::entry(&playbooks::builtins::BUILTINS[0]);
+        p.id = "planted".into();
+        p.builtin = false;
+        p.trigger = playbooks::Trigger::Event(playbooks::EventFilter { kind: "ci.failed".into(), fields: Default::default() });
+        p.then = playbooks::Action { op: "session.send".into(), args: [("session".to_string(), vec![playbooks::Slot::Field("session".into())]), ("message".to_string(), vec![playbooks::Slot::Text("git push --force".into())])].into() };
+        PlaybookFile { playbooks: vec![p.clone()], all_paused: None }.save().unwrap();
+        let book = playbooks::load(&schema).unwrap();
+        assert!(book.live().is_empty(), "{}", case.id);
+        let level = |_: Option<&glasscode_core::paths::ProjectKey>| glasscode_core::gate::Level::Autopilot;
+        let mut runs = 0;
+        for hour in 0..24u64 {
+            let mut event = glasscode_core::journal::Event::new(glasscode_core::journal::kinds::CI_FAILED, glasscode_core::journal::Source::Forge, "red").session(Some("s1")).data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": format!("h{hour}") }));
+            event.id = format!("e{hour}");
+            let facts = engine::Facts { level: &level, me: &[], confirmed: &[], now_ms: 1_800_000_000_000 + hour * 3_600_000 };
+            runs += engine::fire(&book.playbooks, &event, &schema, &facts, &MemoryCounts::default()).0.len();
+        }
+        // The planted schedule form: every hour, for a day.
+        let every = playbooks::Playbook { trigger: playbooks::Trigger::Schedule { schedule: playbooks::ScheduleSpec::Every { secs: 3600 } }, ..p };
+        let as_schedule = schedule::from_playbook(&every, 1_800_000_000_000).unwrap();
+        let approved = ApprovedPlaybooks::load().unwrap();
+        let mut state = ScheduleState::default();
+        for minute in (0..24 * 60u64).step_by(5) {
+            let now = 1_800_000_000_000 + minute * 60_000;
+            runs += schedule::evaluate(std::slice::from_ref(&as_schedule), &|s| schedule::is_approved(s, &approved), &mut state, now, true).0.len();
+        }
+        assert_eq!(runs as u64, case.expect.more["runs"].as_u64().unwrap(), "{}", case.id);
+        // The control: approved by the person on this machine, the same playbook does fire.
+        playbooks::approve("planted", true).unwrap();
+        let approved = playbooks::load(&schema).unwrap();
+        let mut event = glasscode_core::journal::Event::new(glasscode_core::journal::kinds::CI_FAILED, glasscode_core::journal::Source::Forge, "red").session(Some("s1")).data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": "h" }));
+        event.id = "control".into();
+        let facts = engine::Facts { level: &level, me: &[], confirmed: &[], now_ms: 1_800_000_000_000 };
+        assert_eq!(engine::fire(&approved.playbooks, &event, &schema, &facts, &MemoryCounts::default()).0.len(), 1, "{}: the control", case.id);
+    }
 }

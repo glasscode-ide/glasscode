@@ -16,6 +16,7 @@ mod table_approvals;
 mod table_board;
 mod table_forge;
 mod table_journal;
+mod table_playbooks;
 mod table_manager;
 mod table_memory;
 mod table_project;
@@ -44,8 +45,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS, table_memory::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS, table_memory::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS, table_memory::OPS, table_playbooks::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS, table_memory::NOUNS, table_playbooks::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -406,7 +407,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report", "playbook.check", "playbook.test"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -488,7 +489,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "playbook."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -641,6 +642,8 @@ mod tests {
         memory.rewrite Memory LocalWrite Idempotent Core board - - v2
         memory.forget Memory Destructive Verifiable Core board - person v2
         memory.pending Read Read Idempotent Core read - person v2
+        playbook.check Read Read Idempotent Core read - - v2
+        playbook.test Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);
