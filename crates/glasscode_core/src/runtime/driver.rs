@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -298,10 +298,24 @@ impl Drop for Proc {
     }
 }
 
+/// The rule of exec-24: a brain never runs with a repository as its folder, only in the manager's
+/// work folder (`paths::manager_work_dir`). `claude -p` runs the hooks of a folder's
+/// `.claude/settings.json` and connects its `.mcp.json` servers without a trust dialog, so a cloned
+/// repository as the folder would run its code as the person. Repositories are read by absolute
+/// path, with Glasscode's tools.
+pub fn brain_folder(cwd: &Path) -> Result<(), String> {
+    let work = crate::paths::manager_work_dir();
+    if cwd == work || (cwd.exists() && crate::sys::same_path(cwd, &work)) {
+        return Ok(());
+    }
+    Err(format!("the manager runs only in its own folder {}, not in {}", work.display(), cwd.display()))
+}
+
 /// The command a brain's program runs as: the account's environment and nothing of a session's,
-/// in the brain's folder, in a process group of its own. No `.cmd` shim on Windows, so that long
-/// arguments arrive as written.
+/// in the brain's folder (and no other, [`brain_folder`]), in a process group of its own. No
+/// `.cmd` shim on Windows, so that long arguments arrive as written.
 pub(crate) fn command(spec: &BrainSpec, args: Vec<String>) -> Result<Command, String> {
+    brain_folder(&spec.cwd)?;
     let search = spec.env.get("PATH").map(String::as_str).unwrap_or_default();
     let (path, first) = crate::sys::script_target(&spec.program, search.as_ref()).unwrap_or((spec.program.clone(), Vec::new()));
     let mut cmd = crate::sys::command(path);

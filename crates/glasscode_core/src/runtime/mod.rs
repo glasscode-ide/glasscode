@@ -164,6 +164,12 @@ impl Brain {
         if !self.health.can_think() && self.health.backoff().is_none() {
             return Err(Refusal::Health(self.health.clone()));
         }
+        if !self.checked
+            && let Some(state) = self.version_check()
+        {
+            self.set_health(host, state.clone());
+            return Err(Refusal::Health(state));
+        }
         ledger.allow(turn, now_ms).map_err(Refusal::Budget)?;
         if turn != Turn::Chat {
             ledger.record_wake(now_ms);
@@ -204,6 +210,15 @@ impl Brain {
         };
         self.set_health(host, after);
         Ok(outcome)
+    }
+
+    /// Before a process's first turn: a CLI older than the manager needs (exec-25) is the person's
+    /// to update, and the brain does not start on it. A version that cannot be read is let be: the
+    /// tool check of the first turn still holds.
+    fn version_check(&self) -> Option<BrainHealth> {
+        let version = crate::versions::program_version(&self.spec.program, &self.spec.env)?;
+        let needs = crate::versions::below_minimum(self.spec.agent, &version)?;
+        Some(BrainHealth::VersionTooOld { version, needs: needs.to_string() })
     }
 
     /// A Codex brain's first turn: its `ALL_TOOLS`, checked against Glasscode's tools.
@@ -282,6 +297,40 @@ mod tests {
         // Signed out is the person's to end: no further turn, and one notice in all.
         assert_eq!(brain.ask(&host, &mut ledger, "again?", Turn::Chat, 1_795_000_000_000, &mut |_| {}), Err(Refusal::Health(BrainHealth::SignedOut)));
         assert_eq!(host.notices.lock().unwrap().len(), 1);
+    }
+
+    /// exec-25: on a CLI older than `MIN_CLAUDE` or `MIN_CODEX` the brain does not start, and it
+    /// says once which version it needs; at the minimum it runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_below_the_minimum_does_not_start() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::paths::use_test_root();
+        let dir = tempfile::tempdir().unwrap();
+        let program = |name: &str, says: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho '{says}'\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
+        for (agent, old, says_old, says_least) in [(AgentKind::Claude, "2.1.200", "2.1.200 (Claude Code)", format!("{} (Claude Code)", crate::versions::MIN_CLAUDE)), (AgentKind::Codex, "0.150.0", "codex-cli 0.150.0", format!("codex-cli {}", crate::versions::MIN_CODEX))] {
+            let needs = crate::versions::minimum(agent).unwrap();
+            let played = driver::tests::Played::new(vec![vec![Update::Ended(TurnEnd::Answered("never".into()))]]);
+            let old_cli = BrainSpec { program: program(&format!("{}-old", agent.name()), says_old), ..spec(agent) };
+            let mut brain = Brain::with_driver(old_cli, Box::new(played));
+            let state = BrainHealth::VersionTooOld { version: old.into(), needs: needs.into() };
+            assert_eq!(brain.ask(&host, &mut Ledger::default(), "what is running?", Turn::Chat, 1, &mut |_| {}), Err(Refusal::Health(state.clone())));
+            assert_eq!(brain.ask(&host, &mut Ledger::default(), "and now?", Turn::Chat, 2, &mut |_| {}), Err(Refusal::Health(state.clone())), "the person's to end");
+            assert!(state.sentence(agent).contains(needs));
+
+            let least = BrainSpec { program: program(&format!("{}-least", agent.name()), &says_least), ..spec(agent) };
+            assert_eq!(Brain::with_driver(least, Box::new(driver::tests::Played::new(vec![]))).version_check(), None);
+        }
+        // One notice for each brain that would not start, naming the version it needs.
+        let notices = host.notices.lock().unwrap();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains(crate::versions::MIN_CLAUDE) && notices[1].contains(crate::versions::MIN_CODEX), "{notices:?}");
     }
 
     #[test]

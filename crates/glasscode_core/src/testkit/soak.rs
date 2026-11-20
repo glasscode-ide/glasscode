@@ -7,7 +7,8 @@
 //! - zero duplicate effects;
 //! - exactly one report per turn;
 //! - disk use bounded by the retention rules (the journal keeps 30 UTC days, whatever the run's length);
-//! - no growth in what the runtime holds (one turn machine per session; the queue bounded);
+//! - no growth in open files or threads (this process's, read every six simulated hours), nor in
+//!   what the runtime holds (one turn machine per session; the queue bounded);
 //! - wakes per hour under the D6 cap (`runtime::budget::WAKES_PER_HOUR`, urgent ones apart).
 //!
 //! `seven_day_soak` is the long one: CI's soak job runs it (`--ignored`). `one_day_soak` runs with
@@ -39,6 +40,29 @@ struct Soak {
     largest_queue: usize,
     /// The server is cut off (a partition): wakes wait, nothing is lost.
     partitioned: bool,
+    /// This process's open files and threads, every six simulated hours.
+    held: Vec<(usize, usize)>,
+    next_look: u64,
+}
+
+/// This process's open files and threads now (none where they cannot be read).
+fn held() -> Option<(usize, usize)> {
+    #[cfg(target_os = "linux")]
+    {
+        let count = |dir: &str| std::fs::read_dir(dir).ok().map(|entries| entries.count());
+        return Some((count("/proc/self/fd")?, count("/proc/self/task")?));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let files = std::fs::read_dir("/dev/fd").ok()?.count();
+        // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is that large.
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let wrote = unsafe { libc::proc_pidinfo(std::process::id() as libc::c_int, libc::PROC_PIDTASKINFO, 0, (&mut info as *mut libc::proc_taskinfo).cast(), size) };
+        return (wrote == size).then_some((files, info.pti_threadnum as usize));
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 impl Soak {
@@ -89,6 +113,10 @@ impl Runtime for Soak {
     }
 
     fn tick(&mut self, now: u64, _record: &mut Record) {
+        if now >= self.next_look {
+            self.held.extend(held());
+            self.next_look = now + 6 * HOUR;
+        }
         if self.partitioned {
             return;
         }
@@ -143,6 +171,15 @@ fn soak(days: usize, seed: u64) {
     // What the runtime holds does not grow with time: one machine per session, a bounded queue.
     assert!(runtime.machines.len() <= Reference::small().sessions, "{} machines", runtime.machines.len());
     assert!(runtime.largest_queue <= 4096, "the queue held {}", runtime.largest_queue);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert!(!runtime.held.is_empty(), "open files and threads could not be read");
+    }
+    if let Some(&(files, threads)) = runtime.held.first() {
+        assert!(runtime.held.len() as u64 >= 4 * days as u64, "{} looks", runtime.held.len());
+        for &(now_files, now_threads) in &runtime.held {
+            assert!(now_files <= files + 2 && now_threads <= threads, "open files {files} → {now_files}, threads {threads} → {now_threads}");
+        }
+    }
 
     // Wakes per hour under the cap (routine ones; urgent ones are not held by the hour's cap).
     let routine: Vec<u64> = runtime.wakes.iter().filter(|(_, urgent)| !urgent).map(|(at, _)| *at).collect();

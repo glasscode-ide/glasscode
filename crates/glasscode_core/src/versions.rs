@@ -15,6 +15,51 @@ use serde::{Deserialize, Serialize};
 use crate::agents::{installed_version, resolve_program};
 use crate::paths;
 
+/// The oldest Claude Code the manager runs on (exec-25): the brain's checks (stream-json in print
+/// mode on the subscription login, the flags of `cli-flags.json`, the hook inputs the turn reports
+/// read, the rate limit event) were made on it, and its help is the one recorded in
+/// `script/cli-help`. Below it the manager says which version it needs and does not start.
+pub const MIN_CLAUDE: &str = "2.1.322";
+
+/// The oldest Codex the manager runs on: `codex exec --json`'s event names and its turn-end lines
+/// were checked on it.
+pub const MIN_CODEX: &str = "0.167.0";
+
+/// The oldest version of `agent` the manager runs on (none: it does not think with it).
+pub fn minimum(agent: crate::model::AgentKind) -> Option<&'static str> {
+    match agent {
+        crate::model::AgentKind::Claude => Some(MIN_CLAUDE),
+        crate::model::AgentKind::Codex => Some(MIN_CODEX),
+        _ => None,
+    }
+}
+
+/// The version the manager needs, when `version` of `agent` is older than that.
+pub fn below_minimum(agent: crate::model::AgentKind, version: &str) -> Option<&'static str> {
+    minimum(agent).filter(|least| newer(version, least))
+}
+
+/// The version of the program at `program` (`--version`), read once for each build of it: the
+/// answer is kept while the file's size and time stay the same, so each wake's new brain does not
+/// start the CLI again only to ask.
+pub fn program_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    type Seen = HashMap<PathBuf, (Option<std::time::SystemTime>, u64, Option<String>)>;
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    let path = if program.is_absolute() { program.to_path_buf() } else { resolve_program(&program.to_string_lossy(), env)? };
+    let meta = std::fs::metadata(&path).ok().filter(|meta| meta.is_file())?;
+    let stamp = (meta.modified().ok(), meta.len());
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some((modified, len, version)) = seen.lock().unwrap_or_else(|p| p.into_inner()).get(&path)
+        && (*modified, *len) == stamp
+    {
+        return version.clone();
+    }
+    let version = crate::sys::command(&path).arg("--version").envs(env).stdin(std::process::Stdio::null()).output().ok().and_then(|out| extract_version(&String::from_utf8_lossy(&out.stdout)));
+    seen.lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.clone()));
+    version
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ApprovedVersions {
     #[serde(default)]
