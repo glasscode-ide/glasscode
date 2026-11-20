@@ -551,6 +551,10 @@ pub struct MirrorSyncReply {
     /// each once, through its own gate, and names it in `window_acks`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub window_ops: Vec<QueuedWindowOp>,
+    /// This Mac is an observer here (M57): another Mac is the primary, whose authority the server
+    /// keeps; this one reads, shows and answers approvals, and acts on its own sessions only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub observer: bool,
 }
 
 /// A window op of the server's manager, kept for the Mac (it runs in the window only).

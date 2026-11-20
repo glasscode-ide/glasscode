@@ -524,7 +524,8 @@ fn the_manager_home_moves_by_claim_and_release() {
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
     assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
-    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json*; true");
+    // A clean server: no home record, and no primary Mac yet (this test's Mac becomes it).
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json* ~/.glasscode/authority/from-mac.json*; true");
     let client = RemoteClient::connect(&config).unwrap();
     let server_id = client.hello.machine.clone().unwrap();
     let mac = MachineId::this().unwrap();
