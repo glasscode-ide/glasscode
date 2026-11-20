@@ -473,6 +473,36 @@ impl WorkLedger {
     }
 }
 
+/// What a server session's pull request at a glance says (`RemoteSession::pr`, which the server
+/// refreshes every minute), for the Mac's work item of it (M32's Server line): its repository
+/// (from its address, else its project's), number, state, draft, CI (no head: the glance has
+/// none), and whether someone reviewed it (approved or changes asked: a review was asked for).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerPr {
+    pub repo: String,
+    pub number: u64,
+    pub state: String,
+    pub draft: bool,
+    pub ci: Option<(String, String)>,
+    pub reviewed: bool,
+}
+
+impl ServerPr {
+    pub fn of(pr: &crate::github::PrSummary, project_repo: Option<&str>) -> Option<ServerPr> {
+        let repo = crate::github::repo_of_pr_url(&pr.url).or_else(|| project_repo.map(str::to_string))?.to_lowercase();
+        let state = if pr.state.trim().is_empty() { "OPEN".to_string() } else { pr.state.to_uppercase() };
+        let ci = matches!(pr.ci.as_str(), "passed" | "failed" | "running").then(|| (String::new(), pr.ci.clone()));
+        Some(ServerPr { repo, number: pr.number, state, draft: pr.draft, ci, reviewed: matches!(pr.review.as_str(), "approved" | "changes_requested") })
+    }
+}
+
+/// The Mac's project for a project of the server: the same id, else the same name (a project
+/// copied to the server keeps its name).
+pub fn mac_project_of<'a>(mac: &'a [crate::model::Project], server: &[crate::model::Project], server_project: &str) -> Option<&'a crate::model::Project> {
+    let theirs = server.iter().find(|p| p.id == server_project)?;
+    mac.iter().find(|p| p.id == theirs.id).or_else(|| mac.iter().find(|p| p.name == theirs.name))
+}
+
 /// What a status round's pull request says of reviews (M32's `ReviewRequested` and
 /// `ReviewPosted`): whether one is asked for (a review is requested of someone, or someone other
 /// than its author reviewed it), and whether `mine` (the session's own GitHub login) posted one
@@ -1249,6 +1279,32 @@ mod tests {
         assert!(ledger.item(&key).unwrap().facts.pr_ended_ms.is_some());
         ledger.set_pr_facts("s1", "acme/app", 3, "OPEN", false, None);
         assert!(ledger.item(&key).unwrap().facts.pr_ended_ms.is_none());
+    }
+
+    /// A server session's work, on the Mac: its project is the Mac's of the same id or name, its
+    /// pull request's glance gives the facts (CI with no head), and a review given counts as one
+    /// asked for.
+    #[test]
+    fn a_server_sessions_pull_request_gives_its_facts() {
+        let project = |id: &str, name: &str| -> crate::model::Project { serde_json::from_value(json!({ "id": id, "name": name, "root": format!("/w/{name}") })).unwrap() };
+        let mac = [project("p1", "app"), project("p2", "web")];
+        let server = [project("s9", "web"), project("p1", "app")];
+        assert_eq!(mac_project_of(&mac, &server, "s9").map(|p| p.id.as_str()), Some("p2"), "by name");
+        assert_eq!(mac_project_of(&mac, &server, "p1").map(|p| p.id.as_str()), Some("p1"), "by id");
+        assert!(mac_project_of(&mac, &server, "nope").is_none());
+        let glance = crate::github::PrSummary { number: 42, url: "https://github.com/Acme/App/pull/42".into(), state: "OPEN".into(), ci: "passed".into(), review: "approved".into(), ..Default::default() };
+        let pr = ServerPr::of(&glance, None).unwrap();
+        assert_eq!(pr, ServerPr { repo: "acme/app".into(), number: 42, state: "OPEN".into(), draft: false, ci: Some((String::new(), "passed".into())), reviewed: true });
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        assert!(ledger.set_pr_facts("s1", &pr.repo, pr.number, &pr.state, pr.draft, pr.ci.clone()));
+        for event in review_events(ledger.item(&key), "s1", None, &pr.repo, pr.number, pr.reviewed, false) {
+            ledger.observe(&event, &machine());
+        }
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Done);
+        let none = crate::github::PrSummary { number: 7, url: String::new(), ci: "none".into(), review: "waiting".into(), ..Default::default() };
+        assert_eq!(ServerPr::of(&none, Some("acme/web")).map(|p| (p.repo, p.state, p.ci, p.reviewed)), Some(("acme/web".into(), "OPEN".into(), None, false)));
+        assert!(ServerPr::of(&none, None).is_none(), "no repository to name");
     }
 
     #[test]

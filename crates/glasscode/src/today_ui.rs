@@ -655,6 +655,20 @@ impl Workspace {
         }
         // v2: work the ledger finds stuck (M32), with why.
         for (id, why) in self.journal_stuck() {
+            // A server session's work is kept here too (M32's Server line).
+            if let Some(r) = self.server.state.as_ref().and_then(|state| state.sessions.iter().find(|r| r.session.id == id)) {
+                if !out.iter().any(|row| row.open == Open::Server(id.clone())) {
+                    out.push(NeedRow {
+                        title: r.session.title.clone(),
+                        what: format!("On {} · stuck: {why}", self.server.name()),
+                        color: crate::sidebar::attention(),
+                        agent: Some(r.session.agent),
+                        failing: false,
+                        open: Open::Server(id.clone()),
+                    });
+                }
+                continue;
+            }
             let Some(s) = self.state.session(&id).filter(|s| !self.state.session_hidden(s)) else { continue };
             if out.iter().any(|row| row.open == Open::Session(id.clone())) {
                 continue;
@@ -1318,12 +1332,21 @@ impl Workspace {
             .coming_up()
             .into_iter()
             .filter_map(|next| {
-                let session = self.state.session(next.session.as_deref()?).filter(|s| !self.state.session_hidden(s))?;
+                let id = next.session.as_deref()?;
                 let what = match &next.pr {
                     Some((repo, number)) => format!("{} · {repo}#{number}", next.what),
                     None => next.what.clone(),
                 };
-                Some(cards::Upcoming { key: format!("{WORK_KEY}{}|{}", session.id, next.key.id), when: next.when.to_string(), title: self.session_title(session), detail: upper_first(&what), url: None })
+                // A server session's work (M32's Server line): its title, on the server.
+                let title = match self.state.session(id) {
+                    Some(session) if self.state.session_hidden(session) => return None,
+                    Some(session) => self.session_title(session),
+                    None => {
+                        let remote = self.server.state.as_ref()?.sessions.iter().find(|r| r.session.id == id)?;
+                        format!("{} (on {})", remote.session.title, self.server.name())
+                    }
+                };
+                Some(cards::Upcoming { key: format!("{WORK_KEY}{id}|{}", next.key.id), when: next.when.to_string(), title, detail: upper_first(&what), url: None })
             })
             .collect()
     }
@@ -1340,7 +1363,11 @@ impl Workspace {
         let coming = cards::coming_up_list(&upcoming, |u| match &u.url {
             Some(url) => Open::Url(url.clone()),
             // Work of the ledger: its session.
-            None if u.key.starts_with(WORK_KEY) => u.key.strip_prefix(WORK_KEY).and_then(|rest| rest.split_once('|')).map(|(id, _)| id.to_string()).filter(|id| self.state.session(id).is_some()).map_or(Open::Nothing, Open::Session),
+            None if u.key.starts_with(WORK_KEY) => match u.key.strip_prefix(WORK_KEY).and_then(|rest| rest.split_once('|')).map(|(id, _)| id.to_string()) {
+                Some(id) if self.state.session(&id).is_some() => Open::Session(id),
+                Some(id) if self.server.state.as_ref().is_some_and(|state| state.sessions.iter().any(|r| r.session.id == id)) => Open::Server(id),
+                _ => Open::Nothing,
+            },
             // A task with a session: that session.
             None => u
                 .key
