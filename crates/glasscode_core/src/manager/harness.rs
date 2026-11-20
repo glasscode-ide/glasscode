@@ -1117,6 +1117,74 @@ mod tests {
         assert!(made.lines.iter().any(|l| l.kind == "done" && l.text == "Work s1 finished"), "{:?}", made.lines);
     }
 
+    /// M56.2's parity: v2's follow-ups round on the work ledger (`followups::round` and `given`)
+    /// does what v1's harness did on `Data`, round by round: the same actions and the same
+    /// follow-ups. The reviews given and "fixed" told once; a quiet one nudged as a draft or a
+    /// notification, and not again until it is quiet again; closed by number; and a review
+    /// received on the person's own pull request, then approved. With the engine at v2 the harness
+    /// itself leaves every follow-up of `Data` alone.
+    #[test]
+    fn v2_round_matches_the_harness() {
+        enum Step {
+            Reviews(Vec<GivenReview>, u64),
+            Round(Snapshot, u64),
+            Close(&'static str, bool, u64),
+        }
+        let s = settings();
+        let mut unknown = given(vec![blocker("t1", false)], "aaa");
+        unknown.number = 1200;
+        unknown.author = "stranger".into();
+        let own = |at: u64, reviewers: &[(&str, &str)]| snap(at, vec![session("s1", SessionState::Idle, Some(pr(12, reviewers)))]);
+        let steps = vec![
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", false), blocker("t3", false)], "aaa"), unknown], T0),
+            Step::Round(Snapshot::default(), T0),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER - 10),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER),
+            Step::Round(Snapshot::default(), T0 + STALE_AFTER + 60),
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", true), blocker("t3", true)], "bbb")], T0 + STALE_AFTER + 100),
+            Step::Reviews(vec![given(vec![blocker("t1", true), blocker("t2", true), blocker("t3", true)], "bbb")], T0 + STALE_AFTER + 200),
+            Step::Close("#1200", true, T0 + STALE_AFTER + 300),
+            Step::Round(own(T0 + STALE_AFTER + 400, &[("alex", "PENDING")]), T0 + STALE_AFTER + 400),
+            Step::Round(own(T0 + STALE_AFTER + 1100, &[("alex", "CHANGES_REQUESTED")]), T0 + STALE_AFTER + 1100),
+            Step::Round(own(T0 + STALE_AFTER + 1200, &[("alex", "APPROVED")]), T0 + STALE_AFTER + 1200),
+            Step::Round(Snapshot::default(), T0 + 3 * STALE_AFTER),
+        ];
+        let mut h = Harness::default();
+        let mut ledger = crate::work::WorkLedger::default();
+        let mut prev: Option<Snapshot> = None;
+        let follow_up_actions = |actions: Vec<Action>| -> Vec<Action> {
+            // v1's harness also tells reviews and stops (v2's review feed and natives do that).
+            actions.into_iter().filter(|a| !matches!(a, Action::TellSession { .. }) && !matches!(a, Action::Notify { title, .. } if title.starts_with("Alex ") || title.ends_with(" needs you"))).collect()
+        };
+        for (n, step) in steps.into_iter().enumerate() {
+            let (old, new) = match step {
+                Step::Reviews(reviews, now) => (h.on_reviews(&s, &reviews, now), followups::given(&mut ledger.book(), &s, &reviews, prev.as_ref(), now)),
+                Step::Round(snapshot, now) => {
+                    let old = h.step(&s, &snapshot, now);
+                    let new = followups::round(&mut ledger.book(), &s, prev.as_ref(), &snapshot, now);
+                    prev = Some(snapshot);
+                    (follow_up_actions(old), new)
+                }
+                Step::Close(which, dropped, now) => {
+                    let (a, b) = (followups::close(&mut h.data.followups, which, dropped, now), followups::close(&mut ledger.follow_ups, which, dropped, now));
+                    assert_eq!(a, b, "step {n}");
+                    (Vec::new(), Vec::new())
+                }
+            };
+            assert_eq!(new, old, "step {n}: the actions");
+            assert_eq!(ledger.follow_ups, h.data.followups, "step {n}: the follow-ups");
+        }
+        assert!(ledger.follow_ups.iter().any(|f| f.kind == FollowKind::ReviewReceived && f.state == FollowState::Done), "the review received was followed and closed");
+
+        // The harness at v2: no follow-up of `Data` changes, and the reviews given are not its.
+        let mut v2 = Harness::default();
+        let owned = Owned { engine_v2: true, ..Owned::V1 };
+        assert!(v2.on_reviews_with(&s, &[given(vec![blocker("t1", false)], "aaa")], T0, &owned).is_empty());
+        v2.step_with(&s, &own(T0, &[("alex", "CHANGES_REQUESTED")]), T0, &owned);
+        v2.step_with(&s, &own(T0 + 1200, &[("alex", "COMMENTED")]), T0 + 1200, &owned);
+        assert!(v2.data.followups.is_empty());
+    }
+
     #[test]
     fn a_fixed_follow_up_is_announced_once() {
         let mut h = Harness::default();

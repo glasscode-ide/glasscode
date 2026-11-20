@@ -306,6 +306,33 @@ impl WorkLedger {
     pub fn book(&mut self) -> crate::manager::followups::Book<'_> {
         crate::manager::followups::Book { followups: &mut self.follow_ups, seen: &mut self.follow_seen }
     }
+
+    /// v1's follow-ups and their keys, taken in (M56.2, as M44's migration takes the rest): a new
+    /// one added, a known one replaced when v1's is newer (`updated`), and a key the ledger has not
+    /// got kept. Running it again changes nothing. True when the ledger changed.
+    pub fn take_follow_ups(&mut self, followups: Vec<crate::manager::FollowUp>, seen: BTreeMap<String, String>) -> bool {
+        let mut changed = false;
+        for follow in followups {
+            match self.follow_ups.iter_mut().find(|have| have.id == follow.id) {
+                None => {
+                    self.follow_ups.push(follow);
+                    changed = true;
+                }
+                Some(have) if follow.updated > have.updated => {
+                    *have = follow;
+                    changed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        for (key, value) in seen {
+            if !self.follow_seen.contains_key(&key) {
+                self.follow_seen.insert(key, value);
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 impl Store for WorkLedger {
