@@ -42,6 +42,10 @@ pub struct MirrorUi {
     asleep: bool,
     /// The projects that stay on this Mac, as the last sync read them (the switch leaves them
     /// out; the moves check again themselves).
+    /// This Mac's clock went back (crit-9): its changes wait until this time (ms).
+    pub clock_back: Option<u64>,
+    /// The server's latest stamp, for "use the server's copy".
+    pub server_stamp: Option<glasscode_core::identity::Hlc>,
     pub local_only: std::collections::HashSet<String>,
 }
 
@@ -63,6 +67,8 @@ impl MirrorUi {
             recovering: false,
             recover_at: None,
             asleep: false,
+            clock_back: None,
+            server_stamp: None,
             local_only: Default::default(),
         }
     }
@@ -80,6 +86,38 @@ impl MirrorUi {
 }
 
 impl Workspace {
+    /// "This Mac's clock went back; its changes wait until 14:30." (crit-9)
+    pub(crate) fn clock_back_words(&self, until_ms: u64) -> String {
+        let secs = (until_ms / 1000) as i64;
+        let day = glasscode_core::day::local(secs);
+        let when = if day == glasscode_core::day::today() { glasscode_core::day::clock(secs) } else { format!("{} {}", glasscode_core::day::short(day), glasscode_core::day::clock(secs)) };
+        format!("This {}'s clock went back; its changes wait until {when}.", crate::platform::computer())
+    }
+
+    /// "Use the server's copy" (crit-9): this Mac's next stamps go on from the server's latest, so
+    /// its next changes are in time; what it changed while its clock was wrong stays here.
+    pub(crate) fn clock_use_server(&mut self, cx: &mut Context<Self>) {
+        let Some(stamp) = self.mirror.server_stamp.clone() else {
+            self.show_toast(format!("{} has not said its time yet; try again after the next sync.", self.server.name()), cx);
+            return;
+        };
+        let task = cx.background_spawn(async move { glasscode_core::identity::take_peer_clock(&stamp) });
+        cx.spawn(async move |this, cx| {
+            let done = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                match done {
+                    Ok(()) => {
+                        ws.mirror.clock_back = None;
+                        ws.show_toast(format!("This {} goes on from {}'s time now.", crate::platform::computer(), ws.server.name()), cx);
+                    }
+                    Err(err) => ws.show_toast(format!("This {}'s clock could not be set from the server's: {err}", crate::platform::computer()), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// What the app sees of each local session: running, activity, an open question.
     fn mirror_live(&self, cx: &mut Context<Self>) -> HashMap<String, Live> {
         self.state
@@ -165,6 +203,12 @@ impl Workspace {
                     Ok(outcome) => {
                         this.mirror.synced = Some((outcome.synced, Instant::now()));
                         this.mirror.local_only = outcome.local_only.clone();
+                        // crit-9: say it once when it starts; the title bar keeps saying it.
+                        if outcome.clock_back.is_some() && this.mirror.clock_back.is_none() {
+                            this.show_toast(this.clock_back_words(outcome.clock_back.unwrap_or_default()), cx);
+                        }
+                        this.mirror.clock_back = outcome.clock_back;
+                        this.mirror.server_stamp = outcome.server_stamp.clone();
                         if outcome.pending_changed {
                             this.control_refresh_pending(cx);
                         }
