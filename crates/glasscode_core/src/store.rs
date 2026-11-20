@@ -811,6 +811,20 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/movein.json",
+        store: Some("manager/movein"),
+        module: "movein",
+        writer: "the app (moving in)",
+        format: "JSON, schema v1 (the run, each project's study, the questions and answers, why it is paused)",
+        retention: "until moving in is done, then kept as its record",
+        on_damage: "empty: moving in starts again; what it proposed waits in memory's inbox",
+        export: "no",
+        local_only: "yes: this machine's",
+        forget: "project (its studies and questions)",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "manager/tokens.json",
         store: Some("manager/tokens"),
         module: "runtime::budget",
@@ -1025,6 +1039,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::work::WorkLedger>(),
     StoreInfo::of::<crate::gate::Pending>(),
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
+    StoreInfo::of::<crate::movein::Progress>(),
     StoreInfo::of::<crate::review::ApprovedPrompt>(),
     StoreInfo::of::<crate::gate::ForgeStore>(),
 ];
