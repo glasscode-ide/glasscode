@@ -118,6 +118,9 @@ impl Workspace {
         if !self.terminals.contains_key(&s.id) {
             return "not running";
         }
+        if let Some(status) = self.exits.get(&s.id) {
+            return crate::workspace::exit_word(*status);
+        }
         if !self.control.pending_for(&s.id).is_empty() {
             return "needs you";
         }
