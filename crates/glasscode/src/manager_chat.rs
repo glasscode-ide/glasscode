@@ -1697,7 +1697,7 @@ impl Workspace {
         div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(theme::sz(14.)).children(out)
     }
 
-    /// The manager's mark and name over what it says.
+    /// The manager's orb and name over what it says.
     fn chat_name_line(&self) -> Div {
         div()
             .flex()
@@ -1707,7 +1707,7 @@ impl Workspace {
             .text_size(theme::sz(11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme::text_soft())
-            .child(crate::icons::icon(crate::icons::ASSISTANT, theme::sz(13.), theme::sz(13.), theme::accent()))
+            .child(self.manager_orb("manager-thread-orb", 18., false, crate::manager_ui::mark(18., false)))
             .child(self.state.manager.name.clone())
     }
 

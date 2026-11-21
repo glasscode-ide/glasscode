@@ -1389,7 +1389,9 @@ impl Workspace {
                 let handle = this.today.start.read(cx).focus_handle_clone();
                 window.focus(&handle, cx);
             }))
-            .child(self.today.start.clone());
+            // The box asks the manager: its orb stands before the words.
+            .when(asking, |d| d.flex().items_start().gap(theme::sz(12.)).child(div().flex_none().pt(theme::sz(1.)).child(self.manager_orb("today-start-orb", 22., false, crate::manager_ui::mark(22., false)))))
+            .child(div().flex_1().min_w_0().child(self.today.start.clone()));
         let field = field
             .child(words)
             .child(pills)

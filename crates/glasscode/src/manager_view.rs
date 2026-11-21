@@ -112,6 +112,8 @@ pub struct ManagerUi {
     pub voice_looked: Option<Instant>,
     /// The person chose Talk or Chat themselves (a helper found later does not change it).
     pub mode_chosen: bool,
+    /// The images of its orb at the small sizes it shows at (`orb.rs`).
+    pub orbs: crate::orb::Orbs,
 }
 
 impl ManagerUi {
@@ -143,6 +145,7 @@ impl ManagerUi {
             voice_helper: false,
             voice_looked: None,
             mode_chosen: false,
+            orbs: crate::orb::Orbs::default(),
         }
     }
 }

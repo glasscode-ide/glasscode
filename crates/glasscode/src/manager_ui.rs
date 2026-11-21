@@ -1,7 +1,9 @@
 //! The manager on screen. It has no page of its own: Today is the one home, and the manager is
 //! part of it.
 //!
-//! - **The assistant's panel** (`render_assistant`): its mark, name and state, the conversation
+//! - **Its face is the voice orb** (`orb.rs`): in the bubble, the panel's header, over what it
+//!   says and in Today's start box. It stands still, and moves only while the manager thinks.
+//! - **The assistant's panel** (`render_assistant`): its orb, name and state, the conversation
 //!   (`manager_chat.rs` draws the thread) and a box to type in. On Today it is the "Manager" tab
 //!   of the right panel, beside Inbox and Activity, and there it also holds what the manager
 //!   keeps: follow-ups, messages and memory, one row of tabs under its header. On every other
@@ -305,7 +307,8 @@ fn sentence(moving: usize, with_others: usize) -> String {
 
 // ----- building blocks ---------------------------------------------------------------------
 
-/// The manager's mark: a filled circle in the accent with its sign. `muted`: it is off.
+/// The manager's plain mark: a filled circle in the accent with its sign. It stands where the
+/// orb's image is not made yet (`Workspace::manager_orb`). `muted`: quieter.
 pub(crate) fn mark(size: f32, muted: bool) -> Div {
     div()
         .flex()
@@ -783,7 +786,6 @@ impl Workspace {
                     .aria_label(words.clone())
                     .size_full()
                     .rounded_full()
-                    .shadow_md()
                     .cursor_pointer()
                     .occlude()
                     .hover(|s| s.opacity(0.9))
@@ -791,7 +793,8 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": false }), window, cx);
                     }))
-                    .child(mark(BUBBLE, false)),
+                    // The orb is the bubble: it moves while the manager thinks, and only then.
+                    .child(self.manager_orb("manager-bubble-orb", BUBBLE, look == Presence::Thinking, mark(BUBBLE, false))),
             )
             // Its state, at the foot of the mark: not colour only, the tooltip says it in words.
             .child(div().absolute().right(theme::sz(-1.)).bottom(theme::sz(-1.)).child(signal_dot(signal, 13., theme::bg())))
@@ -986,7 +989,7 @@ impl Workspace {
             .pr(theme::sz(8.))
             .py(theme::sz(10.))
             .when(!docked, |d| d.border_b_1().border_color(theme::border()))
-            .child(mark(30., false))
+            .child(self.manager_orb(if docked { "manager-header-orb" } else { "chat-overlay-orb" }, 32., self.manager_presence() == Presence::Thinking, mark(32., false)))
             .child(
                 div()
                     .id("assistant-name")
@@ -1094,7 +1097,7 @@ impl Workspace {
                 .justify_center()
                 .gap(theme::sz(10.))
                 .px(theme::sz(24.))
-                .child(mark(40., true))
+                .child(self.manager_orb("manager-empty-orb", 40., false, mark(40., true)))
                 .child(div().text_size(theme::sz(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("Ask {name}")))
                 .child(
                     div()
@@ -1558,7 +1561,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(theme::sz(8.))
-            .child(icons::icon(icons::ASSISTANT, theme::sz(15.), theme::sz(15.), theme::accent()))
+            .child(self.manager_orb("manager-scene-orb", 18., false, mark(18., false)))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_soft()).child(title))
             .child(header_button("manager-scene-close", icons::CLOSE, "Put the picture away").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.manager.scene_open = false;

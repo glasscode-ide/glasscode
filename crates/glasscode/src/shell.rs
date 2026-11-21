@@ -531,6 +531,9 @@ impl Workspace {
             })
             .children(frames::last_mark())
             .into_any_element();
+        // The manager's orb, at the sizes this frame drew it at: an image not made yet is made
+        // now, in the background.
+        self.orbs_make(window, cx);
         frames::built();
         shell
     }
