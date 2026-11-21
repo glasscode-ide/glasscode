@@ -767,11 +767,11 @@ impl Workspace {
             div()
                 .id("backdrop-page")
                 .absolute()
-                // Below the title bar, which stays in use.
-                .top(theme::sz(crate::shell::TITLE_HEIGHT))
-                .left_0()
-                .right_0()
-                .bottom_0()
+                // Over the card, below its title bar, which stays in use.
+                .top(theme::sz(crate::shell::INSET + crate::shell::TITLE_HEIGHT))
+                .left(theme::sz(crate::shell::RAIL))
+                .right(theme::sz(crate::shell::INSET))
+                .bottom(theme::sz(crate::shell::INSET))
                 .bg(theme::bg())
                 .text_color(theme::text())
                 .occlude()

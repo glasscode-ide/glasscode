@@ -1501,6 +1501,8 @@ impl Workspace {
             .h_full()
             .gap(theme::sz(PAD))
             .p(theme::sz(PAD))
+            // No status bar here: this page ends the card, with its round corners.
+            .rounded_b(theme::sz(crate::shell::CARD_RADIUS))
             .bg(theme::bg())
             .text_color(theme::text())
             .children(art)

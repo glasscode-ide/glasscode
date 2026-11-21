@@ -103,7 +103,9 @@ fn button(kind: Button) -> impl IntoElement {
         .occlude()
         .window_control_area(kind.area())
         .map(|d| match kind {
+            // The last button ends at the card's round corner.
             Button::Close => d
+                .rounded_tr(theme::sz(crate::shell::CARD_RADIUS))
                 .hover(|s| s.bg(red).text_color(white()))
                 .active(|s| s.bg(red.opacity(0.9)).text_color(white())),
             _ => d
