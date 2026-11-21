@@ -134,6 +134,8 @@ pub struct Workspace {
     pub popover: Option<crate::shell::Popover>,
     /// The window's width at the last frame: the sidebars narrow in a narrow window.
     pub(crate) window_width: f32,
+    /// The rail's button under the pointer (its place in the rail): its name shows beside it.
+    pub(crate) rail_tip: Option<usize>,
     /// The focus of each sidebar edge (`Side` order), which the arrow keys move.
     pub(crate) edge_focus: [FocusHandle; 3],
     pub env: Arc<HashMap<String, String>>,
@@ -312,6 +314,7 @@ impl Workspace {
             history: Default::default(),
             popover: None,
             window_width: f32::from(window.viewport_size().width),
+            rail_tip: None,
             edge_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             env,
             terminals: HashMap::new(),

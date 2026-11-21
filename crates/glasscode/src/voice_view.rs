@@ -805,6 +805,7 @@ impl Workspace {
             width -= self.shown_width(Side::Right);
         }
         let height = f32::from(window.viewport_size().height)
+            - 2. * f32::from(sz(crate::shell::INSET))
             - f32::from(sz(crate::shell::TITLE_HEIGHT))
             - f32::from(sz(crate::status_bar::BAR_HEIGHT));
         (width.max(0.), height.max(0.))

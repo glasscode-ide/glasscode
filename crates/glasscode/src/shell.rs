@@ -2,7 +2,7 @@
 //! status bar and the popovers over them. Where the person is (the view, and the session in
 //! Sessions) goes on a back list each time it changes, for the title bar's back and forward.
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Stateful, Window, deferred, div, prelude::*, px};
+use gpui::{Animation, AnimationExt as _, AnyElement, ClickEvent, Context, FontWeight, Stateful, Window, deferred, div, prelude::*, px};
 
 use crate::theme;
 use crate::ui;
@@ -160,17 +160,33 @@ pub fn right_tab_from(key: &str) -> Option<RightTab> {
 
 // ----- the title bar at narrow widths -----------------------------------------------------------
 
-/// The title bar's optional items: which show at a width. The wordmark goes first, then the
-/// breadcrumb, then the words of the Jump field (its icon and its key stay). Its sizes are
+/// The title bar's optional items: which show at a width. The breadcrumb goes first, then the
+/// words of the Jump field (its icon and its key stay). Its sizes are
 /// logical, as the sidebars' are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleFit {
-    pub wordmark: bool,
     pub breadcrumb: bool,
     pub jump_words: bool,
 }
 
-const WORDMARK: f32 = 82.;
+/// The rail at the left of the window: the mark, a round button for each view, Settings at its
+/// end. It shows in every view, also with the left sidebar hidden.
+pub const RAIL: f32 = 56.;
+/// The frame the rail's colour makes over, right of and under the card that holds the rest.
+pub const INSET: f32 = 6.;
+/// The card's corners.
+pub const CARD_RADIUS: f32 = 16.;
+const RAIL_BUTTON: f32 = 40.;
+const RAIL_GAP: f32 = 6.;
+/// The views of the rail, from its top. Settings is apart, at its end.
+const RAIL_VIEWS: [(View, &[u8], &str); 5] = [
+    (View::Sessions, crate::icons::SESSIONS, "Sessions"),
+    (View::Today, crate::icons::TODAY, "Today"),
+    (View::Board, crate::icons::TICKETS, "Board"),
+    (View::PullRequests, crate::icons::PULL_REQUEST, "Pull requests"),
+    (View::Usage, crate::icons::USAGE, "Usage"),
+];
+
 /// The breadcrumb narrows down to this, with an ellipsis, before it goes.
 const BREADCRUMB: f32 = 150.;
 /// The Jump field with its words, and with only its icon and key.
@@ -178,7 +194,6 @@ const JUMP_WORDS: f32 = 240.;
 const JUMP_SMALL: f32 = 120.;
 const BAR_BUTTON: f32 = 28.;
 const BAR_GAP: f32 = 8.;
-const MARK: f32 = 19.;
 /// The window buttons of Windows (window_controls.rs).
 const WINDOW_BUTTONS: f32 = 3. * crate::window_controls::BUTTON_WIDTH;
 /// The room of the traffic lights of macOS. The system draws them at its own size, so this room
@@ -192,14 +207,15 @@ pub fn pill_width(chars: usize) -> f32 {
     chars as f32 * 7. + 36.
 }
 
-/// What the title bar takes whatever the width: its padding (the traffic lights on macOS), the
-/// mark, the four buttons, the pills that show, the window buttons of Windows, and the gaps. At
+/// What the title bar takes of the window's width whatever the width: the rail and the frame
+/// beside the card, its padding (on macOS the part of the traffic lights that is not over the
+/// rail), the four buttons, the pills that show, the window buttons of Windows, and the gaps. At
 /// `scale`, the traffic lights take less of the logical width.
 pub fn title_chrome(windows: bool, pills: &[f32], scale: f32) -> f32 {
-    let padding = if windows { 12. + WINDOW_BUTTONS } else { TRAFFIC_LIGHTS / scale + 12. };
-    // Gaps: after the mark, the buttons, the breadcrumb, the Jump field and each pill.
-    let gaps = (4 + pills.len()) as f32 * BAR_GAP;
-    padding + MARK + 4. * BAR_BUTTON + pills.iter().sum::<f32>() + gaps
+    let padding = if windows { 12. + WINDOW_BUTTONS } else { (TRAFFIC_LIGHTS / scale - RAIL).max(0.) + 24. };
+    // Gaps: after the buttons, the breadcrumb, the Jump field and each pill.
+    let gaps = (3 + pills.len()) as f32 * BAR_GAP;
+    RAIL + INSET + padding + 4. * BAR_BUTTON + pills.iter().sum::<f32>() + gaps
 }
 
 /// `title_fit` for a title bar `width` pixels wide on the screen at `scale`, with these pills.
@@ -215,11 +231,7 @@ pub fn title_fit(width: f32, chrome: f32) -> TitleFit {
         free -= JUMP_WORDS - JUMP_SMALL;
     }
     let breadcrumb = jump_words && free >= BREADCRUMB;
-    if breadcrumb {
-        free -= BREADCRUMB;
-    }
-    let wordmark = breadcrumb && free >= WORDMARK;
-    TitleFit { wordmark, breadcrumb, jump_words }
+    TitleFit { breadcrumb, jump_words }
 }
 
 /// A square button of the title bar with an icon; a button with nothing to do shows faint.
@@ -236,44 +248,6 @@ fn bar_button(id: &'static str, glyph: &'static [u8], enabled: bool, pressed: bo
         .when(pressed, |d| d.bg(theme::selected()))
         .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(theme::hover())))
         .child(crate::icons::icon(glyph, theme::sz(16.), theme::sz(16.), color))
-}
-
-/// A row at the top of the left sidebar: a view, or New session.
-fn nav_row(id: &'static str, glyph: &'static [u8], label: &'static str, on: bool, count: usize, key: Option<String>) -> Stateful<gpui::Div> {
-    let color = if on { theme::text_strong() } else { theme::text_soft() };
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2p5()
-        .h(theme::sz(30.))
-        .px_2()
-        .rounded_md()
-        .cursor_pointer()
-        .text_color(color)
-        .when(on, |d| d.bg(theme::selected()).font_weight(FontWeight::MEDIUM))
-        .hover(|s| s.bg(theme::hover()))
-        .child(crate::icons::icon(glyph, theme::sz(16.), theme::sz(16.), color))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-        .when(count > 0, |d| {
-            d.child(
-                div()
-                    .flex_none()
-                    .min_w(theme::sz(18.))
-                    .h(theme::sz(18.))
-                    .px(theme::sz(5.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(crate::sidebar::attention())
-                    .text_color(theme::on_attention())
-                    .text_size(theme::sz(10.5))
-                    .font_weight(FontWeight::BOLD)
-                    .child(count.to_string()),
-            )
-        })
-        .when_some(key, |d, key| d.child(ui::kbd(key)))
 }
 
 impl Workspace {
@@ -455,7 +429,9 @@ impl Workspace {
         // GPUI's short forms (`p_2`, `gap_3`, `text_sm`) are in rems: the scale reaches them
         // through the rem, and the `px` sizes through `theme::sz`.
         window.set_rem_size(theme::rem_size());
-        self.window_width = f32::from(window.viewport_size().width);
+        // The width of the card: what the views, the sidebars and the bars share.
+        self.window_width = (f32::from(window.viewport_size().width) - f32::from(theme::sz(RAIL + INSET))).max(0.);
+        let rail = self.render_rail(window, cx);
         let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
         let title_bar = frames::part(frames::Part::Title, || self.render_title_bar(window, cx).into_any_element());
         let has_left = self.view_has_left();
@@ -482,11 +458,16 @@ impl Workspace {
         } else {
             theme::sz(16.)
         };
-        let shell = div()
-            .size_full()
+        // The card: all but the rail. The title bar and the status bar round its corners.
+        let card = div()
             .flex()
             .flex_col()
-            .children(frames::first_mark())
+            .flex_1()
+            .min_h_0()
+            .mr(theme::sz(INSET))
+            .mb(theme::sz(INSET))
+            .rounded(theme::sz(CARD_RADIUS))
+            .bg(theme::bg())
             .child(title_bar)
             .child(
                 div()
@@ -500,7 +481,24 @@ impl Workspace {
                     .when(has_right, |d| d.child(self.resize_handle(right_side, cx)))
                     .children(right),
             )
-            .children(status_bar)
+            .children(status_bar);
+        let shell = div()
+            .size_full()
+            .flex()
+            .bg(theme::rail())
+            .children(frames::first_mark())
+            .child(rail)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    // Windows: the strip over the card moves the window, as the title bar does.
+                    .child(div().flex_none().h(theme::sz(INSET)).when(cfg!(windows), |d| d.window_control_area(gpui::WindowControlArea::Drag)))
+                    .child(card),
+            )
             .children(popover)
             .children(bubble)
             .when_some(self.render_kit(cx), |d, kit| d.child(kit))
@@ -555,15 +553,9 @@ impl Workspace {
     }
 
     /// The left sidebar: "Workspace" with the sessions that need the person and those at work,
-    /// New session, the rows of the views, the tree of projects, worktrees and sessions (the
-    /// Server group and "Add project…" at its end), and Settings at the bottom.
+    /// New session, and the tree of projects, worktrees and sessions (the Server group and
+    /// "Add project…" at its end). The views and Settings are in the rail.
     pub fn render_left(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let view = self.view;
-        // Today: what is due or late, what waits for the person's OK, and what the manager holds
-        // for them (a message to allow, a follow-up to look at again); Board: review requests.
-        let today_count = self.today_view().due + self.control.approvals.len() + self.manager_waits().len();
-        let board_count = self.tickets.reviews.len();
-        let prs_count = self.prs_count();
         // Over all projects, also folded ones: a dot and a number each, as words do not fit at
         // the narrowest width.
         let (needs, working) = self.sidebar_counts();
@@ -615,33 +607,9 @@ impl Workspace {
             .child(crate::icons::icon(crate::icons::PLUS, theme::sz(15.), theme::sz(15.), theme::text_soft()))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("New session"))
             .when(roomy, |d| d.child(ui::kbd(crate::keymap::label(&NewSession))));
-        let views = div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .gap_px()
-            .px(theme::sz(6.))
-            .pb(theme::sz(6.))
-            .border_b_1()
-            .border_color(theme::border())
-            // Today first: it is the home, and the manager's too (it has no row of its own).
-            .child(nav_row("nav-today", crate::icons::TODAY, "Today", view == View::Today, today_count, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Today, window, cx))))
-            .child(
-                nav_row("nav-board", crate::icons::TICKETS, "Board", view == View::Board, board_count, None)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Board, window, cx))),
-            )
-            .child(
-                nav_row("nav-prs", crate::icons::PULL_REQUEST, "Pull requests", view == View::PullRequests, prs_count, None)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::PullRequests, window, cx))),
-            )
-            .child(nav_row("nav-usage", crate::icons::USAGE, "Usage", view == View::Usage, 0, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Usage, window, cx))));
         // The tree keeps where it was scrolled to from frame to frame.
         let scroll = window.use_keyed_state("left-tree-scroll", cx, |_, _| gpui::ScrollHandle::new()).read(cx).clone();
         let tree = frames::part(frames::Part::Tree, || div().flex().flex_none().flex_col().px(theme::sz(6.)).pt(theme::sz(4.)).pb(theme::sz(10.)).children(self.render_tree(cx)).into_any_element());
-        let settings = div().flex_none().px(theme::sz(6.)).py(theme::sz(6.)).border_t_1().border_color(theme::border()).child(
-            nav_row("nav-settings", crate::icons::GEAR, "Settings", view == View::Settings, 0, Some(crate::keymap::label(&OpenSettings)))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Settings, window, cx))),
-        );
         div()
             .flex()
             .flex_col()
@@ -653,10 +621,136 @@ impl Workspace {
             .border_color(theme::border())
             .child(header)
             .child(new_session)
-            .child(views)
             .child(ui::scroll_area("left-tree", &scroll, tree))
-            .child(settings)
             .into_any_element()
+    }
+
+    /// The rail: the mark, a round button for each view with what waits there as a number, and
+    /// Settings at its end. The round mark of the view on screen slides from button to button.
+    /// The first run has the mark only: it ends through its own buttons.
+    pub fn render_rail(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Windows tells of a pointer that left the window (the rail is at its edge) with no
+        // last move, so no button hears that the pointer left it: the window is drawn again.
+        if !window.is_window_hovered() {
+            self.rail_tip = None;
+        }
+        let view = self.view;
+        // Today: what is due or late, what waits for the person's OK, and what the manager holds
+        // for them (a message to allow, a follow-up to look at again); Board: review requests.
+        let counts = [0, self.today_view().due + self.control.approvals.len() + self.manager_waits().len(), self.tickets.reviews.len(), self.prs_count(), 0];
+        let at = RAIL_VIEWS.iter().position(|(v, _, _)| *v == view);
+        let step = theme::sz(RAIL_BUTTON + RAIL_GAP);
+        let views = div()
+            .relative()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(theme::sz(RAIL_GAP))
+            // Under the buttons. A spring, as the switch has: it keeps its place and speed when
+            // the view changes on its way, and stands still when it first shows.
+            .when_some(at, |d, at| {
+                let spring = gpui::SpringAnimation::new(gpui::SpringConfig::new(520., 40., 1.)).to(at as f32);
+                d.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .size(theme::sz(RAIL_BUTTON))
+                        .rounded_full()
+                        .bg(theme::rail_mark())
+                        .with_spring("rail-on", spring, move |mark, y: f32| mark.top(step * y)),
+                )
+            })
+            .children(RAIL_VIEWS.iter().zip(counts).enumerate().map(|(slot, ((to, glyph, name), count))| self.rail_button(slot, glyph, (*name).into(), *to, count, false, cx)));
+        let settings = self.rail_button(RAIL_VIEWS.len(), crate::icons::GEAR, format!("Settings  {}", crate::keymap::label(&OpenSettings)), View::Settings, 0, true, cx);
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(16.))
+            .w(theme::sz(RAIL))
+            .h_full()
+            .pt(theme::sz(14.))
+            .pb(theme::sz(12.))
+            // macOS: the mark is under the traffic lights. Windows: the rail moves the window.
+            .when(!cfg!(windows), |d| d.pt(theme::sz(TITLE_HEIGHT)))
+            .when(cfg!(windows), |d| d.window_control_area(gpui::WindowControlArea::Drag))
+            .child(crate::icons::icon(crate::icons::LOGO, theme::sz(24.), theme::sz(23.), theme::text_strong()))
+            .when(self.first_run.is_none(), |d| d.child(views).child(div().flex_1()).child(settings))
+            .into_any_element()
+    }
+
+    /// A round button of the rail. Its name comes in beside it while the pointer is on it. `own`:
+    /// it draws its own mark when its view is on screen (the sliding one is for the views).
+    #[allow(clippy::too_many_arguments)]
+    fn rail_button(&self, slot: usize, glyph: &'static [u8], name: String, to: View, count: usize, own: bool, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.view == to;
+        let color = if on { theme::text_strong() } else { theme::text_soft() };
+        let button = div()
+            .id(("rail", slot))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(theme::sz(RAIL_BUTTON))
+            .rounded_full()
+            .cursor_pointer()
+            .when(on && own, |d| d.bg(theme::rail_mark()))
+            .when(!on, |d| d.hover(|s| s.bg(theme::rail_mark().opacity(0.6))))
+            .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                let tip = if *over { Some(slot) } else { this.rail_tip.filter(|other| *other != slot) };
+                if this.rail_tip != tip {
+                    this.rail_tip = tip;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.go(to, window, cx)))
+            .child(crate::icons::icon(glyph, theme::sz(19.), theme::sz(19.), color))
+            .when(count > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(theme::sz(1.))
+                        .right(theme::sz(1.))
+                        .min_w(theme::sz(15.))
+                        .h(theme::sz(15.))
+                        .px(theme::sz(4.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(crate::sidebar::attention())
+                        .text_color(theme::on_attention())
+                        .text_size(theme::sz(9.5))
+                        .font_weight(FontWeight::BOLD)
+                        .child(count.to_string()),
+                )
+            })
+            .when(self.rail_tip == Some(slot), |d| {
+                let tip = div()
+                    .absolute()
+                    .top(theme::sz((RAIL_BUTTON - 26.) / 2.))
+                    .flex()
+                    .items_center()
+                    .h(theme::sz(26.))
+                    .px(theme::sz(9.))
+                    .rounded(theme::sz(7.))
+                    .border_1()
+                    .border_color(theme::border_strong())
+                    .bg(theme::raised())
+                    .shadow_md()
+                    .whitespace_nowrap()
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text())
+                    .child(name)
+                    // It comes out of the button: a few pixels to the right as it fades in.
+                    .with_animation(("rail-tip", slot), Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out), |tip, t| {
+                        tip.left(theme::sz(RAIL_BUTTON + 4. + 6. * t)).opacity(t)
+                    });
+                d.child(deferred(tip).with_priority(2))
+            });
+        crate::window_controls::clickable(button)
     }
 
     /// The right panel of the view: the session's (Files, Changes, Checks, Pull request), or
@@ -743,8 +837,10 @@ impl Workspace {
             .gap_2()
             // The drag area of Windows is this bar as drawn, so it is as tall as the bar.
             .h(theme::sz(TITLE_HEIGHT))
-            .pl(px(TRAFFIC_LIGHTS))
+            // macOS: the traffic lights are over the rail and the start of this bar.
+            .pl((px(TRAFFIC_LIGHTS) - theme::sz(RAIL)).max(px(0.)) + theme::sz(12.))
             .pr_3()
+            .rounded_t(theme::sz(CARD_RADIUS))
             // Windows: no traffic lights at the left, and the window buttons end the bar at the right.
             .when(cfg!(windows), |d| {
                 d.pl(theme::sz(12.))
@@ -758,16 +854,8 @@ impl Workspace {
             // (each grows from nothing), so the field is in the middle of the window on every page
             // and stays there when a side panel opens or the breadcrumb changes. Only when one
             // side needs more than its half does the field move.
-            .child(div().flex().flex_1().min_w_0().items_center().gap_2().overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .child(crate::icons::icon(crate::icons::LOGO, theme::sz(19.), theme::sz(18.), theme::text_strong()))
-                    .when(fit.wordmark, |d| d.child(div().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(14.)).child("Glasscode"))),
-            )
+            // The left part keeps its three buttons: in a narrow window the field narrows for them.
+            .child(div().flex().flex_1().min_w(theme::sz(3. * BAR_BUTTON + 4.)).items_center().gap_2().overflow_hidden()
             .child(
                 div()
                     .flex()
@@ -868,6 +956,7 @@ impl Workspace {
             .gap_4()
             .h(theme::sz(crate::status_bar::BAR_HEIGHT))
             .px_3()
+            .rounded_b(theme::sz(CARD_RADIUS))
             .bg(theme::chrome())
             .border_t_1()
             .border_color(theme::border())
@@ -1403,6 +1492,8 @@ mod tests {
             for width in [NARROWEST, 1000., 1280., 1440., 2560.] {
                 for right_side in [Side::Right, Side::Tickets] {
                     let (right_min, right_max) = crate::sessions_ui::edge_limits(right_side);
+                    // The sidebars share the card: the window less the rail and the frame.
+                    let width = width - (RAIL + INSET) * scale;
                     for (wanted_left, wanted_right) in [(left_min, right_min), (300., 420.), (left_max, right_max)] {
                         let (l, r) = fit_panels_at(width, scale, Some((wanted_left, left_min)), Some((wanted_right, right_min)));
                         let (l, r) = (l.expect("the left sidebar shows"), r.expect("the right panel shows"));
@@ -1441,15 +1532,15 @@ mod tests {
         let quiet = [server];
         let updating = [server, update];
         let busy = [pill_width("my-build-server · connecting".chars().count()), update, pill_width("Moving 10 of 10…".chars().count())];
-        let all = TitleFit { wordmark: true, breadcrumb: true, jump_words: true };
-        let none = TitleFit { wordmark: false, breadcrumb: false, jump_words: false };
+        let all = TitleFit { breadcrumb: true, jump_words: true };
+        let none = TitleFit { breadcrumb: false, jump_words: false };
         for windows in [true, false] {
             for width in [900., 1100., 1600.] {
                 assert_eq!(title_fit_at(width, 1., windows, &quiet), all, "a quiet bar at {width} px (Windows: {windows})");
             }
         }
         let fit = |width: f32, pills: &[f32]| title_fit_at(width, 1., true, pills);
-        assert_eq!(fit(900., &updating), TitleFit { wordmark: false, breadcrumb: false, jump_words: true });
+        assert_eq!(fit(900., &updating), TitleFit { breadcrumb: false, jump_words: true });
         assert_eq!((fit(1100., &updating), fit(1600., &updating)), (all, all));
         assert_eq!((fit(900., &busy), fit(1100., &busy), fit(1600., &busy)), (none, none, all));
         // The rest fits even then: all but the server pill (which clips) and the small Jump field.
@@ -1457,7 +1548,7 @@ mod tests {
     }
 
     /// At each scale the items the bar shows fit in it. At 130 % in the narrowest window a quiet
-    /// bar keeps the Jump field's words, and with the update pill too it all still fits.
+    /// bar keeps the Jump field's words; with the update pill too, the server pill clips.
     #[test]
     fn the_title_bar_fits_at_each_scale() {
         let server = pill_width("Server…".chars().count());
@@ -1470,8 +1561,15 @@ mod tests {
                         let fit = title_fit_at(width, scale, windows, pills);
                         let shown = title_chrome(windows, pills, scale)
                             + if fit.jump_words { JUMP_WORDS } else { JUMP_SMALL }
-                            + if fit.breadcrumb { BREADCRUMB } else { 0. }
-                            + if fit.wordmark { WORDMARK } else { 0. };
+                            + if fit.breadcrumb { BREADCRUMB } else { 0. };
+                        // With the rail, the update pill does not fit at 130 % in the narrowest
+                        // window: the bar is at its smallest then, and the server pill clips.
+                        let clips = pills.len() == 2 && scale >= 1.3 && width == NARROWEST;
+                        if clips {
+                            assert_eq!(fit, TitleFit { breadcrumb: false, jump_words: false }, "the smallest bar at {scale} (Windows: {windows})");
+                            assert!((shown - server) * scale <= width, "all but the server pill at {scale} (Windows: {windows})");
+                            continue;
+                        }
                         assert!(shown * scale <= width + 0.01, "{shown} at {scale} in {width} px (Windows: {windows}, {} pills)", pills.len());
                     }
                 }
@@ -1480,22 +1578,20 @@ mod tests {
                 assert!(title_chrome(windows, &[], scale) + JUMP_SMALL <= NARROWEST / scale, "all but the pills at {scale}");
             }
         }
-        let quiet = TitleFit { wordmark: false, breadcrumb: false, jump_words: true };
-        let none = TitleFit { wordmark: false, breadcrumb: false, jump_words: false };
+        let quiet = TitleFit { breadcrumb: false, jump_words: true };
+        let none = TitleFit { breadcrumb: false, jump_words: false };
         assert_eq!(title_fit_at(NARROWEST, 1.3, true, &[server]), quiet);
         assert_eq!(title_fit_at(NARROWEST, 1.3, false, &[server]), quiet);
         assert_eq!(title_fit_at(NARROWEST, 1.3, true, &[server, update]), none);
         assert_eq!(title_fit_at(NARROWEST, 1.3, true, &busy), none);
-        assert_eq!(title_fit_at(1600., 1.3, true, &[server]), TitleFit { wordmark: true, breadcrumb: true, jump_words: true });
+        assert_eq!(title_fit_at(1600., 1.3, true, &[server]), TitleFit { breadcrumb: true, jump_words: true });
     }
 
     #[test]
-    fn the_title_bar_drops_the_wordmark_first() {
+    fn the_title_bar_drops_the_breadcrumb_first() {
         let chrome = title_chrome(true, &[pill_width(7)], 1.);
-        let roomy = chrome + JUMP_WORDS + BREADCRUMB + WORDMARK;
-        assert_eq!(title_fit(roomy, chrome), TitleFit { wordmark: true, breadcrumb: true, jump_words: true });
-        assert_eq!(title_fit(roomy - 1., chrome), TitleFit { wordmark: false, breadcrumb: true, jump_words: true });
-        assert_eq!(title_fit(chrome + JUMP_WORDS + BREADCRUMB - 1., chrome), TitleFit { wordmark: false, breadcrumb: false, jump_words: true });
-        assert_eq!(title_fit(chrome + JUMP_WORDS - 1., chrome), TitleFit { wordmark: false, breadcrumb: false, jump_words: false });
+        assert_eq!(title_fit(chrome + JUMP_WORDS + BREADCRUMB, chrome), TitleFit { breadcrumb: true, jump_words: true });
+        assert_eq!(title_fit(chrome + JUMP_WORDS + BREADCRUMB - 1., chrome), TitleFit { breadcrumb: false, jump_words: true });
+        assert_eq!(title_fit(chrome + JUMP_WORDS - 1., chrome), TitleFit { breadcrumb: false, jump_words: false });
     }
 }

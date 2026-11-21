@@ -1631,10 +1631,12 @@ impl Workspace {
             },
             Popover::Ports => bounds(3),
         };
-        let left = place(width_screen, width, item, popover == Popover::Usage, margin);
-        let bottom = f32::from(sz(BAR_HEIGHT)) + margin;
+        // Over the card, not the rail beside it.
+        let inset = f32::from(sz(crate::shell::INSET));
+        let left = place(width_screen - inset, width, item, popover == Popover::Usage, margin).max(f32::from(sz(crate::shell::RAIL)) + margin);
+        let bottom = inset + f32::from(sz(BAR_HEIGHT)) + margin;
         // The body gives up height first, in a low window (900 x 560 at 130 %), and scrolls.
-        let room = height_screen - f32::from(sz(crate::shell::TITLE_HEIGHT)) - bottom - margin;
+        let room = height_screen - inset - f32::from(sz(crate::shell::TITLE_HEIGHT)) - bottom - margin;
         let chrome = f32::from(sz(HEAD))
             + if body.footer.is_some() {
                 f32::from(sz(FOOT))
