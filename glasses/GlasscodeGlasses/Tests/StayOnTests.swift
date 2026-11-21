@@ -18,7 +18,7 @@ final class StayOnTests: XCTestCase {
         glasses.unfold()
         glasses.don()
         session = GlassesSession()
-        session.show(GlasscodeScreens.blank())
+        session.show(LensCards.blank())
         try await until("the lens starts", 20) { self.session.isConnected }
     }
 
@@ -51,7 +51,7 @@ final class StayOnTests: XCTestCase {
         XCTAssertFalse(session.stayOn)
         try await Task.sleep(for: .seconds(8))
         XCTAssertFalse(session.isConnected, "reconnected after the person disconnected")
-        session.show(GlasscodeScreens.blank())          // drawing a screen must not reconnect either
+        session.show(LensCards.blank())          // drawing a screen must not reconnect either
         try await Task.sleep(for: .seconds(4))
         XCTAssertFalse(session.isConnected, "a redraw reconnected after the person disconnected")
 

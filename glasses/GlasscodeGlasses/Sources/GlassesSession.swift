@@ -3,21 +3,21 @@ import Combine
 import MWDATCore
 import MWDATDisplay
 import MWDATInputs
-import MWDATSpeech
 
 /// A neural-band / touchpad event, normalized away from the DAT `InputEvent` zoo
 /// into the handful of things the browse UI actually cares about.
 enum GlassesInput: Equatable { case up, down, left, right, select, back, capture }
 
-// Owns the one `DeviceSession` to the Meta Ray-Ban Display glasses and layers the
-// three capabilities the Glasscode flow needs on top of it:
+// Owns the one `DeviceSession` to the Meta Ray-Ban Display glasses and layers the two
+// capabilities the app needs on top of it:
 //
-//   • Display — renders whatever screen the flow hands it (`show`).
-//   • Inputs  — neural band / touchpad nav, forwarded as `GlassesInput` via `onInput`.
-//   • Speech  — Meta's on-device transcription, started on demand for Voice mode.
+//   • Display — renders whatever card the lens model hands it (`show`).
+//   • Inputs  — the Neural Band and the touchpad, forwarded as `GlassesInput` via `onInput`:
+//               a pinch talks or picks (G12), swipes move and open.
 //
-// Display attaches automatically on first render; Inputs attaches once the session
-// is started; Speech attaches lazily the first time Voice mode asks to listen.
+// Display attaches automatically on first render; Inputs attaches once the session is started.
+// Speech is the phone's own (`Speech.swift`): Meta's on-glasses transcription is dev and beta
+// only.
 @MainActor
 final class GlassesSession: ObservableObject {
     @Published var isConnected = false
@@ -33,7 +33,6 @@ final class GlassesSession: ObservableObject {
     @Published var inputsError: String?
     /// Human-readable description of the last raw input event (shown under ⋯ for diagnosis).
     @Published var lastEvent = ""
-    @Published var isListening = false
     /// Stay on Glasscode. The glasses end our session for reasons the app cannot prevent
     /// (Meta AI, the back gesture, a tap and hold on the touchpad, a call); while this is on,
     /// a new session is started by itself. Only `disconnect()` — the person's own choice on
@@ -45,10 +44,6 @@ final class GlassesSession: ObservableObject {
 
     /// Neural-band / touchpad events, already normalized.
     var onInput: ((GlassesInput) -> Void)?
-    /// Partial + final transcriptions while Speech is running (Voice mode).
-    var onTranscript: ((TranscriptionResult) -> Void)?
-    /// Surfaced when Speech can't start (permission denied, unavailable).
-    var onSpeechError: ((String) -> Void)?
     /// Fired when the pinch toggles the lens on/off, so the flow can republish the mirror.
     var onDisplayChange: (() -> Void)?
 
@@ -70,11 +65,6 @@ final class GlassesSession: ObservableObject {
     private var inputsStateToken: AnyListenerToken?
     private var inputsErrorToken: AnyListenerToken?
 
-    // Speech
-    private var speech: Speech?
-    private var speechStateToken: AnyListenerToken?
-    private var speechTranscriptToken: AnyListenerToken?
-    private var speechErrorToken: AnyListenerToken?
 
     private var coreStateTask: Task<Void, Never>?
     private var errorTask: Task<Void, Never>?
@@ -163,13 +153,10 @@ final class GlassesSession: ObservableObject {
         if displayOn {
             if let v = latest { sendToLens(v) }
         } else {
-            sendToLens(GlasscodeScreens.blank())
+            sendToLens(LensCards.blank())
         }
         onDisplayChange?()
     }
-
-    /// Back-compat for the old passive HUD readout.
-    func render(_ hud: GlasscodeHUD) { show(GlassesHUD.screen(hud)) }
 
     /// The person wants the glasses on Glasscode (the Connect button, or opening the app).
     func connect() {
@@ -380,11 +367,11 @@ final class GlassesSession: ObservableObject {
             case .up: onInput?(.up); case .down: onInput?(.down)
             case .left: onInput?(.left); case .right: onInput?(.right)
             }
-        // Navigation is swipes-only (swipe-right = open). The pinch is free, so it toggles
-        // the lens on/off. The action button and capture press stay unused — just logged.
+        // The pinch talks, or picks the focused row (G12). The action button and capture press
+        // stay unused, just logged.
         case .select(let src, _):
-            toggleDisplay()
-            lastEvent = "pinch · \(src) — lens \(displayOn ? "on" : "off")"
+            lastEvent = "pinch · \(src)"
+            onInput?(.select)
         case .back(let src, _):
             lastEvent = "back · \(src)"; onInput?(.back)          // not delivered on HW, harmless
         case .button(_, let src, _):
@@ -419,46 +406,6 @@ final class GlassesSession: ObservableObject {
         }
     }
 
-    // MARK: - Speech (Voice mode, on-device transcription)
-
-    /// Ask for the mic (once, on a user action) and start Meta's on-device transcription.
-    func startSpeech() {
-        guard let session = deviceSession else { onSpeechError?("Glasses aren't connected."); return }
-        Task { @MainActor in
-            // Check first — only *requesting* launches Meta AI and backgrounds us (which drops
-            // the glasses session). Once granted, later Voice uses never leave the app.
-            let current = (try? await Wearables.shared.checkPermissionStatus(.microphone)) ?? .denied
-            if current != .granted {
-                let granted = (try? await Wearables.shared.requestPermission(.microphone)) ?? .denied
-                guard granted == .granted else { self.onSpeechError?("Turn on Microphone for Glasscode in Meta AI."); return }
-            }
-            if self.speech == nil {
-                do {
-                    guard let sp = try session.addSpeech() else { self.onSpeechError?("Transcription unavailable."); return }
-                    self.speech = sp
-                    self.speechStateToken = sp.statePublisher.listen { [weak self] st in
-                        Task { @MainActor in self?.isListening = (st == .started) }
-                    }
-                    self.speechTranscriptToken = sp.transcriptionPublisher.listen { [weak self] result in
-                        Task { @MainActor in self?.onTranscript?(result) }
-                    }
-                    self.speechErrorToken = sp.errorPublisher.listen { [weak self] _ in
-                        Task { @MainActor in self?.onSpeechError?("Transcription stopped."); self?.isListening = false }
-                    }
-                } catch {
-                    self.onSpeechError?("Couldn't start transcription."); return
-                }
-            }
-            self.speech?.start()
-            self.isListening = true
-        }
-    }
-
-    func stopSpeech() {
-        speech?.stop()
-        isListening = false
-    }
-
     // MARK: - teardown
 
     private func teardown() {
@@ -466,7 +413,6 @@ final class GlassesSession: ObservableObject {
         isConnected = false
         paused = false
         inputsAvailable = false
-        isListening = false
         sendInFlight = false
         queuedView = nil
 
@@ -477,9 +423,6 @@ final class GlassesSession: ObservableObject {
         inputsEventTask?.cancel(); inputsEventTask = nil
         inputsStateToken = nil; inputsErrorToken = nil
         if inputs != nil { try? deviceSession?.removeInputs(); inputs = nil }
-
-        speechStateToken = nil; speechTranscriptToken = nil; speechErrorToken = nil
-        if speech != nil { speech?.stop(); try? deviceSession?.removeSpeech(); speech = nil }
 
         coreStateTask?.cancel(); coreStateTask = nil
         errorTask?.cancel(); errorTask = nil

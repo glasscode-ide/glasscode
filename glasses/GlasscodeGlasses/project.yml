@@ -10,15 +10,13 @@ packages:
   DAT:
     url: https://github.com/facebook/meta-wearables-dat-ios
     exactVersion: "1.0.1"
-  # The same ElevenLabs voice core the IDE's Mac helper uses (LiveKit WebRTC = echo cancellation).
-  ElevenLabs:
-    url: https://github.com/elevenlabs/elevenlabs-swift-sdk
-    branch: main
-  # The manager's voice room (ManagerVoice.swift). The ElevenLabs SDK already pulls LiveKit in;
-  # this names it so the app can use it directly, from the version both resolve to today.
-  LiveKit:
-    url: https://github.com/livekit/client-sdk-swift.git
-    from: "2.19.0"
+  # SSH to the server's gate with the phone's Secure Enclave key (ServerLink.swift).
+  NIO:
+    url: https://github.com/apple/swift-nio.git
+    from: "2.65.0"
+  NIOSSH:
+    url: https://github.com/apple/swift-nio-ssh.git
+    from: "0.8.0"
 
 targets:
   GlasscodeGlasses:
@@ -33,12 +31,12 @@ targets:
         product: MWDATDisplay
       - package: DAT
         product: MWDATInputs
-      - package: DAT
-        product: MWDATSpeech
-      - package: ElevenLabs
-        product: ElevenLabs
-      - package: LiveKit
-        product: LiveKit
+      - package: NIO
+        product: NIOCore
+      - package: NIO
+        product: NIOPosix
+      - package: NIOSSH
+        product: NIOSSH
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glasscode.glasses
@@ -57,11 +55,12 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        # Glasscode listens + speaks through the glasses mic/speaker over Bluetooth.
-        NSMicrophoneUsageDescription: "Glasscode listens and talks with you through your glasses."
-        NSSpeechRecognitionUsageDescription: "Glasscode listens on-device for “Hey Glasscode” to wake up, so you never touch the phone."
+        # What you say is turned into text on the phone; the manager's answer is spoken to the glasses.
+        NSMicrophoneUsageDescription: "Glasscode hears what you ask your manager, and turns it into text on this phone."
+        NSSpeechRecognitionUsageDescription: "Glasscode turns what you say into text on this phone, to ask your manager."
+        NSCameraUsageDescription: "Glasscode scans the pairing code your Mac shows."
         NSBluetoothAlwaysUsageDescription: "Needed to connect to your Meta glasses."
-        NSLocalNetworkUsageDescription: "Lets Glasscode reach your Mac over the local network."
+        NSLocalNetworkUsageDescription: "Lets Glasscode reach your Mac and your server over Tailscale."
         NSBonjourServices:
           - _bonjour._tcp
         UIBackgroundModes:
@@ -77,6 +76,7 @@ targets:
             CFBundleURLName: dev.glasscode.glasses
             CFBundleURLSchemes:
               - glasscodeglasses
+              - glasscode
         # DAT config. Developer Mode → MetaAppID can be empty (skips attestation).
         MWDAT:
           AppLinkURLScheme: "glasscodeglasses://"

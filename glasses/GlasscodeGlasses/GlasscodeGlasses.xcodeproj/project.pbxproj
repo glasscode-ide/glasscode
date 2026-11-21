@@ -7,28 +7,32 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0467623F5FAD1D8ED2253A72 /* GlasscodeLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */; };
 		0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7030BE5C5E270404A9245D /* GlassesSession.swift */; };
-		1D7E7F4361B9D42754E81630 /* ManagerVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */; };
-		1E5CE3E0B16D8C0BD47E2F37 /* GlasscodeControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */; };
-		2F2A78C25D3B67BD31533A0B /* GlasscodeGlassesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F46EEC8D0242265D9430D582 /* GlasscodeGlassesApp.swift */; };
-		3F3972850CE5CEBC5C3C349C /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = 100276C9CE1C55EEA0B6475E /* ElevenLabs */; };
-		43ED8891FB9E09C5C35E4F87 /* GlasscodeScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0FD4F12040A779AA31D7C0C /* GlasscodeScreens.swift */; };
+		0A03A98B7E211163DAA55251 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1D3A4BF8DB346A7E50431CC /* Pairing.swift */; };
+		0C154818CDF8000E483AEEEB /* LineConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B36C472175DFBAC9A4C89148 /* LineConnection.swift */; };
+		13A8ABF049F7125F8ABB5B4B /* LensTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EEE44F05E8E4EBDF27807DD /* LensTests.swift */; };
+		17FDF0FAB703266ECCD95B52 /* LinkProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55DA0922DA29476C0F54D6CE /* LinkProtocol.swift */; };
+		237CDF6CAC1DBB0CDFAEF9BB /* LensModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07F2911FF0E89522440DF1F8 /* LensModel.swift */; };
+		29D8E159CD71C3E3E595B888 /* Speech.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5EC28D51A2ACC2F8932B17A /* Speech.swift */; };
+		3F3972850CE5CEBC5C3C349C /* NIOPosix in Frameworks */ = {isa = PBXBuildFile; productRef = 60246DC929B3A5EB019BAE01 /* NIOPosix */; };
 		4806BE4B89EBDD964E34C16B /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 686F4461A06684C7053DEB12 /* MWDATCore */; };
-		5E183B8C6EC45112F19943A6 /* GlasscodeConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4861DEF42E1D16AD926FDBA /* GlasscodeConfig.swift */; };
-		5F0B459097A0D5AC0D8A6427 /* GlassesHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = E869921307514FB8F0B02BF5 /* GlassesHUD.swift */; };
+		62741EB71EB710741E464A97 /* TurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD9442087CCEA0C71750141 /* TurnTests.swift */; };
+		65543B1CA24697B1BEED009B /* GlasscodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */; };
 		670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */; };
-		7FDC93E1C5F2892642339BC1 /* GlasscodeRelayProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */; };
+		71400D9DCCC379C128B7F753 /* ServerLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6605EFDC5271FB10F59DBFE4 /* ServerLink.swift */; };
+		7E4D2B0D0D3577ABFD66A038 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F17FB3798408A803A799178 /* AppModel.swift */; };
+		806BEA62EE058DB951E4AEC0 /* LinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 358E31277B01F5102D481811 /* LinkTests.swift */; };
+		8690C5EEE3FC6CC9AE9E1185 /* LensCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EB8114759B3FAA9F6D004D4 /* LensCards.swift */; };
+		86F79AD2A35D6F0A85248B7F /* DoorLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72F4967BB97526E80AE314EE /* DoorLink.swift */; };
 		871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8E297534B0D5F4CD6197260 /* StayOnTests.swift */; };
+		8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */; };
 		987E11777E792E9B7ACFBB7C /* AudioRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED117763B964885A22E2551 /* AudioRoute.swift */; };
-		9D8F06FFE7A3853F4A260BAE /* WakeWord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */; };
-		A6F3C44B884741DD0B4DB3BE /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = 250A4FCD72AE8130CCE7CF68 /* LiveKit */; };
-		ABDB11272AC8319D9E5D0E72 /* MWDATSpeech in Frameworks */ = {isa = PBXBuildFile; productRef = D170C5E07BB130819D84121E /* MWDATSpeech */; };
+		A6F3C44B884741DD0B4DB3BE /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = A0212625ACFF868D3C7AAE92 /* NIOSSH */; };
+		ABDB11272AC8319D9E5D0E72 /* NIOCore in Frameworks */ = {isa = PBXBuildFile; productRef = 981EC6FB3EFCDEF4EFACD079 /* NIOCore */; };
 		B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */ = {isa = PBXBuildFile; productRef = F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */; };
-		B4D3A1B044A1CC6AF21BF1D4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A2123168E7D9AC567C0D97A /* ContentView.swift */; };
 		BCE0BC027ABD6C313E70DAAA /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = 2DB5A82AC5377366F47AF18C /* MWDATDisplay */; };
-		DE5A2E6E51356E048257C230 /* GlasscodeFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */; };
-		E522F2A25B562EF48F0A99D1 /* GlasscodeVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */; };
+		D1E76A34140A87E6131FEEF2 /* DeviceKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09131CC2C61A8886BA6D12CD /* DeviceKey.swift */; };
+		E0660AAE4BCA62FED8255F89 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */; };
 		F193555A08BEA5ACD73AA601 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = 7857C5E1450492FEAF2C67DB /* MWDATMockDevice */; };
 /* End PBXBuildFile section */
 
@@ -43,25 +47,29 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeVoice.swift; sourceTree = "<group>"; };
+		07F2911FF0E89522440DF1F8 /* LensModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensModel.swift; sourceTree = "<group>"; };
+		09131CC2C61A8886BA6D12CD /* DeviceKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKey.swift; sourceTree = "<group>"; };
+		1EEE44F05E8E4EBDF27807DD /* LensTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensTests.swift; sourceTree = "<group>"; };
 		22D03E4C7937AF4310FE8262 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerVoice.swift; sourceTree = "<group>"; };
-		3A2123168E7D9AC567C0D97A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeApp.swift; sourceTree = "<group>"; };
+		358E31277B01F5102D481811 /* LinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTests.swift; sourceTree = "<group>"; };
+		55DA0922DA29476C0F54D6CE /* LinkProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkProtocol.swift; sourceTree = "<group>"; };
+		6605EFDC5271FB10F59DBFE4 /* ServerLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerLink.swift; sourceTree = "<group>"; };
 		6ED117763B964885A22E2551 /* AudioRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRoute.swift; sourceTree = "<group>"; };
-		83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeWord.swift; sourceTree = "<group>"; };
+		6F17FB3798408A803A799178 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		72F4967BB97526E80AE314EE /* DoorLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoorLink.swift; sourceTree = "<group>"; };
 		8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlasscodeGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeRelayProxy.swift; sourceTree = "<group>"; };
+		8EB8114759B3FAA9F6D004D4 /* LensCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensCards.swift; sourceTree = "<group>"; };
+		A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerLink.swift; sourceTree = "<group>"; };
 		A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
-		B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeControl.swift; sourceTree = "<group>"; };
-		C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeLink.swift; sourceTree = "<group>"; };
+		B1D3A4BF8DB346A7E50431CC /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
+		B36C472175DFBAC9A4C89148 /* LineConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineConnection.swift; sourceTree = "<group>"; };
+		BCD9442087CCEA0C71750141 /* TurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnTests.swift; sourceTree = "<group>"; };
 		C8E297534B0D5F4CD6197260 /* StayOnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StayOnTests.swift; sourceTree = "<group>"; };
 		CA7030BE5C5E270404A9245D /* GlassesSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesSession.swift; sourceTree = "<group>"; };
-		D0FD4F12040A779AA31D7C0C /* GlasscodeScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeScreens.swift; sourceTree = "<group>"; };
-		D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeFlow.swift; sourceTree = "<group>"; };
+		D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
+		D5EC28D51A2ACC2F8932B17A /* Speech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Speech.swift; sourceTree = "<group>"; };
 		E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GlasscodeGlasses.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		E869921307514FB8F0B02BF5 /* GlassesHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesHUD.swift; sourceTree = "<group>"; };
-		F46EEC8D0242265D9430D582 /* GlasscodeGlassesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeGlassesApp.swift; sourceTree = "<group>"; };
-		F4861DEF42E1D16AD926FDBA /* GlasscodeConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeConfig.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -72,9 +80,9 @@
 				4806BE4B89EBDD964E34C16B /* MWDATCore in Frameworks */,
 				BCE0BC027ABD6C313E70DAAA /* MWDATDisplay in Frameworks */,
 				B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */,
-				ABDB11272AC8319D9E5D0E72 /* MWDATSpeech in Frameworks */,
-				3F3972850CE5CEBC5C3C349C /* ElevenLabs in Frameworks */,
-				A6F3C44B884741DD0B4DB3BE /* LiveKit in Frameworks */,
+				ABDB11272AC8319D9E5D0E72 /* NIOCore in Frameworks */,
+				3F3972850CE5CEBC5C3C349C /* NIOPosix in Frameworks */,
+				A6F3C44B884741DD0B4DB3BE /* NIOSSH in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -89,35 +97,71 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3DADB2F517A4125069560C4D /* App */ = {
+			isa = PBXGroup;
+			children = (
+				6F17FB3798408A803A799178 /* AppModel.swift */,
+				31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
 		4A789C2CC86602BA073AB1D8 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
 				6ED117763B964885A22E2551 /* AudioRoute.swift */,
 				A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */,
-				3A2123168E7D9AC567C0D97A /* ContentView.swift */,
-				F4861DEF42E1D16AD926FDBA /* GlasscodeConfig.swift */,
-				B00E18E1ED1CDD2CBB695659 /* GlasscodeControl.swift */,
-				D8257651091F375BEEC90E0E /* GlasscodeFlow.swift */,
-				F46EEC8D0242265D9430D582 /* GlasscodeGlassesApp.swift */,
-				C106EB3CE292FD22B83DB320 /* GlasscodeLink.swift */,
-				9EF14DE68043F435FB8047D4 /* GlasscodeRelayProxy.swift */,
-				D0FD4F12040A779AA31D7C0C /* GlasscodeScreens.swift */,
-				0FD12BE4E39408877D66C202 /* GlasscodeVoice.swift */,
-				E869921307514FB8F0B02BF5 /* GlassesHUD.swift */,
 				CA7030BE5C5E270404A9245D /* GlassesSession.swift */,
 				22D03E4C7937AF4310FE8262 /* Info.plist */,
-				36A8C81BDD37F12D3BF1104B /* ManagerVoice.swift */,
-				83F3CC84BDFFFDA4B912EC98 /* WakeWord.swift */,
+				3DADB2F517A4125069560C4D /* App */,
+				7D6F3967189D2155309B5FFC /* Lens */,
+				CF47442326226EF6C6BED28E /* Link */,
+				E04E3A7150728DAB3743E24A /* Phone */,
+				7FAD7EE0520E355CBF18A6B5 /* Speech */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		7D6F3967189D2155309B5FFC /* Lens */ = {
+			isa = PBXGroup;
+			children = (
+				8EB8114759B3FAA9F6D004D4 /* LensCards.swift */,
+				07F2911FF0E89522440DF1F8 /* LensModel.swift */,
+			);
+			path = Lens;
+			sourceTree = "<group>";
+		};
+		7FAD7EE0520E355CBF18A6B5 /* Speech */ = {
+			isa = PBXGroup;
+			children = (
+				D5EC28D51A2ACC2F8932B17A /* Speech.swift */,
+			);
+			path = Speech;
 			sourceTree = "<group>";
 		};
 		CD943259188683F8ED929F1F /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				1EEE44F05E8E4EBDF27807DD /* LensTests.swift */,
+				358E31277B01F5102D481811 /* LinkTests.swift */,
 				C8E297534B0D5F4CD6197260 /* StayOnTests.swift */,
+				BCD9442087CCEA0C71750141 /* TurnTests.swift */,
 			);
 			path = Tests;
+			sourceTree = "<group>";
+		};
+		CF47442326226EF6C6BED28E /* Link */ = {
+			isa = PBXGroup;
+			children = (
+				09131CC2C61A8886BA6D12CD /* DeviceKey.swift */,
+				72F4967BB97526E80AE314EE /* DoorLink.swift */,
+				B36C472175DFBAC9A4C89148 /* LineConnection.swift */,
+				55DA0922DA29476C0F54D6CE /* LinkProtocol.swift */,
+				A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */,
+				B1D3A4BF8DB346A7E50431CC /* Pairing.swift */,
+				6605EFDC5271FB10F59DBFE4 /* ServerLink.swift */,
+			);
+			path = Link;
 			sourceTree = "<group>";
 		};
 		D268CB8CC8B6FACA342F73D7 = {
@@ -136,6 +180,14 @@
 				8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		E04E3A7150728DAB3743E24A /* Phone */ = {
+			isa = PBXGroup;
+			children = (
+				D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */,
+			);
+			path = Phone;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -157,9 +209,9 @@
 				686F4461A06684C7053DEB12 /* MWDATCore */,
 				2DB5A82AC5377366F47AF18C /* MWDATDisplay */,
 				F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */,
-				D170C5E07BB130819D84121E /* MWDATSpeech */,
-				100276C9CE1C55EEA0B6475E /* ElevenLabs */,
-				250A4FCD72AE8130CCE7CF68 /* LiveKit */,
+				981EC6FB3EFCDEF4EFACD079 /* NIOCore */,
+				60246DC929B3A5EB019BAE01 /* NIOPosix */,
+				A0212625ACFF868D3C7AAE92 /* NIOSSH */,
 			);
 			productName = GlasscodeGlasses;
 			productReference = E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */;
@@ -211,8 +263,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
-				BA1A4BBAE187CE8ABB731472 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */,
-				748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
+				D0BC3F45CBC0AEF2199CE370 /* XCRemoteSwiftPackageReference "swift-nio" */,
+				33AC06866F6F85BB643775FD /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D2D3F30719D82ABC8FEC201E /* Products */;
@@ -230,7 +282,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				13A8ABF049F7125F8ABB5B4B /* LensTests.swift in Sources */,
+				806BEA62EE058DB951E4AEC0 /* LinkTests.swift in Sources */,
 				871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */,
+				62741EB71EB710741E464A97 /* TurnTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -238,21 +293,22 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7E4D2B0D0D3577ABFD66A038 /* AppModel.swift in Sources */,
 				987E11777E792E9B7ACFBB7C /* AudioRoute.swift in Sources */,
 				670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */,
-				B4D3A1B044A1CC6AF21BF1D4 /* ContentView.swift in Sources */,
-				5E183B8C6EC45112F19943A6 /* GlasscodeConfig.swift in Sources */,
-				1E5CE3E0B16D8C0BD47E2F37 /* GlasscodeControl.swift in Sources */,
-				DE5A2E6E51356E048257C230 /* GlasscodeFlow.swift in Sources */,
-				2F2A78C25D3B67BD31533A0B /* GlasscodeGlassesApp.swift in Sources */,
-				0467623F5FAD1D8ED2253A72 /* GlasscodeLink.swift in Sources */,
-				7FDC93E1C5F2892642339BC1 /* GlasscodeRelayProxy.swift in Sources */,
-				43ED8891FB9E09C5C35E4F87 /* GlasscodeScreens.swift in Sources */,
-				E522F2A25B562EF48F0A99D1 /* GlasscodeVoice.swift in Sources */,
-				5F0B459097A0D5AC0D8A6427 /* GlassesHUD.swift in Sources */,
+				D1E76A34140A87E6131FEEF2 /* DeviceKey.swift in Sources */,
+				86F79AD2A35D6F0A85248B7F /* DoorLink.swift in Sources */,
+				65543B1CA24697B1BEED009B /* GlasscodeApp.swift in Sources */,
 				0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */,
-				1D7E7F4361B9D42754E81630 /* ManagerVoice.swift in Sources */,
-				9D8F06FFE7A3853F4A260BAE /* WakeWord.swift in Sources */,
+				8690C5EEE3FC6CC9AE9E1185 /* LensCards.swift in Sources */,
+				237CDF6CAC1DBB0CDFAEF9BB /* LensModel.swift in Sources */,
+				0C154818CDF8000E483AEEEB /* LineConnection.swift in Sources */,
+				17FDF0FAB703266ECCD95B52 /* LinkProtocol.swift in Sources */,
+				8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */,
+				0A03A98B7E211163DAA55251 /* Pairing.swift in Sources */,
+				E0660AAE4BCA62FED8255F89 /* PhoneViews.swift in Sources */,
+				71400D9DCCC379C128B7F753 /* ServerLink.swift in Sources */,
+				29D8E159CD71C3E3E595B888 /* Speech.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -499,12 +555,12 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+		33AC06866F6F85BB643775FD /* XCRemoteSwiftPackageReference "swift-nio-ssh" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			repositoryURL = "https://github.com/apple/swift-nio-ssh.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.19.0;
+				minimumVersion = 0.8.0;
 			};
 		};
 		9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
@@ -515,31 +571,26 @@
 				version = 1.0.1;
 			};
 		};
-		BA1A4BBAE187CE8ABB731472 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */ = {
+		D0BC3F45CBC0AEF2199CE370 /* XCRemoteSwiftPackageReference "swift-nio" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/elevenlabs/elevenlabs-swift-sdk";
+			repositoryURL = "https://github.com/apple/swift-nio.git";
 			requirement = {
-				branch = main;
-				kind = branch;
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.65.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		100276C9CE1C55EEA0B6475E /* ElevenLabs */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = BA1A4BBAE187CE8ABB731472 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */;
-			productName = ElevenLabs;
-		};
-		250A4FCD72AE8130CCE7CF68 /* LiveKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
-			productName = LiveKit;
-		};
 		2DB5A82AC5377366F47AF18C /* MWDATDisplay */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATDisplay;
+		};
+		60246DC929B3A5EB019BAE01 /* NIOPosix */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D0BC3F45CBC0AEF2199CE370 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOPosix;
 		};
 		686F4461A06684C7053DEB12 /* MWDATCore */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -551,10 +602,15 @@
 			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATMockDevice;
 		};
-		D170C5E07BB130819D84121E /* MWDATSpeech */ = {
+		981EC6FB3EFCDEF4EFACD079 /* NIOCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
-			productName = MWDATSpeech;
+			package = D0BC3F45CBC0AEF2199CE370 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOCore;
+		};
+		A0212625ACFF868D3C7AAE92 /* NIOSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 33AC06866F6F85BB643775FD /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;
+			productName = NIOSSH;
 		};
 		F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */ = {
 			isa = XCSwiftPackageProductDependency;

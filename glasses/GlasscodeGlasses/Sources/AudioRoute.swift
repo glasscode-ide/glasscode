@@ -1,5 +1,4 @@
 import AVFoundation
-import LiveKit
 
 /// Where voice goes in and out, decided in one place for everything that opens the microphone.
 ///
@@ -16,24 +15,19 @@ enum AudioRoute {
 
     private static var routeWatch: NSObjectProtocol?
 
-    /// A two-way talk: we listen and we speak (the manager's voice room).
+    /// A two-way talk: the phone listens and the manager speaks (G13).
     static func configureForTalk() {
         BackgroundKeepAlive.shared.yield()
         let session = AVAudioSession.sharedInstance()
         if micOnGlasses {
-            // The glasses are both microphone and speaker. LiveKit sets the call up itself.
-            AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = true
-            try? AudioManager.shared.setPlatformVoiceProcessingAllowed(true)
+            // The glasses are both microphone and speaker: a hands-free call.
             try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
             try? session.setActive(true, options: [])
             return
         }
-        // The phone's microphone, the glasses' speakers. Two things would bring the hands-free
-        // link back by themselves, so both are switched off: LiveKit's own setup (it allows
-        // hands-free) and Apple's voice processing (iOS turns the session into a call for it).
-        // Echo is then removed in software.
-        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = false
-        try? AudioManager.shared.setPlatformVoiceProcessingAllowed(false)
+        // The phone's microphone, the glasses' speakers (A2DP): no hands-free call, which would
+        // end the lens's session. No voice processing either: iOS turns the session into a call
+        // for it.
         try? session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP, .defaultToSpeaker])
         try? session.setActive(true, options: [])
         keepPhoneMic()

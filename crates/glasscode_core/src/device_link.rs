@@ -448,3 +448,23 @@ mod tests {
         assert_eq!(link, "glasscode://pair?v=2&t=abc&a=100.70.0.2:51000&n=Sam-s-Mac");
     }
 }
+
+#[cfg(test)]
+mod vector {
+    /// The vector the iPhone app's tests check too (`glasses/GlasscodeGlasses/Tests/LinkTests.swift`):
+    /// the same key gives the same OpenSSH form and device id on both sides, and the door's
+    /// signature (deterministic, RFC 6979) verifies there.
+    pub const PUBLIC: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBB4YUy/UdUwC8wQdnHXOszuD/9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt/khuztdcepDGoYiBwKM=";
+    pub const SIG: &str = "uLEuVNHNnU5Fn+OE2bwJMZDxu4ZsTBMuDHTcOUdILpvCPlNKZ3U3ZyIZ8SzgZm2Oy7uRmG4bqKRCBezAFNiBzg==";
+    pub const DEVICE: &str = "901581028177fd03";
+
+    #[test]
+    fn the_vector_holds() {
+        let key = super::DoorKey::from_hex(&"07".repeat(32)).unwrap();
+        assert_eq!(key.public_openssh(), PUBLIC);
+        assert_eq!(crate::gate::device_id(PUBLIC), DEVICE);
+        let message = super::door_message(PUBLIC, "launch-1", "00112233445566778899aabbccddeeff");
+        assert_eq!(key.sign(&message), SIG);
+        assert!(crate::remote::verify_phone_signature(PUBLIC, message.as_bytes(), SIG));
+    }
+}
