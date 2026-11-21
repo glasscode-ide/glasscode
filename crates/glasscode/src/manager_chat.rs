@@ -60,6 +60,9 @@ pub struct ChatUi {
     pub failure: Option<chat::Failure>,
     /// Whose failure that is: the manager's own agent, or the other one asked instead.
     failure_agent: Option<AgentKind>,
+    /// The Codex brain's tool check found tools Glasscode cannot switch off, in this run: Settings
+    /// › Manager says Codex cannot be the brain (`runtime::codex::BRAIN_BLOCKED`).
+    pub codex_tools_refused: bool,
     /// The questions held until the limit resets (`manager/held.json`), read once.
     held: Option<chat::HeldFile>,
     /// The other agent's chat thread, started when the person first asks it instead (ux-15).
@@ -621,6 +624,9 @@ impl Workspace {
             Ok(_) => chat::failure_of(health.as_ref(), None),
             Err((_, failure)) => Some(failure.clone()),
         };
+        if turn.agent == AgentKind::Codex && matches!(health, Some(glasscode_core::runtime::BrainHealth::ToolListWrong { ref extra, .. }) if !extra.is_empty()) {
+            self.mchat.codex_tools_refused = true;
+        }
         if turn.agent == self.state.manager.brain || failure.is_some() {
             self.mchat.failure = failure;
             self.mchat.failure_agent = Some(turn.agent);
