@@ -80,7 +80,6 @@ struct DeviceAsk {
     device: String,
     request: u64,
     client_id: String,
-    at_ms: u64,
     /// How much of the answer was sent, and the last activity line.
     sent: usize,
     activity: Option<String>,
@@ -125,14 +124,6 @@ pub struct DoorUi {
 }
 
 impl DoorUi {
-    /// The devices connected now, with their names (the title bar's icon and its panel).
-    pub fn connected(&self) -> Vec<(&str, &str)> {
-        let mut out: Vec<(&str, &str)> = self.conns.values().map(|c| (c.device.as_str(), c.name.as_str())).collect();
-        out.sort();
-        out.dedup();
-        out
-    }
-
     /// A device used the door within [`PRESENT_FOR`].
     pub fn used_recently(&self) -> bool {
         self.used.is_some_and(|at| at.elapsed() < PRESENT_FOR)
@@ -784,7 +775,7 @@ impl Workspace {
         // ask to see it there.
         let window_moves = self.window_active || glasscode_core::runtime::chat::asks_for_the_mac(&text);
         let now = glasscode_core::clock::now_ms();
-        self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), at_ms: now, sent: 0, activity: None, window_moves });
+        self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), sent: 0, activity: None, window_moves });
         self.door.last_ask = Some((device.clone(), conn, now));
         self.mchat.device_focus = Some(glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves));
         let words = glasscode_core::words::record(glasscode_core::words::Origin::Device(device), &text, focus.session.as_deref(), None);
@@ -814,6 +805,7 @@ impl Workspace {
     /// The person's paired devices and which are connected (`device.list`).
     pub fn door_devices(&self) -> Value {
         let connected: BTreeSet<&str> = self.door.conns.values().map(|c| c.device.as_str()).collect();
+        let connections: Vec<Value> = self.door.conns.values().map(|c| json!({ "device": c.device, "name": c.name, "app": c.app, "from": c.peer.ip().to_string(), "for_secs": c.since.elapsed().as_secs() })).collect();
         let devices: Vec<Value> = self
             .control
             .authority
@@ -830,7 +822,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "devices": devices, "listening": self.door.listening.iter().map(|a| a.to_string()).collect::<Vec<_>>() })
+        json!({ "devices": devices, "connections": connections, "listening": self.door.listening.iter().map(|a| a.to_string()).collect::<Vec<_>>() })
     }
 
     /// `device.open`: put a place on the lens of the device that asked the chat's question of the
@@ -863,6 +855,74 @@ impl Workspace {
         };
         self.door_send(conn, device_link::event_line(events::OPEN, data));
         Ok(format!("Shown on the glasses: {said}."))
+    }
+}
+
+/// What the title bar's glasses icon shows (G10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlassesLook {
+    /// No phone is paired: no icon.
+    Hidden,
+    /// Paired, not connected.
+    Grey,
+    /// Connected, and the glasses are on.
+    Green,
+    /// The person is talking from the glasses: listening, thinking or speaking.
+    Talking,
+    /// Connected, but the lens is off or the glasses are not there, or the door cannot open.
+    Amber,
+}
+
+/// The icon's look from what is known: paired devices, connections and what they said.
+pub fn glasses_look(paired: usize, connected: usize, presence: &[&Presence], asking: bool, door_error: bool) -> GlassesLook {
+    if paired == 0 {
+        return GlassesLook::Hidden;
+    }
+    if connected == 0 {
+        return if door_error { GlassesLook::Amber } else { GlassesLook::Grey };
+    }
+    if asking || presence.iter().any(|p| matches!(p.voice.as_str(), "listening" | "thinking" | "speaking")) {
+        return GlassesLook::Talking;
+    }
+    if presence.iter().any(|p| p.glasses && p.lens) {
+        GlassesLook::Green
+    } else {
+        GlassesLook::Amber
+    }
+}
+
+impl Workspace {
+    /// The title bar's glasses icon: none with no phone paired; a click opens Settings › Glasses.
+    pub fn render_glasses_icon(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use gpui::{ClickEvent, div, prelude::*};
+        let presence: Vec<&Presence> = self.door.presence.values().collect();
+        let look = glasses_look(self.control.authority.devices.len(), self.door.conns.len(), &presence, self.door.ask.is_some(), self.door.error.is_some());
+        let (dot, color) = match look {
+            GlassesLook::Hidden => return None,
+            GlassesLook::Grey => (None, crate::theme::faint()),
+            GlassesLook::Green => (Some(crate::theme::added()), crate::theme::text_soft()),
+            GlassesLook::Talking => (Some(crate::theme::added()), crate::theme::text_strong()),
+            GlassesLook::Amber => (Some(crate::theme::attention()), crate::theme::text_soft()),
+        };
+        let size = crate::theme::sz(if look == GlassesLook::Talking { 9. } else { 7. });
+        Some(
+            div()
+                .id("title-glasses")
+                .relative()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(crate::theme::sz(30.))
+                .rounded(crate::theme::sz(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover()))
+                .when(look == GlassesLook::Talking, |d| d.bg(crate::theme::selected()))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(crate::settings_ui::Section::Server, window, cx)))
+                .child(crate::icons::icon(crate::icons::GLASSES, crate::theme::sz(20.), crate::theme::sz(20.), color))
+                .when_some(dot, |d, dot| d.child(div().absolute().top(crate::theme::sz(4.)).right(crate::theme::sz(3.)).size(size).rounded_full().border_1().border_color(crate::theme::chrome()).bg(dot)))
+                .into_any_element(),
+        )
     }
 }
 
@@ -963,6 +1023,22 @@ mod tests {
         assert_eq!(n, 0, "closed without a hello: {line}");
         assert!(rx.try_recv().is_err());
         stop.store(true, Ordering::Relaxed);
+    }
+
+    /// G10: the icon is hidden with nothing paired, grey when not connected, green with the
+    /// glasses on, and says when the person talks from them.
+    #[test]
+    fn indicator_states_from_presence() {
+        let on = Presence { glasses: true, worn: true, lens: true, voice: "idle".into(), ..Default::default() };
+        let talking = Presence { voice: "listening".into(), ..on.clone() };
+        let off = Presence { glasses: false, ..Default::default() };
+        assert_eq!(glasses_look(0, 0, &[], false, false), GlassesLook::Hidden);
+        assert_eq!(glasses_look(1, 0, &[], false, false), GlassesLook::Grey);
+        assert_eq!(glasses_look(1, 0, &[], false, true), GlassesLook::Amber);
+        assert_eq!(glasses_look(1, 1, &[&on], false, false), GlassesLook::Green);
+        assert_eq!(glasses_look(1, 1, &[&talking], false, false), GlassesLook::Talking);
+        assert_eq!(glasses_look(1, 1, &[&on], true, false), GlassesLook::Talking);
+        assert_eq!(glasses_look(1, 1, &[&off], false, false), GlassesLook::Amber);
     }
 
     #[test]

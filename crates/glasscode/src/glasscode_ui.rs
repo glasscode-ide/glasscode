@@ -1,44 +1,19 @@
-//! Glasscode, the voice copilot (macOS): its state, mirrored from the voice control server, the
-//! headless voice helper, and the Glasscode tab of the right panel, which mirrors the glasses'
-//! lens. The voice screen (`voice_view.rs`) starts and ends a live session.
+//! Glasscode, the voice copilot (macOS): its state, mirrored from the voice control server, and
+//! the headless voice helper. The voice screen (`voice_view.rs`) starts and ends a live session.
+//! The right panel's Glasscode tab, which mirrored the old glasses app's lens, went with the
+//! glasses plan (G10): the manager is what the glasses talk to now, and the title bar's glasses
+//! icon says whether they are connected.
 //!
 //! The voice brain (ElevenLabs) attaches to [`GlasscodeState::live`] — see the `voice/`
 //! crate-adjacent app.
 
 use std::path::PathBuf;
 use std::process::Child;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, div, prelude::*, rgb};
+use gpui::{AppContext as _, Context};
 
-use crate::theme;
-use crate::ui;
-use crate::workspace::{RightTab, Workspace};
-
-/// One row of the glasses browse list, mirrored into the IDE panel.
-#[derive(Clone, PartialEq)]
-pub struct GlassesRow {
-    pub title: String,
-    pub subtitle: String,
-    pub selected: bool,
-}
-
-/// A snapshot of what's on the Ray-Ban Display lens, posted by the glasses app to
-/// `/api/voice/state` under `view`. The IDE renders this as a live replica so the desk
-/// view matches the glasses in real time — and so it reads well in a presentation.
-#[derive(Clone, PartialEq)]
-pub struct GlassesView {
-    pub screen: String, // projects | sessionList | actions | voice | talk | loading | error
-    pub crumb: String,
-    pub rows: Vec<GlassesRow>,
-    pub banner: String,
-    pub detail: String,
-    pub listening: bool,
-    pub billing: bool,
-    pub cost: String,
-    pub lens_on: bool,
-    pub connected: bool,
-}
+use crate::workspace::Workspace;
 
 /// Glasscode's own state, mirrored from the voice control server (`/api/voice/state`):
 /// whether a live session is open, what she's doing, and the last thing she said.
@@ -47,26 +22,9 @@ pub struct GlasscodeState {
     pub mode: String, // "idle" | "connecting" | "listening" | "speaking"
     pub caption: Option<String>,
     pub last_poll: Instant,
-    /// The session id Glasscode is pointing at ("this is the one you mean") — highlighted and
-    /// floated to the top of her list, without opening it.
-    pub suggested: Option<String>,
     /// The headless voice helper process, alive only while Glasscode is live. Glasscode spawns it
     /// when she goes live and kills it when she goes idle — no browser, ever.
     pub helper: Option<Child>,
-    /// Live replica of the glasses lens — the last view the phone posted. The Glasscode tab IS
-    /// this mirror now; it holds the last-known view even when the phone pauses posting, and
-    /// `glasses_fresh` says whether that view is live or stale.
-    pub glasses: Option<GlassesView>,
-    /// Whether the mirrored view is live (posted within the freshness window). When false the
-    /// last view stays on screen, dimmed, instead of vanishing.
-    pub glasses_fresh: bool,
-    /// The session the glasses are currently in, to detect when it changes.
-    pub glasses_current: Option<String>,
-    /// A session the glasses navigated to, to be opened in the IDE on the next render (which
-    /// has the `Window` that `select_session` needs; the poll tick does not).
-    pub pending_open: Option<String>,
-    /// Whether the last control-plane poll succeeded — drives the Glasscode tab's status line.
-    pub control_ok: bool,
     /// The voice screen over Today (`voice_view.rs`), which shows the state above.
     pub screen: crate::voice_view::Screen,
 }
@@ -78,13 +36,7 @@ impl GlasscodeState {
             mode: "idle".into(),
             caption: None,
             last_poll: Instant::now() - Duration::from_secs(2),
-            suggested: None,
             helper: None,
-            glasses: None,
-            glasses_fresh: false,
-            glasses_current: None,
-            pending_open: None,
-            control_ok: true,
             screen: Default::default(),
         }
     }
@@ -123,53 +75,6 @@ fn helper_path() -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn hex(v: u32) -> Hsla {
-    rgb(v).into()
-}
-fn faded(c: Hsla, a: f32) -> Hsla {
-    Hsla { a, ..c }
-}
-/// The warm glow gold.
-fn gold() -> Hsla {
-    hex(0xf3d98a)
-}
-
-/// Parse the `view` object the glasses post to `/api/voice/state` into a [`GlassesView`].
-/// Returns `None` when no view is present (the glasses aren't driving).
-fn parse_glasses(v: &serde_json::Value) -> Option<GlassesView> {
-    let g = v.get("view")?;
-    if g.is_null() {
-        return None;
-    }
-    let s = |k: &str| g.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let b = |k: &str| g.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
-    let rows = g
-        .get("rows")
-        .and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|r| GlassesRow {
-                    title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    subtitle: r.get("subtitle").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    selected: r.get("selected").and_then(|x| x.as_bool()).unwrap_or(false),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(GlassesView {
-        screen: s("screen"),
-        crumb: s("crumb"),
-        rows,
-        banner: s("banner"),
-        detail: s("detail"),
-        listening: b("listening"),
-        billing: b("billing"),
-        cost: s("cost"),
-        lens_on: g.get("lensOn").and_then(|x| x.as_bool()).unwrap_or(true),
-        connected: b("connected"),
-    })
 }
 
 impl Workspace {
@@ -267,15 +172,11 @@ impl Workspace {
             if !helper_alive {
                 self.glasscode.mode = "idle".into();
                 self.glasscode.caption = None;
-                self.glasscode.suggested = None;
             }
             cx.notify();
         }
 
-        if self.right_tab != RightTab::Glasscode && !self.glasscode.live {
-            return;
-        }
-        if self.glasscode.last_poll.elapsed() < Duration::from_millis(200) {
+        if !self.glasscode.live || self.glasscode.last_poll.elapsed() < Duration::from_millis(200) {
             return;
         }
         self.glasscode.last_poll = Instant::now();
@@ -284,339 +185,19 @@ impl Workspace {
             let v: serde_json::Value = serde_json::from_str(&body).ok()?;
             let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("idle").to_string();
             let caption = v.get("caption").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let suggest = v.get("suggest").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let current = v.get("current").and_then(|x| x.as_str()).map(|s| s.to_string());
-            let view = parse_glasses(&v);
-            // The server stamps `view.ts` (same clock as the IDE — both on this Mac), so a
-            // stale snapshot left behind after the glasses go away can be aged out.
-            let view_ts = v.get("view").and_then(|g| g.get("ts")).and_then(|x| x.as_u64()).unwrap_or(0);
-            Some((mode, caption, suggest, current, view, view_ts))
+            Some((mode, caption))
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let Some((mode, caption)) = task.await else { return };
             let _ = this.update(cx, |this, cx| {
-                let mut changed = false;
-
-                // Control-plane reachability (for the Glasscode tab's status line + refresh).
-                let ok = result.is_some();
-                if this.glasscode.control_ok != ok {
-                    this.glasscode.control_ok = ok;
-                    changed = true;
-                }
-
-                if let Some((mode, caption, suggest, current, view, view_ts)) = result {
-                    // Mirror whatever the phone last posted. We keep the last-known view on
-                    // screen even after posting pauses (phone backgrounded, lens off) — it just
-                    // dims — instead of yanking it back to a talk panel. `connected` only tells
-                    // us whether the glasses hardware is live; it does NOT gate the mirror.
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                    let is_fresh = view.is_some() && now.saturating_sub(view_ts) < 12000;
-                    if let Some(v) = view {
-                        if this.glasscode.glasses.as_ref() != Some(&v) {
-                            this.glasscode.glasses = Some(v);
-                            changed = true;
-                        }
-                    }
-                    if this.glasscode.glasses_fresh != is_fresh {
-                        this.glasscode.glasses_fresh = is_fresh;
-                        changed = true;
-                    }
-                    // Auto-open the glasses' session in the IDE only while the glasses are truly
-                    // driving: a fresh view from connected hardware.
-                    let driving = is_fresh && this.glasscode.glasses.as_ref().map(|g| g.connected).unwrap_or(false);
-
-                    // When the glasses open a session, open it here too — desk mode: the lens
-                    // is off and you're looking at the IDE. Only while the glasses are driving.
-                    if driving {
-                        if current != this.glasscode.glasses_current {
-                            this.glasscode.glasses_current = current.clone();
-                            if let Some(id) = current {
-                                if this.state.active_session.as_deref() != Some(id.as_str()) {
-                                    this.glasscode.pending_open = Some(id);
-                                    changed = true;
-                                }
-                            }
-                        }
-                    } else {
-                        this.glasscode.glasses_current = current;
-                    }
-
-                    // Only trust the reported mode/caption while the helper is actually live.
-                    if this.glasscode.live {
-                        let sug = if suggest.is_empty() { None } else { Some(suggest) };
-                        if this.glasscode.mode != mode
-                            || this.glasscode.caption.as_deref().unwrap_or("") != caption
-                            || this.glasscode.suggested != sug
-                        {
-                            changed = true;
-                        }
-                        this.glasscode.mode = mode;
-                        this.glasscode.caption = if caption.is_empty() { None } else { Some(caption) };
-                        this.glasscode.suggested = sug;
-                    }
-                }
-
-                if changed {
+                // Only trust the reported mode and caption while the helper is actually live.
+                if this.glasscode.live && (this.glasscode.mode != mode || this.glasscode.caption.as_deref().unwrap_or("") != caption) {
+                    this.glasscode.mode = mode;
+                    this.glasscode.caption = if caption.is_empty() { None } else { Some(caption) };
                     cx.notify();
                 }
             });
         })
         .detach();
-    }
-
-    /// The Glasscode tab of the right panel: the control plane's state and the glasses mirror.
-    pub fn glasscode_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let status = self.glasscode_status_bar(cx);
-        // The Glasscode tab IS the glasses mirror — nothing else. Show the last-known view (dimmed
-        // when stale); only before the phone has ever posted do we show a short waiting note.
-        let content = match self.glasscode.glasses.clone() {
-            Some(g) => self.glasses_mirror(&g),
-            None => self.glasses_waiting(),
-        };
-        div().flex().flex_col().flex_1().min_h_0().child(status).child(content).into_any_element()
-    }
-
-    /// Shown in the Glasscode tab before the phone has posted any view at all.
-    fn glasses_waiting(&self) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_4()
-            .child(div().text_size(theme::sz(15.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
-            .child(
-                div()
-                    .text_size(theme::sz(12.5))
-                    .text_color(theme::muted())
-                    .text_center()
-                    .child("Open Glasscode on your phone, or put on the glasses — the live mirror shows here.".to_string()),
-            )
-            .into_any_element()
-    }
-
-    /// Thin status bar for the Glasscode tab: control-plane reachability + a manual Refresh so the
-    /// tab can be re-synced without restarting the IDE.
-    fn glasscode_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let ok = self.glasscode.control_ok;
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_3()
-            .pt_2()
-            .pb_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(ui::dot(if ok { theme::added() } else { theme::attention() }))
-                    .child(
-                        div()
-                            .text_size(theme::sz(11.))
-                            .text_color(theme::muted())
-                            .child(if ok { "control plane connected".to_string() } else { "control plane unreachable".to_string() }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("glasscode-refresh")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme::hover()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.glasscode_refresh(cx)))
-                    .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child("\u{21bb}"))
-                    .child(div().text_size(theme::sz(11.)).text_color(theme::text_soft()).child("Refresh".to_string())),
-            )
-            .into_any_element()
-    }
-
-    /// Force an immediate control-plane re-poll plus a session refresh, so the tab recovers
-    /// on demand instead of needing the IDE restarted.
-    pub fn glasscode_refresh(&mut self, cx: &mut Context<Self>) {
-        self.glasscode.last_poll = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
-        self.glasscode_tick(cx);
-        self.server_tick(cx);
-        cx.notify();
-    }
-
-    /// The IDE's live replica of the glasses lens. Mirrors the browse flow (Projects ▸
-    /// Sessions ▸ Session, Voice, Talk) exactly as it appears on the Ray-Ban Display.
-    fn glasses_mirror(&self, g: &GlassesView) -> AnyElement {
-        let fresh = self.glasscode.glasses_fresh;
-        let dot_color = if !fresh {
-            theme::muted()
-        } else if g.connected {
-            theme::added()
-        } else {
-            gold()
-        };
-        let state = if !fresh {
-            "paused · last view".to_string()
-        } else if g.connected && g.lens_on {
-            "on glasses".to_string()
-        } else if g.connected {
-            "lens off · mirrored here".to_string()
-        } else {
-            "live · mirrored here".to_string()
-        };
-
-        let pill = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .child(ui::dot(dot_color))
-            .child(div().text_size(theme::sz(11.)).text_color(theme::muted()).child(state));
-
-        let cost = if g.billing {
-            div().flex_none().text_size(theme::sz(11.)).font_family(theme::MONO_FONT).text_color(theme::attention()).child(g.cost.clone())
-        } else {
-            div().flex_none().text_size(theme::sz(11.)).font_family(theme::MONO_FONT).text_color(theme::added()).child("free".to_string())
-        };
-
-        let head = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_3()
-            .pt_3()
-            .pb_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(div().flex_none().text_size(theme::sz(16.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
-                    .child(pill),
-            )
-            .child(cost);
-
-        let body: AnyElement = match g.screen.as_str() {
-            "loading" => self.mirror_message("Loading your projects…"),
-            "error" => self.mirror_message(&format!("Can't reach Glasscode — is the {} awake and signed in?", crate::platform::computer())),
-            "voice" => {
-                let title = if g.listening { "● Listening — free" } else { "Voice" }.to_string();
-                let text = if g.detail.is_empty() { "Speak — it goes to the thread.".to_string() } else { g.detail.clone() };
-                self.mirror_pane(title, text, theme::added())
-            }
-            "talk" => {
-                let text = if g.banner.is_empty() { "Ask about this session, or say \u{201C}jump to\u{2026}\u{201D}.".to_string() } else { g.banner.clone() };
-                self.mirror_pane("Live with Glasscode".to_string(), text, gold())
-            }
-            _ => {
-                let mut items: Vec<AnyElement> = Vec::new();
-                if !g.banner.is_empty() {
-                    items.push(div().px_1().pb_1().text_size(theme::sz(12.)).text_color(gold()).child(g.banner.clone()).into_any_element());
-                }
-                for r in &g.rows {
-                    items.push(self.mirror_row(r));
-                }
-                if items.is_empty() {
-                    items.push(div().px_1().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Nothing here yet.".to_string()).into_any_element());
-                }
-                div().flex().flex_col().gap_1().children(items).into_any_element()
-            }
-        };
-
-        let crumb = div()
-            .px_1()
-            .pb_2()
-            .text_size(theme::sz(10.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme::muted())
-            .child(g.crumb.to_uppercase());
-
-        let lens = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .p_3()
-            .rounded_xl()
-            .border_1()
-            .border_color(faded(gold(), if g.lens_on { 0.35 } else { 0.15 }))
-            .bg(faded(hex(0x0f0d0a), 0.6))
-            .child(crumb)
-            .child(div().id("glasses-mirror-body").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().child(body));
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(head)
-            .child(div().flex().flex_col().flex_1().min_h_0().px_2().pb_2().child(lens))
-            .into_any_element()
-    }
-
-    fn mirror_message(&self, text: &str) -> AnyElement {
-        div().px_1().py_2().text_size(theme::sz(13.)).text_color(theme::muted()).child(text.to_string()).into_any_element()
-    }
-
-    fn mirror_pane(&self, title: String, body: String, tint: Hsla) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1p5()
-            .p_3()
-            .rounded_lg()
-            .bg(faded(tint, 0.1))
-            .child(div().text_size(theme::sz(14.)).font_weight(FontWeight::SEMIBOLD).text_color(tint).child(title))
-            .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(body))
-            .into_any_element()
-    }
-
-    fn mirror_row(&self, r: &GlassesRow) -> AnyElement {
-        let dot = if r.selected { gold() } else { faded(theme::muted(), 0.7) };
-        div()
-            .flex()
-            .items_center()
-            .gap_2p5()
-            .px_3()
-            .py_2()
-            .rounded_lg()
-            .when(r.selected, |d| d.bg(faded(gold(), 0.14)).border_1().border_color(faded(gold(), 0.6)))
-            .child(div().flex_none().size(theme::sz(7.)).rounded_full().bg(dot))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(theme::sz(13.))
-                            .font_weight(if r.selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                            .text_color(if r.selected { theme::text_strong() } else { theme::text_soft() })
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(r.title.clone()),
-                    )
-                    .when(!r.subtitle.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .font_family(theme::MONO_FONT)
-                                .text_size(theme::sz(10.5))
-                                .text_color(theme::muted())
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(r.subtitle.clone()),
-                        )
-                    }),
-            )
-            .into_any_element()
     }
 }

@@ -101,8 +101,6 @@ pub enum RightTab {
     Changes,
     /// The worktree as a tree; a click opens a file in a tab of the centre.
     Files,
-    /// Glasscode, the voice copilot (macOS): the mirror of the glasses' lens.
-    Glasscode,
 }
 
 pub struct Workspace {
@@ -2114,13 +2112,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The glasses navigated to a session (desk mode) → open it here. Deferred from the
-        // poll tick, which has no Window; render does. Guarded, so it runs once per change.
-        if let Some(id) = self.glasscode.pending_open.take() {
-            if self.state.active_session.as_deref() != Some(id.as_str()) {
-                self.select_session(&id, window, cx);
-            }
-        }
         let shell = self.render_shell(window, cx);
         // "Save the changes?" (U20) over every view, as it can come from Quit or a session's ×.
         let unsaved = self.render_unsaved_question(window, cx);

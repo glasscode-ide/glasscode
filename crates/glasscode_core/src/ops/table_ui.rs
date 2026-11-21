@@ -32,7 +32,7 @@ pub(super) const OPS: &[OpSpec] = &[
         undo: Undo::Inverse("ui.open"),
         summary: "show a place in the window: a view, a section of Settings, a tab of the side panel, or a session",
         args: &[
-            ArgSpec { name: "place", kind: ArgKind::Word, required: true, help: "today, sessions, tickets, pull-requests, usage, settings, manager, settings:<section>, tab:<pr|checks|changes|files|glasscode> or a session's id", at: At::Word(0), missing: "ui open <place>", default: None },
+            ArgSpec { name: "place", kind: ArgKind::Word, required: true, help: "today, sessions, tickets, pull-requests, usage, settings, manager, settings:<section>, tab:<pr|checks|changes|files> or a session's id", at: At::Word(0), missing: "ui open <place>", default: None },
             ArgSpec { name: "go", kind: ArgKind::Switch, help: "the person's own: take the keyboard there and mark it seen", at: At::Flag(&["go"]), ..ArgSpec::OPTION },
         ],
         examples: &["ui open settings:automation [--go]"],

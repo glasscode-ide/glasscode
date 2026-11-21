@@ -62,7 +62,7 @@ impl Place {
 pub const VIEWS: [View; 8] = [View::Today, View::Sessions, View::Board, View::PullRequests, View::Usage, View::Settings, View::FirstRun, View::Manager];
 
 /// Every tab of a session's side panel.
-pub const TABS: [RightTab; 5] = [RightTab::PullRequest, RightTab::Checks, RightTab::Changes, RightTab::Files, RightTab::Glasscode];
+pub const TABS: [RightTab; 4] = [RightTab::PullRequest, RightTab::Checks, RightTab::Changes, RightTab::Files];
 
 /// The name of a view's place; a new view does not compile until it has one. The words are the
 /// `glasscode open` ones where it has them ("tickets" is the Board).
@@ -86,7 +86,6 @@ fn tab_name(tab: RightTab) -> &'static str {
         RightTab::Checks => "checks",
         RightTab::Changes => "changes",
         RightTab::Files => "files",
-        RightTab::Glasscode => "glasscode",
     }
 }
 
@@ -325,7 +324,6 @@ pub const INVENTORY: &[Capability] = &[
     planned("Session view", "tab: files, mention a file", "files_mention", "composer.attach"),
     local("Session view", "tab: files, copy a path", "files_copy"),
     person("Session view", "tab: files, reveal in Finder", "reveal", "Only you can show a file in Finder.", Place::Tab(RightTab::Files)),
-    op("Session view", "tab: Glasscode", "glasscode_toggle", "ui.panel"),
     // ----- file tabs and the editor
     planned("File tabs", "open a file at a line", "open_file_tab", "file.open"),
     planned("Editor", "key editor::Save", "file_tab_edit", "file.save"),
@@ -528,6 +526,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "stop a check", "render_manager", "manager.check.remove"),
     op("Manager", "a token for a device's voice", "manager_voice_keys_check", "manager.voice_token"),
     op("Glasses", "the paired phones and glasses", "door_devices", "device.list"),
+    local("Title bar", "glasses icon: open Settings › Glasses", "render_glasses_icon"),
     op("Glasses", "show a place on the lens", "door_open", "device.open"),
     // ----- what the manager reads and shows (the v2 engine's ops, M33.2)
     op("Session view", "the side panel's tab", "ui_seen", "ui.state"),
@@ -670,7 +669,7 @@ mod tests {
     #[test]
     fn every_view_section_and_tab_has_a_place() {
         let places: Vec<Place> = VIEWS.into_iter().map(Place::View).chain(Section::all().into_iter().map(Place::Settings)).chain(TABS.into_iter().map(Place::Tab)).collect();
-        assert_eq!(places.len(), 8 + 13 + 5);
+        assert_eq!(places.len(), 8 + 13 + 4);
         let mut names = BTreeSet::new();
         for place in places {
             let name = place.name();

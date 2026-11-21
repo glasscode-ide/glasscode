@@ -1,5 +1,5 @@
-//! The session's side panel (right of the chat or the terminal): Files, Changes, Checks, Pull
-//! request, and Glasscode (the glasses mirror, macOS only).
+//! The session's side panel (right of the chat or the terminal): Files, Changes, Checks and Pull
+//! request.
 
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, div, prelude::*, px};
@@ -67,7 +67,6 @@ impl Workspace {
                 .into_any_element(),
             RightTab::Changes => self.manager_mark_any("changes", self.render_changes_tab(cx)),
             RightTab::Files => self.manager_mark_any("files", self.render_files_tab(cx)),
-            RightTab::Glasscode => self.glasscode_panel(cx),
         };
         let tab = |id: &'static str, label: String, shown: RightTab| {
             let selected = tab_shown == shown;
@@ -121,7 +120,7 @@ impl Workspace {
                     .child(tab("tab-changes", changes, RightTab::Changes))
                     .child(tab("tab-checks", "Checks".into(), RightTab::Checks))
                     .child(tab("tab-pr", "Pull request".into(), RightTab::PullRequest))
-                    .when(crate::glasscode_ui::VOICE, |d| d.child(tab("tab-glasscode", "Glasscode".into(), RightTab::Glasscode))),
+
             )
             .child(content)
             .into_any_element()
