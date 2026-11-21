@@ -1127,6 +1127,40 @@ impl Workspace {
 
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
+    /// Mark a session quarantined before its agent first starts (D27): it was started for a
+    /// pull request's text by an author who is not trusted, so it runs under the quarantine profile
+    /// for its whole life, whoever started it.
+    pub(crate) fn control_mark_quarantined(&mut self, id: &str, by: &str) {
+        let now = glasscode_core::clock::now_ms();
+        let origins = self.control.authority.origins.get_or_insert_with(Default::default);
+        if !origins.mark(id, gate::SessionOrigin::Quarantine, by, now) {
+            return;
+        }
+        let (id, by) = (id.to_string(), by.to_string());
+        std::thread::spawn(move || {
+            if let Err(err) = gate::mark_session(&id, gate::SessionOrigin::Quarantine, &by) {
+                log::warn!("gate: could not record {id} as quarantined: {err}");
+            }
+        });
+    }
+
+    /// The person's own GitHub logins, and the teammates they confirmed: whose text is trusted
+    /// (`gate::trusted_author`, D27).
+    pub(crate) fn control_trusted_logins(&self) -> (Vec<String>, Vec<String>) {
+        let mut me: Vec<String> = self.manager.me.iter().cloned().collect();
+        me.extend(self.github.list.iter().flatten().map(|a| a.login.clone()));
+        let confirmed = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+        (me, confirmed)
+    }
+
+    /// Quarantine `id` when it was started for a pull request by an author who is not trusted.
+    pub(crate) fn control_quarantine_for(&mut self, id: &str, author: &str, association: Option<&str>) {
+        let (me, confirmed) = self.control_trusted_logins();
+        if glasscode_core::gate::origin_for_input(gate::SessionOrigin::Person, author, association, &me, &confirmed) == gate::SessionOrigin::Quarantine {
+            self.control_mark_quarantined(id, &format!("untrusted:{author}"));
+        }
+    }
+
     pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
         if caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
             return;

@@ -375,11 +375,19 @@ impl Workspace {
         let title = spec.title.clone().or_else(|| spec.message.as_deref().map(|m| linear::short_title(m, 46)));
         let known_worktrees: Vec<Worktree> = self.worktrees.get(&project.id).cloned().unwrap_or_default();
         let file_root = root.clone();
+        let review_of = spec.review;
         let task = cx.background_spawn(async move {
             let repo = || github::repo_slug(&root).ok_or_else(|| anyhow::anyhow!("this project's origin is not on GitHub"));
             let find_pr = |n: u64| -> anyhow::Result<github::PrHit> {
                 github::search_prs(&repo()?, &n.to_string(), &env)?.into_iter().find(|h| h.number == n).ok_or_else(|| anyhow::anyhow!("GitHub has no pull request #{n} in {}", repo().unwrap_or_default()))
             };
+            // A session for a pull request reads its author's text: who that is decides whether
+            // it is quarantined (D27). Not readable: nobody's, so quarantined.
+            let input = review_of.or(pr).map(|n| match find_pr(n) {
+                Ok(hit) => (hit.author.clone(), repo().ok().and_then(|r| glasscode_core::github_api::pr_association(&r, n, &env))),
+                Err(_) => (String::new(), None),
+            });
+            let made = (|| {
             let no_review: Option<glasscode_core::model::ReviewRef> = None;
             if let Some(n) = pr {
                 let hit = find_pr(n)?;
@@ -439,11 +447,13 @@ impl Workspace {
             let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", base.base, crate::platform::this_computer()));
             let path = git::add_worktree_with(&root, &name, &wanted, &base.base, file.clone())?;
             Ok((path, wanted, note, None, None, detail, Some(file)))
+            })();
+            made.map(|made| (made, input))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |ws, window, cx| match result {
-                Ok((worktree, branch, note, review, hit, detail, file)) => {
+                Ok(((worktree, branch, note, review, hit, detail, file), input)) => {
                     if let Some(file) = file {
                         ws.project_file_read(&file_root, file, cx);
                     }
@@ -495,7 +505,11 @@ impl Workspace {
                     }
                     ws.state.sessions.push(session.clone());
                     // Who started it decides its profile from its first start (M22): before the
-                    // terminal starts, never after the reply.
+                    // terminal starts, never after the reply. A stranger's pull request is
+                    // quarantined, whoever starts it (D27).
+                    if let Some((author, association)) = &input {
+                        ws.control_quarantine_for(&id, author, association.as_deref());
+                    }
                     ws.control_mark_driven(&r.caller, std::slice::from_ref(&id));
                     glasscode_core::activity::record_session();
                     if spec.open {
