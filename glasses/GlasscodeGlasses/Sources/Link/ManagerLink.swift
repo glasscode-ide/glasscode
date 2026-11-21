@@ -122,7 +122,8 @@ final class ManagerLink: ObservableObject {
             do {
                 let link = try await DoorLink.connect(paired.mac, key: key, phoneName: phoneName)
                 link.onEvent = { [weak self] name, data in Task { @MainActor in self?.event(name, data) } }
-                link.onClose = { [weak self] in Task { @MainActor in self?.macClosed() } }
+                // Only the link in use counts: a link given up on may close later, after a new one.
+                link.onClose = { [weak self, weak link] in Task { @MainActor in if let self, let link, self.mac === link { self.macClosed() } } }
                 mac = link
                 macLaunch = link.launch
                 macConnected = true
@@ -132,16 +133,16 @@ final class ManagerLink: ObservableObject {
             }
         } else {
             // Still there? (A connection the Mac closed while asleep is found here.)
-            if (try? await mac?.call("hello", [:], timeout: 8)) == nil { macClosed() }
+            if (try? await mac?.call("hello", [:], timeout: 8)) == nil { mac?.close(); macClosed() }
         }
         if server == nil, let pinned = paired.server {
             if let link = try? await ServerLink.connect(pinned, key: key) {
-                link.onClose = { [weak self] in Task { @MainActor in self?.serverClosed() } }
+                link.onClose = { [weak self, weak link] in Task { @MainActor in if let self, let link, self.server === link { self.serverClosed() } } }
                 server = link
                 serverConnected = true
             }
         } else if server != nil {
-            if (try? await server?.call("hello", [:], timeout: 10)) == nil { serverClosed() }
+            if (try? await server?.call("hello", [:], timeout: 10)) == nil { server?.close(); serverClosed() }
         }
         if macConnected || serverConnected {
             status = .connected
