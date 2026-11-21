@@ -437,6 +437,69 @@ pub(crate) fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<
     thumb.dilate(theme::sz(THUMB_GAP)).contains(&position).then(|| position.y - thumb.top())
 }
 
+/// The sideways thumb's place along the foot of `area`, for text that is wider than the area;
+/// None when the text fits.
+pub(crate) fn thumb_place_across(area: Bounds<Pixels>, max_scroll: f32, scrolled: f32) -> Option<Bounds<Pixels>> {
+    let (left, length) = thumb(f32::from(area.size.width), max_scroll, scrolled)?;
+    Some(Bounds::new(point(area.left() + px(left), area.bottom() - theme::sz(THUMB_WIDTH + THUMB_GAP)), size(px(length), theme::sz(THUMB_WIDTH))))
+}
+
+/// As [`grab_at`], for the sideways thumb: where in it, from its left, a press takes it.
+pub(crate) fn grab_across(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
+    thumb.dilate(theme::sz(THUMB_GAP)).contains(&position).then(|| position.x - thumb.left())
+}
+
+/// A sideways thumb for a list whose lines do not wrap (a file's lines): it shows for as long as
+/// a line is wider than the list, so that it is plain there is more text, and it can be dragged.
+/// The wheel has no sideways turn on most mice (Shift with the wheel does it). Put it after the
+/// list, in a `relative()` parent: it takes a press on the thumb before the lines do. `grab`
+/// keeps a drag from frame to frame.
+pub fn across_bar(handle: ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<Pixels>>>) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let area = handle.bounds();
+            let max = f32::from(handle.max_offset().x);
+            let Some(thumb) = thumb_place_across(area, max, -f32::from(handle.offset().x)) else {
+                grab.set(None);
+                return;
+            };
+            paint_thumb_quad(thumb, window);
+            let taken = grab.clone();
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Bubble || event.button != gpui::MouseButton::Left {
+                    return;
+                }
+                if let Some(at) = grab_across(thumb, event.position) {
+                    taken.set(Some(at));
+                    cx.stop_propagation();
+                }
+            });
+            let (taken, moved) = (grab.clone(), handle.clone());
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, _| {
+                let Some(at) = taken.get().filter(|_| phase == gpui::DispatchPhase::Bubble) else { return };
+                // A drag that ended outside the window.
+                if event.pressed_button != Some(gpui::MouseButton::Left) {
+                    taken.set(None);
+                    return;
+                }
+                let mut offset = moved.offset();
+                offset.x = -px(scrolled_for_thumb(f32::from(area.size.width), max, f32::from(event.position.x - area.left() - at)));
+                moved.set_offset(offset);
+                window.refresh();
+            });
+            let taken = grab.clone();
+            window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, _| {
+                if phase == gpui::DispatchPhase::Bubble && event.button == gpui::MouseButton::Left {
+                    taken.set(None);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// The thumb as it is drawn.
 pub(crate) fn paint_thumb_quad(bounds: Bounds<Pixels>, window: &mut Window) {
     let mut color = theme::border_strong();

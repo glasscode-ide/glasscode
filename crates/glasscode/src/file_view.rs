@@ -145,6 +145,8 @@ pub struct FileTab {
     checked: Option<Instant>,
     file_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
+    /// A drag of the sideways thumb under the lines (`ui::across_bar`).
+    across_grab: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     /// The editor (U20), made when the person first chooses Edit. It stays while the tab is open,
     /// in Preview too, so its text goes only when the person says so.
     pub editor: Option<Entity<Editor>>,
@@ -175,6 +177,7 @@ impl FileTab {
             checked: None,
             file_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
+            across_grab: Default::default(),
             editor: None,
             editing: false,
             dirty: false,
@@ -1236,7 +1239,16 @@ impl Workspace {
                     .child(div().w_full().max_w(theme::sz(820.)).child(page))
                     .into_any_element()
             }
-            Content::Text(lines) => div().flex().flex_col().flex_1().min_h_0().child(lines_element(if show_diff { "file-diff-lines" } else { "file-lines" }, lines, show_diff, scroll)).into_any_element(),
+            Content::Text(lines) => div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(lines_element(if show_diff { "file-diff-lines" } else { "file-lines" }, lines, show_diff, scroll))
+                // Lines do not wrap: the thumb says there is more of them, and moves them.
+                .child(ui::across_bar(scroll.0.borrow().base_handle.clone(), tab.across_grab.clone()))
+                .into_any_element(),
             Content::Binary(size) => sentence(format!("A binary file ({}): it has no text to show.", size_words(*size))).into_any_element(),
             Content::Missing => sentence(MISSING).into_any_element(),
             Content::Failed(error) => sentence(format!("Glasscode could not read this file: {error}")).into_any_element(),
