@@ -118,9 +118,12 @@ impl VoiceState {
 /// name), "always" (everything counts) or "never" (the microphone is off). The room knows
 /// no "hold": while the key is held it is "always", otherwise "never". `Listen::Never` only
 /// gets here when the person tapped the orb, which means "listen now": everything counts
-/// until it is tapped again.
+/// until it is tapped again. With the voice on this Mac the helper only runs while the person
+/// tapped the orb to talk, so there too everything counts (a talk, as on the glasses): the name
+/// is not needed in front of every sentence.
 fn listen_mode(settings: &Settings, held: bool) -> &'static str {
     match settings.listen {
+        Listen::Wake if settings.voice.local => "always",
         Listen::Wake => "wake",
         Listen::Hold if held => "always",
         Listen::Hold => "never",
@@ -613,6 +616,10 @@ mod tests {
         assert_eq!(listen_mode(&s, true), "always");
         // Tapped although it never listens by itself: the microphone is open until tapped again.
         s.listen = Listen::Never;
+        assert_eq!(listen_mode(&s, false), "always");
+        // The voice on this Mac: a tap on the orb is a talk, no name needed.
+        s.listen = Listen::Wake;
+        s.voice.local = true;
         assert_eq!(listen_mode(&s, false), "always");
     }
 
