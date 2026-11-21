@@ -1053,6 +1053,10 @@ impl Workspace {
                     .flex_shrink_0()
                     .flex_basis(theme::sz(COLUMN_WIDTH))
                     .max_w(theme::sz(COLUMN_MAX))
+                    // Its width is its share of the row, whatever its cards hold: a long title
+                    // wraps. A column as wide as its longest title made the columns wider than
+                    // the row counts on, and the last ones were outside it, out of reach.
+                    .min_w_0()
                     .min_h_0()
                     .when(takes_cards, |d| {
                         d.drag_over::<DraggedCard>(move |style, drag, _, _| if drag.from == from { style } else { style.bg(theme::accent()) })

@@ -531,6 +531,17 @@ pub fn bg() -> Hsla {
 pub fn panel() -> Hsla {
     get(|p| p.panel)
 }
+/// The rail at the left of the window, and the frame around the card that holds the rest:
+/// darker than the chrome (near black in a dark theme), so the card stands on it.
+pub fn rail() -> Hsla {
+    let chrome = chrome();
+    let l = if is_light() { (chrome.l - 0.08).max(0.) } else { chrome.l * 0.4 };
+    Hsla { l, ..chrome }
+}
+/// The round mark of the rail's button for the view on screen: lighter than the rail.
+pub fn rail_mark() -> Hsla {
+    if is_light() { bg() } else { selected() }
+}
 pub fn chrome() -> Hsla {
     get(|p| p.chrome)
 }
