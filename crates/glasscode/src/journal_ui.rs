@@ -1093,6 +1093,7 @@ impl Workspace {
             .sessions
             .iter()
             .map(|s| reconcile::SessionNow {
+                starting: self.launched_recently(&s.id, std::time::Duration::from_secs(reconcile::STARTING_SECS)),
                 id: s.id.clone(),
                 project: self.control.project_keys.get(&s.project_id).cloned(),
                 running: self.terminals.contains_key(&s.id),

@@ -79,6 +79,13 @@ pub fn no_agents() -> bool {
     cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
 }
 
+impl Workspace {
+    /// The app started this session's agent less than `within` ago.
+    pub(crate) fn launched_recently(&self, id: &str, within: Duration) -> bool {
+        self.launched_at.get(id).and_then(|at| at.elapsed().ok()).is_some_and(|since| since < within)
+    }
+}
+
 /// Whether a session's program may start: a shell always, Claude and Codex unless `no_agents`.
 pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
