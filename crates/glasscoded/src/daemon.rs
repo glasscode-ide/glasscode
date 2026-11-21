@@ -1213,6 +1213,10 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
     if let Some(answer) = crate::today::dispatch(method, &params) {
         return answer;
     }
+    // The glasses' manager methods (G08), before v1's refusal of `manager.ask` below.
+    if let Some(answer) = crate::phone_manager::dispatch(caller, method, &params) {
+        return answer;
+    }
     if let Some(answer) = crate::manager::dispatch(shared, method, &params) {
         return answer;
     }

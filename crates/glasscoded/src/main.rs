@@ -35,6 +35,7 @@ mod learning;
 #[cfg(unix)]
 mod memory_copy;
 #[cfg(unix)]
+mod phone_manager;
 mod phones;
 #[cfg(unix)]
 mod push;

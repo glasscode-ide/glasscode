@@ -121,6 +121,8 @@ pub struct DoorUi {
     told_home: HashMap<u64, String>,
     told_items: HashMap<u64, String>,
     today_at: Option<Instant>,
+    /// What phones that reach the server said their glasses do (the server's device ids).
+    pub via_server: HashMap<String, Presence>,
 }
 
 impl DoorUi {
@@ -802,6 +804,18 @@ impl Workspace {
         }
     }
 
+    /// What phones that reach the server said, with the sync (G08): a phone the server heard from
+    /// in the last 90 s counts as connected there, for the title bar.
+    pub fn door_presence_from_server(&mut self, said: &HashMap<String, Value>) {
+        let now = glasscode_core::clock::now_ms();
+        let fresh: HashMap<String, Presence> = said
+            .iter()
+            .filter(|(_, v)| now.saturating_sub(v["at_ms"].as_u64().unwrap_or(0)) < PRESENT_FOR.as_millis() as u64)
+            .filter_map(|(device, v)| serde_json::from_value::<Presence>(v.clone()).ok().map(|p| (device.clone(), Presence { via: "server".into(), ..p })))
+            .collect();
+        self.door.via_server = fresh;
+    }
+
     /// The person's paired devices and which are connected (`device.list`).
     pub fn door_devices(&self) -> Value {
         let connected: BTreeSet<&str> = self.door.conns.values().map(|c| c.device.as_str()).collect();
@@ -895,8 +909,10 @@ impl Workspace {
     /// The title bar's glasses icon: none with no phone paired; a click opens Settings › Glasses.
     pub fn render_glasses_icon(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         use gpui::{ClickEvent, div, prelude::*};
-        let presence: Vec<&Presence> = self.door.presence.values().collect();
-        let look = glasses_look(self.control.authority.devices.len(), self.door.conns.len(), &presence, self.door.ask.is_some(), self.door.error.is_some());
+        // Through this Mac's door, or through the server (its sync says what the phone told it).
+        let presence: Vec<&Presence> = self.door.presence.values().chain(self.door.via_server.values()).collect();
+        let connected = self.door.conns.len() + self.door.via_server.len();
+        let look = glasses_look(self.control.authority.devices.len(), connected, &presence, self.door.ask.is_some(), self.door.error.is_some());
         let (dot, color) = match look {
             GlassesLook::Hidden => return None,
             GlassesLook::Grey => (None, crate::theme::faint()),

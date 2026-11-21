@@ -173,6 +173,8 @@ impl Workspace {
             // What the server's manager needs to run its wakes while it is home (M57).
             manager: Some(glasscode_core::remote::ManagerFromMac {
                 enabled: self.state.manager.enabled,
+                // For the glasses while the server is home (G08).
+                name: Some(self.state.manager.name.clone()),
                 agent: Some(self.state.manager.brain),
                 model: self.state.manager.model.clone(),
                 account: self.state.manager.account.clone(),
@@ -243,6 +245,7 @@ impl Workspace {
                                 ws.control_gated(op, who, Vec::new(), String::new(), None, window, cx);
                             });
                         }
+                        this.door_presence_from_server(&outcome.presence);
                         for notice in outcome.notices.clone() {
                             log::info!("manager on the server ({}): {}", notice.matter, notice.body);
                             this.notify_manager(notice.title, notice.body, cx);

@@ -628,6 +628,10 @@ pub struct MirrorSyncReply {
     /// too, and "use the server's copy" goes on from it (crit-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_stamp: Option<crate::identity::Hlc>,
+    /// What the paired phones said their glasses do, by device (G08): the Mac's title bar shows
+    /// it while a phone talks to the server.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub presence: HashMap<String, Value>,
 }
 
 /// A window op of the server's manager, kept for the Mac (it runs in the window only).
@@ -652,6 +656,9 @@ pub struct QueuedWindowOp {
 #[serde(default)]
 pub struct ManagerFromMac {
     pub enabled: bool,
+    /// Its name, for the glasses while this server is home (G08); none from an older Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The brain's agent; none: Claude's (the only wake lane in release 1).
     pub agent: Option<crate::model::AgentKind>,
     pub model: Option<String>,
