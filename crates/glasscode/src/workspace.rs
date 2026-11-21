@@ -79,6 +79,13 @@ pub fn no_agents() -> bool {
     cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
 }
 
+impl Workspace {
+    /// The app started this session's agent less than `within` ago.
+    pub(crate) fn launched_recently(&self, id: &str, within: Duration) -> bool {
+        self.launched_at.get(id).and_then(|at| at.elapsed().ok()).is_some_and(|since| since < within)
+    }
+}
+
 /// The state of a session whose agent ended while its terminal stays open (`session list`): it
 /// ended (exit 0), or it crashed (another status, or a signal). It is not "idle": nothing runs.
 pub fn exit_word(status: Option<i32>) -> &'static str {
