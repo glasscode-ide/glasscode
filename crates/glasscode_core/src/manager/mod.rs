@@ -109,6 +109,8 @@ pub struct Voice {
     pub talker_url: String,
     /// The language spoken ("en", "de", …; empty: English).
     pub language: String,
+    /// Where Soniox is reached: "eu" (its EU addresses) or empty (its global ones).
+    pub soniox_region: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

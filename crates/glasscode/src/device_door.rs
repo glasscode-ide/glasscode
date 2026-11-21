@@ -109,7 +109,7 @@ pub struct DoorUi {
     paired: Arc<Mutex<BTreeSet<String>>>,
     tx: Option<async_channel::Sender<DoorMsg>>,
     /// The tailnet address, as last looked up, and when.
-    tailnet: Option<std::net::Ipv4Addr>,
+    pub(crate) tailnet: Option<std::net::Ipv4Addr>,
     looked: Option<Instant>,
     looking: bool,
     pub conns: HashMap<u64, Conn>,

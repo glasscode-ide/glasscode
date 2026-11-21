@@ -316,6 +316,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Give the audio back to the background silence, unless the room has it: the silence sets
+    /// the session to playback only, which would take the room's microphone away.
+    private func resumeKeepAlive() {
+        if !room.live { BackgroundKeepAlive.shared.resume() }
+    }
+
     /// The word the lens and the Mac's title bar show for the voice.
     private var voiceWord: String {
         guard room.live else { return turn.word }
@@ -356,7 +362,7 @@ final class AppModel: ObservableObject {
                 showMessage("No answer", error.localizedDescription)
                 // In the room the person hears why, too.
                 if room.live { roomSay("I could not get an answer: \(error.localizedDescription)") }
-                BackgroundKeepAlive.shared.resume()
+                resumeKeepAlive()
             }
             await refresh()
         }
@@ -396,7 +402,7 @@ final class AppModel: ObservableObject {
         if case .answer = model.card { model.replaceTop(card) }
         else if case .working = model.card { model.show(card) }
         lens = model
-        if !voice.isSpeaking { turn.done(); BackgroundKeepAlive.shared.resume() }
+        if !voice.isSpeaking { turn.done(); resumeKeepAlive() }
         reportPresence()
         redraw()
     }
@@ -412,7 +418,7 @@ final class AppModel: ObservableObject {
 
     private func voiceDone() {
         if case .speaking = turn.state { turn.done() }
-        BackgroundKeepAlive.shared.resume()
+        resumeKeepAlive()
         reportPresence()
         redraw()
     }

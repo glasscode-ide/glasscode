@@ -901,6 +901,12 @@ impl Workspace {
         if local {
             let secrets_note = form.secrets_note.borrow().clone().map(|note| format!("{note} ")).unwrap_or_default();
             rows.push(self.manager_secret_row("Soniox key", &format!("{secrets_note}One key for listening and speaking (soniox.com). Kept in {store}."), voice::SONIOX_ACCOUNT, &form.soniox_key, self.manager.voice.soniox_kept, cx));
+            let region = if settings.voice.soniox_region == "eu" { "eu" } else { "" };
+            rows.push(row(
+                "Soniox region",
+                "Where your Soniox account is: a key made for the EU works only there",
+                Some(self.manager_choice("manager-soniox-region", &[("", "Global"), ("eu", "EU")], region, |m, region| m.voice.soniox_region = region.to_string(), cx)),
+            ));
             let current = TALKERS.iter().map(|(v, _)| *v).find(|v| *v == settings.voice.talker.as_str()).unwrap_or("");
             rows.push(row(
                 "Talker",

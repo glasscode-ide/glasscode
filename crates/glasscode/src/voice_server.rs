@@ -80,17 +80,21 @@ impl VoiceServer {
         self.tailnet.map(|ip| format!("ws://{ip}:{PORT}"))
     }
 
+    /// End both. They are asked to end at once (also when the app is quitting: it may be gone
+    /// before a thread runs); a thread waits for them, kills what has not ended, and only then
+    /// forgets their pids, so a start after a crash still finds what is left.
     fn stop(&mut self) {
-        let children: Vec<Child> = [self.worker.take(), self.livekit.take()].into_iter().flatten().collect();
+        let children: Vec<(Child, &'static str)> = [(self.worker.take(), "worker.pid"), (self.livekit.take(), "livekit.pid")].into_iter().filter_map(|(c, p)| c.map(|c| (c, p))).collect();
+        for (child, _) in &children {
+            terminate(child.id());
+        }
         if !children.is_empty() {
             std::thread::spawn(move || {
-                for child in children {
+                for (child, pidfile) in children {
                     end(child);
+                    let _ = std::fs::remove_file(dir().join(pidfile));
                 }
             });
-        }
-        for name in ["worker.pid", "livekit.pid"] {
-            let _ = std::fs::remove_file(dir().join(name));
         }
         self.started_with = None;
     }
@@ -104,7 +108,7 @@ fn dir() -> PathBuf {
 /// What a running voice depends on: when one of these changes, it starts again.
 fn fingerprint(settings: &Settings) -> String {
     let v = &settings.voice;
-    format!("{}|{}|{}|{}|{}|{}|{}|{}", settings.name, v.stt, v.tts, v.voice, v.talker, v.talker_model, v.talker_url, v.language)
+    format!("{}|{}|{}|{}|{}|{}|{}|{}|{}", settings.name, v.stt, v.tts, v.voice, v.talker, v.talker_model, v.talker_url, v.language, v.soniox_region)
 }
 
 /// Whether the voice on this Mac should run now.
@@ -158,11 +162,15 @@ fn last_line(path: &Path) -> String {
     text.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| l.chars().take(240).collect()).unwrap_or_default()
 }
 
-/// Ask a child to end (its whole process group: the worker starts one process per call), and
-/// kill it if it has not gone a moment later.
+/// Ask a process group to end (the worker starts one process per call).
+fn terminate(pid: u32) {
+    let _ = Command::new("/bin/kill").args(["-TERM", &format!("-{pid}")]).stderr(Stdio::null()).status();
+}
+
+/// Ask a child to end, and kill it (its whole group) if it has not gone a moment later.
 fn end(mut child: Child) {
     let group = format!("-{}", child.id());
-    let _ = Command::new("/bin/kill").args(["-TERM", &group]).stderr(Stdio::null()).status();
+    terminate(child.id());
     for _ in 0..30 {
         if !matches!(child.try_wait(), Ok(None)) {
             return;
@@ -219,6 +227,24 @@ fn prepare(worker: &Path, uv: &Path) -> Result<PathBuf, String> {
     Ok(python)
 }
 
+/// The keys a start needs: LiveKit's pair and the services' keys.
+struct Secrets {
+    livekit: (String, String),
+    soniox: Option<String>,
+    talker: Option<String>,
+}
+
+/// The keys from the Keychain (LiveKit's made the first time).
+fn secrets() -> Result<Secrets, String> {
+    let livekit = voice::local_keys().map_err(|e| format!("The voice's key could not be kept in the Keychain ({e:#})."))?;
+    Ok(Secrets { livekit, soniox: voice::secret(voice::SONIOX_ACCOUNT), talker: voice::secret(voice::TALKER_ACCOUNT) })
+}
+
+/// Soniox's addresses for a region ("eu": its EU ones; else its global ones, the worker's own).
+fn soniox_urls(region: &str) -> Option<(&'static str, &'static str)> {
+    (region.trim().eq_ignore_ascii_case("eu")).then_some(("wss://stt-rt.eu.soniox.com/transcribe-websocket", "wss://tts-rt.eu.soniox.com/tts-websocket"))
+}
+
 /// Everything a start needs, read on the main thread.
 struct Plan {
     livekit: PathBuf,
@@ -262,7 +288,7 @@ fn answers() -> bool {
 }
 
 /// The slow part of a start, off the main thread: keys, the worker's Python, LiveKit, the worker.
-fn start(plan: Plan) -> Result<Started, String> {
+fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
     if !cfg!(unix) {
         return Err("The voice on this computer runs on a Mac only; use a voice server (Settings › Manager › Voice).".into());
     }
@@ -272,17 +298,17 @@ fn start(plan: Plan) -> Result<Started, String> {
     if TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).is_err() {
         return Err(format!("Port {PORT} on this Mac is used by another program, so the voice cannot start there."));
     }
-    let (key, secret) = voice::local_keys().map_err(|e| format!("The voice's key could not be kept in the Keychain ({e:#})."))?;
+    let (key, secret) = secrets.livekit.clone();
     let settings = &plan.settings;
     let v = &settings.voice;
     let stt = if v.stt.trim().is_empty() { "soniox" } else { v.stt.trim() };
     let tts = if v.tts.trim().is_empty() { "soniox" } else { v.tts.trim() };
-    let soniox = voice::secret(voice::SONIOX_ACCOUNT);
+    let soniox = secrets.soniox.clone();
     if (stt == "soniox" || tts == "soniox") && soniox.is_none() {
         return Err("The Soniox key is missing. Enter it in Settings › Manager › Voice.".into());
     }
     let talker = v.talker.trim().to_lowercase();
-    let talker_key = voice::secret(voice::TALKER_ACCOUNT);
+    let talker_key = secrets.talker.clone();
     if !talker.is_empty() && talker_key.is_none() {
         return Err("The talker's key is missing. Enter it in Settings › Manager › Voice, or set the talker to None.".into());
     }
@@ -339,6 +365,9 @@ fn start(plan: Plan) -> Result<Started, String> {
     if let Some(soniox) = &soniox {
         cmd.env("SONIOX_API_KEY", soniox);
     }
+    if let Some((stt_url, tts_url)) = soniox_urls(&v.soniox_region) {
+        cmd.env("SONIOX_STT_URL", stt_url).env("SONIOX_TTS_URL", tts_url);
+    }
     if let Some(talker_key) = &talker_key {
         cmd.env("MANAGER_TALKER_KEY", talker_key);
     }
@@ -372,6 +401,13 @@ impl Workspace {
         // Started with other settings (another talker, voice, name): again, with these.
         if self.vserver.started_with.as_ref().is_some_and(|had| *had != fingerprint(settings)) {
             log::info!("voice: the settings changed, starting it again");
+            self.voice_server_restart(cx);
+            return;
+        }
+        // Tailscale came up, or its address changed (the door looks now and then): the phone's
+        // way in is the new one.
+        if self.vserver.running() && self.door.tailnet.is_some() && self.door.tailnet != self.vserver.tailnet {
+            log::info!("voice: the tailnet address changed, starting it again");
             self.voice_server_restart(cx);
             return;
         }
@@ -449,7 +485,7 @@ impl Workspace {
         let first = !dir().join("venv/bin/python").exists();
         self.vserver.status = Status::Preparing(if first { "Setting up the voice on this Mac (the first time takes a minute or two)…".into() } else { "Starting the voice on this Mac…".into() });
         cx.notify();
-        let task = cx.background_spawn(async move { start(plan) });
+        let task = cx.background_spawn(async move { secrets().and_then(|secrets| start(plan, secrets)) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
@@ -515,6 +551,47 @@ mod tests {
         let talker = fingerprint(&s);
         s.listen = glasscode_core::manager::Listen::Hold;
         assert_eq!(talker, fingerprint(&s), "how it listens is the helper's, not the server's");
+    }
+
+    #[test]
+    fn soniox_is_reached_in_the_eu_when_asked() {
+        assert_eq!(soniox_urls(""), None);
+        assert!(soniox_urls("EU").is_some_and(|(stt, tts)| stt.contains(".eu.") && tts.contains(".eu.")));
+    }
+
+    /// A real start: LiveKit and the worker run, the worker signs in to LiveKit, and stop ends
+    /// both and frees the port. Not in the default run: it makes the worker's Python (a minute
+    /// the first time) and needs a livekit-server:
+    ///   GLASSCODE_LIVEKIT_SERVER=<livekit-server> cargo test -p glasscode a_real_start -- --ignored
+    /// In the tests' own Glasscode folder, with made-up keys: nothing of the Keychain is used.
+    #[test]
+    #[ignore]
+    fn a_real_start_runs_both_and_stop_ends_them() {
+        glasscode_core::paths::use_test_root();
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let livekit = livekit_path(&env).expect("set GLASSCODE_LIVEKIT_SERVER to a livekit-server");
+        let worker = worker_dir(&env).expect("the worker in this repository");
+        let uv = uv_path(&env).expect("uv");
+        let mut settings = Settings { enabled: true, name: "AI Mira".into(), ..Settings::default() };
+        settings.voice.local = true;
+        let plan = Plan { livekit, worker, uv, settings, path: env.get("PATH").cloned().unwrap_or_default(), home: env.get("HOME").cloned().unwrap_or_default() };
+        let secrets = Secrets { livekit: ("APIgctest".into(), "a-made-up-secret-of-enough-length-0123456789".into()), soniox: Some("a-made-up-key".into()), talker: None };
+        let started = start(plan, secrets).expect("it starts");
+        assert!(answers(), "LiveKit answers on its port");
+        let log = dir().join("worker.log");
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !std::fs::read_to_string(&log).unwrap_or_default().contains("registered worker") {
+            assert!(Instant::now() < deadline, "the worker did not sign in to LiveKit: {}", std::fs::read_to_string(&log).unwrap_or_default());
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let mut server = VoiceServer { livekit: Some(started.livekit), worker: Some(started.worker), status: Status::Running, ..VoiceServer::default() };
+        server.stop();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while answers() || dir().join("livekit.pid").exists() || dir().join("worker.pid").exists() {
+            assert!(Instant::now() < deadline, "stop left something running");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).is_ok(), "the port is free again");
     }
 
     #[test]
