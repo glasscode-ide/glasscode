@@ -1104,9 +1104,22 @@ impl Workspace {
                 }),
             })
             .collect();
-        // Only once git listed every project's worktrees: an unread list is not an empty one.
-        let read = self.state.projects.iter().all(|p| self.worktrees_read.contains(&p.id));
-        let worktrees = read.then(|| self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| (self.control.project_keys.get(project).cloned(), w.path.clone()))).collect());
+        // Each project's list as git last read it: one that is not read waits alone.
+        let worktrees = Some(
+            self.state
+                .projects
+                .iter()
+                .map(|p| reconcile::ProjectWorktrees {
+                    project: self.control.project_keys.get(&p.id).cloned(),
+                    name: p.name.clone(),
+                    list: match self.worktree_reads.get(&p.id) {
+                        Some(Ok(())) => Ok(self.worktrees.get(&p.id).map(|list| list.iter().map(|w| w.path.clone()).collect()).unwrap_or_default()),
+                        Some(Err(why)) => Err(Some(why.clone())),
+                        None => Err(None),
+                    },
+                })
+                .collect(),
+        );
         reconcile::Snapshot { sessions, worktrees }
     }
 
