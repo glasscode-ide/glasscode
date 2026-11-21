@@ -734,7 +734,7 @@ mod tests {
         let prompt = r#"{"type":"user","message":{"role":"user","content":"Run sh wait40.sh"}}"#;
         let tool = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"sh wait40.sh"}}]}}"#;
         std::fs::write(&path, format!("{earlier}\n{prompt}\n{tool}\n")).unwrap();
-        let offset = turn_offset(Some(&path), Some("Run sh wait40.sh"));
+        let offset = turn_offset(Some(&path), Some("Run sh wait40.sh"), None);
         let closed = Closed { turn: OpenTurn { id: "p1".into(), started_ms: 1_000, transcript_offset: offset, ..OpenTurn::default() }, end: TurnEnd::AppQuit, ended_ms: 20_000, reply: None, background: Vec::new() };
         let report = report_now("s1", AgentKind::Claude, Some(&path), &closed, dir.path());
         assert_eq!(report.tools, 1, "{report:?}");
