@@ -367,6 +367,7 @@ class ManagerVoice:
             return
         self.last_spoken = (text, time.monotonic())
         self.attention.keep_open(time.monotonic())
+        log.info("said %d words", len(text.split()))
         if any(said.startswith(text) for said in self.said_texts):
             # The manager's own answer (cut short, when the person talked over it): the
             # clients show it already.
@@ -462,6 +463,7 @@ class ManagerVoice:
         accepted = self.attention.accept(text, now)
         if LOG_HEARD:
             log.info("understood %r: %s", text, "not for the manager, dropped" if accepted is None else f"passed on as {accepted!r}")
+        log.info("heard a sentence of %d words from %s: %s", len(text.split()), self._listened() or "nobody", "not for the manager" if accepted is None else "the name only" if not accepted else "the talker answers" if self._talker_on() else "passed on")
         if accepted is None:
             return None
         if not accepted:
@@ -539,6 +541,7 @@ class ManagerVoice:
             return
         self.speeches.append((handle, say_id, text))
         handle.add_done_callback(self._on_spoken)
+        log.info("speaking %s (%d characters)", say_id or "an answer", len(text))
         self._publish_state()
 
     def _on_spoken(self, handle) -> None:
@@ -548,6 +551,7 @@ class ManagerVoice:
                 self.last_spoken = (text, time.monotonic())
                 said_id = say_id
         self.speeches = [speech for speech in self.speeches if speech[0] is not handle]
+        log.info("spoke %s%s", said_id or "an answer", " (cut off)" if getattr(handle, "interrupted", False) else "")
         if said_id and getattr(handle, "interrupted", False):
             # Talked over: what is still queued of the same answer goes too.
             self.cut_ids.add(said_id)
@@ -620,6 +624,7 @@ class ManagerVoice:
 
     def _on_error(self, event) -> None:
         error = event.error
+        log.warning("%s error (recoverable: %s): %s", getattr(error, "type", "speech"), getattr(error, "recoverable", "?"), getattr(error, "error", error))
         if getattr(error, "recoverable", True):
             return
         what = {"stt_error": "speech-to-text", "tts_error": "text-to-speech"}.get(getattr(error, "type", ""), "speech")
