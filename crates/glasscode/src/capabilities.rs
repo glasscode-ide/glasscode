@@ -428,6 +428,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Settings", "restart to update", "update_restart", "Only you can restart Glasscode to update it.", Place::Settings(Section::Updates)),
     planned("Settings", "the update's status", "update_rows", "update.status"),
     person("Settings", "add a CLI version", "open_add_cli", "Only you can add a CLI version: the team approves each one.", Place::Settings(Section::Updates)),
+    local("Settings", "a CLI's row: show or hide the argument lists it refuses", "cli_details_toggle"),
     person("Settings", "run the first run again", "open_first_run", "Only you can run the first run again.", SETTINGS),
     op("Settings", "the manager's status", "settings_manager", "manager.status"),
     // ----- status bar, usage, resources, ports
@@ -455,6 +456,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "add a site a project's sessions may open", "trust_change", "Only you add a site sessions may open.", Place::Settings(Section::Manager)),
     person("Manager", "remove a site a project's sessions may open", "trust_change", "Only you remove a site sessions may open.", Place::Settings(Section::Manager)),
     op("Manager", "try a playbook on the last 7 days", "trust_try", "playbook.test"),
+    local("Manager", "a project's trust row: open what its level allows, or the field of a thing to add", "trust_panel"),
     op("Manager", "move in what agents already know", "open_move_in", "movein.open"),
     person("Manager", "try moving the old manager's data again", "migration_retry", "Only you can run the move of the old manager's data again: Settings › Manager has it while it fails.", Place::Settings(Section::Manager)),
     person("Manager", "use the server's copy when this Mac's clock went back", "clock_use_server", "Only you can choose the server's copy: what this Mac changed while its clock was wrong stays here.", Place::Settings(Section::Manager)),

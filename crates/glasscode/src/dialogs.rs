@@ -1786,29 +1786,35 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
             rows.push(row_with(title, format!("{used_text} · {}", crate::settings_ui::tilde(&folder)), Some(buttons)));
         }
         if form.adding == Some(agent) {
+            // The new account's fields as a row of the card: its words, then the two fields of
+            // one width and the buttons under them.
             rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(form.label.clone())
-                    .child(form.plan.clone())
-                    .child(
+                crate::settings_ui::card(format!("A new {} account", agent.name()), "Its name in Glasscode, and its plan if you want it shown. Signing in runs in a terminal here.")
+                    .body(
                         div()
                             .flex()
-                            .gap_2()
-                            .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
-                            ))
-                            .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                if let Some(form) = this.settings.form.as_mut() {
-                                    form.adding = None;
-                                }
-                                cx.notify();
-                            }))),
-                    ),
+                            .flex_wrap()
+                            .items_center()
+                            .gap(theme::sz(8.))
+                            .child(crate::settings_ui::field(&form.label))
+                            .child(crate::settings_ui::field(&form.plan))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(theme::sz(8.))
+                                    .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
+                                        cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
+                                    ))
+                                    .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if let Some(form) = this.settings.form.as_mut() {
+                                            form.adding = None;
+                                        }
+                                        cx.notify();
+                                    }))),
+                            ),
+                    )
+                    .into_row(),
             );
         } else {
             rows.push(row(
@@ -1914,9 +1920,75 @@ fn add_cli_footer(cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    let mut rows: Vec<AnyElement> = ws
-        .cli_status
+/// What a CLI's row says under its name: the version installed, the pinned one when it is
+/// another, and the newest published.
+fn cli_versions_line(status: &glasscode_core::versions::CliStatus) -> String {
+    let installed = match (&status.installed, &status.approved) {
+        (None, Some(pinned)) => format!("Not installed · pinned {pinned}"),
+        (None, None) => "Not installed".to_string(),
+        (Some(v), Some(pinned)) if v != pinned => format!("{v} installed · pinned {pinned}"),
+        (Some(v), Some(_)) => format!("{v} installed, the pinned version"),
+        (Some(v), None) => format!("{v} installed"),
+    };
+    match &status.latest {
+        Some(latest) if status.installed.as_deref() == Some(latest.as_str()) => format!("{installed} · the latest"),
+        Some(latest) => format!("{installed} · latest {latest}"),
+        None => installed,
+    }
+}
+
+/// Debug builds: `GLASSCODE_DEBUG_CLI=sample` shows made-up CLIs in Updates › CLI versions (one
+/// that refuses arguments and has an update, one as it should be, one not installed, one the
+/// person added), so a screen check sees each state of a row without the real programs.
+#[cfg(debug_assertions)]
+type CliSample = (Vec<glasscode_core::versions::CliStatus>, std::collections::HashMap<String, (String, Result<(), Vec<String>>)>);
+
+#[cfg(debug_assertions)]
+fn cli_sample() -> Option<CliSample> {
+    use glasscode_core::versions::{CliKind, CliStatus};
+    if std::env::var("GLASSCODE_DEBUG_CLI").ok().as_deref() != Some("sample") {
+        return None;
+    }
+    let status = |name: &str, installed: Option<&str>, approved: Option<&str>, latest: Option<&str>, builtin: bool, kind: CliKind| CliStatus {
+        name: name.to_string(),
+        installed: installed.map(str::to_string),
+        approved: approved.map(str::to_string),
+        latest: latest.map(str::to_string),
+        path: None,
+        builtin,
+        kind,
+    };
+    let list = vec![
+        status("Claude Code", Some("2.1.329"), None, Some("2.1.330"), true, CliKind::ClaudeCode),
+        status("Codex", Some("0.41.0"), Some("0.41.0"), Some("0.41.0"), true, CliKind::Codex),
+        status("Gemini", None, None, Some("0.9.2"), false, CliKind::Npm { package: "@google/gemini-cli".into() }),
+        status("my-agent", Some("1.4.0"), None, None, false, CliKind::Command { install: "brew install my-agent".into() }),
+    ];
+    let refused = vec![
+        "runtime::claude args: -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode default --version → error: unknown option '--include-partial-messages'".to_string(),
+        "review::claude args: -p --output-format json --max-turns 40 --version → error: unknown option '--max-turns'".to_string(),
+    ];
+    let contracts = std::collections::HashMap::from([("Claude Code".to_string(), ("2.1.329".to_string(), Err(refused))), ("Codex".to_string(), ("0.41.0".to_string(), Ok(())))]);
+    Some((list, contracts))
+}
+
+/// Updates › CLI versions: a row for each CLI in the one layout of Settings (its name, its
+/// versions under it, its buttons at the right edge), and what its argument contract says under
+/// the words. A CLI that refuses arguments says so in one sentence that wraps in the card; the
+/// argument lists themselves show behind "Details", in the code font.
+pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<gpui::Div> {
+    use crate::settings_ui::{card_with, disclosure, inset, row};
+    #[cfg(debug_assertions)]
+    let sample = cli_sample();
+    #[cfg(debug_assertions)]
+    let (statuses, contracts) = match &sample {
+        Some((statuses, contracts)) => (statuses, contracts),
+        None => (&ws.cli_status, &ws.cli_contracts),
+    };
+    #[cfg(not(debug_assertions))]
+    let (statuses, contracts) = (&ws.cli_status, &ws.cli_contracts);
+
+    let mut rows: Vec<gpui::Div> = statuses
         .iter()
         .map(|status| {
             let ok = status.is_ok();
@@ -1926,94 +1998,87 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
             // Built-ins: offer the pinned version when it differs. Nothing installed: an Install.
             let install_pinned = status.install_command().filter(|_| !ok && update.is_none());
             let install_fresh = (!installed && update.is_none()).then(|| status.install_latest_command());
-            let latest_note = status
-                .latest
-                .as_ref()
-                .map(|l| if status.installed.as_deref() == Some(l.as_str()) { format!(" · latest {l} ✓") } else { format!(" · latest {l}") })
-                .unwrap_or_default();
             let builtin = status.builtin;
-            let update_name = name.clone();
-            let install_name = name.clone();
-            let remove_name = name.clone();
-            div()
+            // The argument contract of the installed version (alt-m4, M22).
+            let contract = contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone());
+            let refused = contract.as_ref().and_then(|result| result.as_ref().err().cloned());
+
+            // On glass the words stay `text`; a CLI that is not right gets an orange dot.
+            let title = div()
                 .flex()
                 .items_center()
+                .gap(theme::sz(8.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .when(!ok || refused.is_some(), |d| d.child(ui::dot(theme::attention())))
+                .child(name.clone());
+
+            let buttons = div()
+                .flex()
                 .flex_wrap()
-                .gap_2()
-                // On glass the words stay `text`; a CLI that is not right gets an orange dot.
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .flex_1()
-                        .min_w(theme::sz(220.))
-                        .text_color(theme::text())
-                        .when(!ok, |d| d.child(ui::dot(theme::attention())))
-                        .child(format!("{}{latest_note}", status.summary())),
-                )
-                // The argument contract of the installed version (alt-m4, M22).
-                .when_some(ws.cli_contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone()), |d, result| {
-                    let refused = result.is_err();
-                    d.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(theme::sz(12.))
-                            .text_color(if refused { theme::text() } else { theme::muted() })
-                            .when(refused, |d| d.child(ui::dot(theme::attention())))
-                            .child(glasscode_core::versions::contract_words(&result)),
-                    )
-                })
+                .items_center()
+                .gap(theme::sz(8.))
                 .when_some(update, |d, version| {
-                    let v = version.clone();
-                    let name = update_name.clone();
-                    d.child(
-                        ui::primary_button(SharedString::from(format!("update-{name}")), format!("Update to {version}"))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.cli_install(name.clone(), Some(v.clone()), window, cx)
-                            })),
-                    )
+                    let (name, v) = (name.clone(), version.clone());
+                    d.child(ui::button(SharedString::from(format!("update-{name}")), if installed { format!("Update to {version}") } else { format!("Install {version}") }).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.cli_install(name.clone(), Some(v.clone()), window, cx)
+                    })))
                 })
                 .when_some(install_pinned, |d, _command| {
-                    let name = install_name.clone();
-                    d.child(
-                        ui::button(SharedString::from(format!("install-{name}")), "Install pinned version").on_click(
-                            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                let pin = this.cli_status.iter().find(|s| s.name == name).and_then(|s| s.approved.clone());
-                                this.cli_install(name.clone(), pin, window, cx)
-                            }),
-                        ),
-                    )
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("install-{name}")), "Install pinned version").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        let pin = this.cli_status.iter().find(|s| s.name == name).and_then(|s| s.approved.clone());
+                        this.cli_install(name.clone(), pin, window, cx)
+                    })))
                 })
                 .when_some(install_fresh, |d, _command| {
-                    let name = install_name.clone();
-                    d.child(
-                        ui::button(SharedString::from(format!("install-fresh-{name}")), "Install").on_click(cx.listener(
-                            move |this, _: &ClickEvent, window, cx| this.cli_install(name.clone(), None, window, cx),
-                        )),
-                    )
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("install-fresh-{name}")), "Install").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.cli_install(name.clone(), None, window, cx))))
                 })
                 .when(!builtin, |d| {
-                    let name = remove_name.clone();
-                    d.child(ui::button(SharedString::from(format!("remove-{name}")), "Remove").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _window, cx| this.remove_custom_cli(name.clone(), cx),
-                    )))
-                })
-                .into_any_element()
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("remove-{name}")), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| this.remove_custom_cli(name.clone(), cx))))
+                });
+
+            let framed = card_with(title, cli_versions_line(status)).control(buttons);
+            match (contract, refused) {
+                (None, _) => framed,
+                (Some(_), None) => framed.footer("Takes every argument list Glasscode starts it with."),
+                (Some(_), Some(failures)) => {
+                    let open = ws.settings.cli_details.contains(&name);
+                    let toggle = name.clone();
+                    let warning = div()
+                        .flex()
+                        .items_start()
+                        .gap(theme::sz(10.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(theme::sz(12.))
+                                .text_color(theme::text())
+                                .child("Refuses some of Glasscode's arguments, so sessions may not start. Install the version you had approved before."),
+                        )
+                        .child(
+                            disclosure(SharedString::from(format!("cli-details-{name}")), if failures.len() == 1 { "Details".to_string() } else { format!("Details · {}", failures.len()) }, open)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.cli_details_toggle(toggle.clone(), cx))),
+                        );
+                    let body = div().flex().flex_col().min_w_0().gap(theme::sz(8.)).child(warning).when(open, |d| {
+                        d.child(inset().children(failures.iter().map(|failure| {
+                            div().min_w_0().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).line_height(theme::sz(17.)).text_color(theme::text_soft()).child(failure.clone())
+                        })))
+                    });
+                    framed.body(body)
+                }
+            }
+            .into_row()
         })
         .collect();
-    rows.push(
-        div()
-            .flex()
-            .child(
-                ui::button(SharedString::from("add-cli"), "+ Add a CLI")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_add_cli(window, cx))),
-            )
-            .into_any_element(),
-    );
+    rows.push(row(
+        "Another CLI",
+        "From npm, or with an install command of your own",
+        Some(ui::button(SharedString::from("add-cli"), "Add a CLI…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_add_cli(window, cx))).into_any_element()),
+    ));
     rows
 }
 
