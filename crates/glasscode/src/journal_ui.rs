@@ -986,8 +986,16 @@ impl Workspace {
             .iter_mut()
             .flat_map(|(id, turns)| turns.machine.feed(now, &Signal::AppQuit).into_iter().filter_map(move |c| if let Change::Closed(closed) = c { Some((id.clone(), closed)) } else { None }))
             .collect();
+        // Read from each transcript at once: a quit cannot wait for the background.
         for (id, closed) in cut {
-            self.journal_turn_closed(&id, closed, None);
+            match self.state.session(&id).cloned() {
+                Some(session) => {
+                    let key = self.journal_key(&id);
+                    let report = turns::report_now(&session.id, session.agent, session.transcript_path.as_deref(), &closed, &session.worktree);
+                    self.journal_note(turns::ended_event(key.as_ref(), &report));
+                }
+                None => self.journal_turn_closed(&id, closed, None),
+            }
         }
         self.journal_note(Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": running })));
         if let Err(err) = self.journal.cursors.save() {
