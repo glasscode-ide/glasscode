@@ -430,6 +430,15 @@ pub(crate) fn graphql_at(base: &str, auth: &Auth, env: &HashMap<String, String>,
     Ok(value["data"].clone())
 }
 
+/// A pull request's author's association with its repository (`author_association`: OWNER,
+/// MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, …), by the REST API; None when it cannot be read, which
+/// `gate::trusted_author` takes as not trusted.
+pub fn pr_association(repo: &str, number: u64, env: &HashMap<String, String>) -> Option<String> {
+    let auth = auth_for(repo, env)?;
+    let pr = rest_get(&auth, env, &format!("/repos/{repo}/pulls/{number}")).ok()?;
+    pr["author_association"].as_str().filter(|a| !a.is_empty()).map(str::to_string)
+}
+
 /// A REST read as `auth` (`path` like `/repos/o/n/labels/x`), asked with the ETag of the last
 /// answer: an unchanged one comes back as 304, quickly and without counting against the limit.
 pub fn rest_get(auth: &Auth, env: &HashMap<String, String>, path: &str) -> Result<Value, ApiError> {

@@ -456,9 +456,10 @@ mod tests {
         memory.note_in(&Who::Session("s-1".into()), &work("fix/upload"), Some(&worktree), "uploads over 10 MB go to the bucket directly").unwrap();
         // The reconciler knows the worktree, then it is gone (removed in a terminal).
         let mut reconciler = Reconciler::default();
-        reconciler.run(&Snapshot { sessions: Vec::new(), worktrees: Some(vec![(Some(key("app-3f9a1c")), worktree.clone())]) });
+        let app = |list: Vec<PathBuf>| Some(vec![crate::reconcile::ProjectWorktrees { project: Some(key("app-3f9a1c")), name: "app".into(), list: Ok(list) }]);
+        reconciler.run(&Snapshot { sessions: Vec::new(), worktrees: app(vec![worktree.clone()]) });
         // Read with the worktree no longer in it (an unread list says nothing).
-        let events = reconciler.run(&Snapshot { sessions: Vec::new(), worktrees: Some(Vec::new()) });
+        let events = reconciler.run(&Snapshot { sessions: Vec::new(), worktrees: app(Vec::new()) });
         let gone = events.iter().find(|e| e.kind == crate::journal::kinds::RECONCILED_WORKTREE_GONE).expect("a gone event");
         assert_eq!(gone.project, Some(key("app-3f9a1c")));
         let path = PathBuf::from(gone.data["worktree"].as_str().unwrap());

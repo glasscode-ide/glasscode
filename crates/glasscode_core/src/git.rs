@@ -102,6 +102,13 @@ pub fn folder_label(path: &Path, repo_name: &str) -> String {
     last
 }
 
+/// A git failure in a line for the person: its first line, at most 160 characters.
+pub fn short_error(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("git failed");
+    line.chars().take(160).collect()
+}
+
 pub fn worktrees(root: &Path) -> anyhow::Result<Vec<Worktree>> {
     let mut cmd = git(root);
     cmd.args(["worktree", "list", "--porcelain"]);

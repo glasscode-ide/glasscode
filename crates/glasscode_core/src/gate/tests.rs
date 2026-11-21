@@ -1144,3 +1144,20 @@ fn the_server_cannot_approve_a_card_on_the_mac() {
     assert_eq!(on_server.merge_theirs(&[collided], &mac, &server, true, now + 7), 0, "the server's card, said to be the Mac's");
     assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Waiting);
 }
+
+/// D27: a session started for a pull request by a stranger is quarantined, whoever starts it; one
+/// by the person, a confirmed teammate or the repository's own people keeps its origin.
+#[test]
+fn a_session_for_a_strangers_pull_request_is_quarantined() {
+    let (me, team) = (vec!["alex-dev".to_string()], vec!["jordan".to_string()]);
+    for association in [None, Some("NONE"), Some("CONTRIBUTOR"), Some("FIRST_TIME_CONTRIBUTOR")] {
+        for started in [SessionOrigin::Person, SessionOrigin::Automation] {
+            assert_eq!(origin_for_input(started, "drive-by", association, &me, &team), SessionOrigin::Quarantine, "{association:?} {started:?}");
+        }
+    }
+    assert_eq!(origin_for_input(SessionOrigin::Person, "Alex-Dev", None, &me, &team), SessionOrigin::Person);
+    assert_eq!(origin_for_input(SessionOrigin::Automation, "jordan", Some("NONE"), &me, &team), SessionOrigin::Automation);
+    assert_eq!(origin_for_input(SessionOrigin::Person, "maintainer", Some("MEMBER"), &me, &team), SessionOrigin::Person);
+    // Already quarantined: never lowered.
+    assert_eq!(origin_for_input(SessionOrigin::Quarantine, "alex-dev", None, &me, &team), SessionOrigin::Quarantine);
+}
