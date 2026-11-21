@@ -93,8 +93,11 @@ it is made.
 - It cannot send anything of a project marked "stays on this Mac" to the server: not its memory,
   sessions, words, journal or cards.
 - It cannot run past its budget: at most six routine wakes an hour, a daily token cap, and
-  nothing on paid overage unless you allow it. With no budget left, or signed out, it answers
-  from what it knows and says why. When its plan's limit is used up, it holds your question and
+  nothing on paid overage unless you allow it. The daily cap starts at 1,500,000 tokens a UTC
+  day, the chat and its wakes together; raise it or turn it off in Settings › Manager › Daily
+  tokens, or with `glasscode manager budget 6m` (or `off`). Off, the hour's wakes and your plan's
+  own limits still hold, and learning still keeps to a fifth of the default. With no budget
+  left, or signed out, it answers from what it knows and says why. When its plan's limit is used up, it holds your question and
   answers when the limit resets, or you ask the other agent (Claude or Codex) instead.
 - It cannot start on a Claude Code older than 2.1.322 or a Codex older than 0.167.0. It says
   which version it needs.

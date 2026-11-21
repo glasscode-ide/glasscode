@@ -83,6 +83,7 @@ The manager (the agent above every session; off until switched on in Settings â€
   manager scene '<json>'          draw a small picture it explains with (or --file <path>)
   manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
   manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+  manager budget [<tokens a day> | default | off]
 
 The app
   status                          the app, the server, what needs you
@@ -627,6 +628,7 @@ The manager (the agent above every session; off until switched on in Settings â€
   manager scene '<json>'          draw a small picture it explains with (or --file <path>)
   manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
   manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+  manager budget [<tokens a day> | default | off]
 
 Every command takes --json. <session> is an id, its start, or words from its title ("this" is
 the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
@@ -655,6 +657,7 @@ The manager (the agent above every session; off until switched on in Settings â€
   manager scene '<json>'          draw a small picture it explains with (or --file <path>)
   manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
   manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+  manager budget [<tokens a day> | default | off]
 
 Every command takes --json. <session> is an id, its start, or words from its title ("this" is
 the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a

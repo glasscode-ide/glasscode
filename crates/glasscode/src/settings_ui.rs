@@ -740,6 +740,7 @@ impl Workspace {
         // Whether the manager's voice key is kept: asked once here, never while drawing.
         if section == Section::Manager {
             self.manager_voice_keys_check(cx);
+            self.manager_budget_refresh(cx);
         }
         self.github.editing = None;
         self.github_accounts_refresh(cx);

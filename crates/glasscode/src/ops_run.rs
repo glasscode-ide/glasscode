@@ -130,6 +130,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.show", manager_show),
     ("manager.scene", manager_scene),
     ("manager.voice_token", manager_voice_token),
+    ("manager.budget", manager_budget),
     ("manager.follow_up.list", follow_up_list),
     ("manager.follow_up.add", follow_up_add),
     ("manager.follow_up.done", follow_up_done),
@@ -3106,6 +3107,39 @@ fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::
     let (steps, data) = (scene.steps.len(), to_json(&scene));
     ws.v2_apply(vec![Action::Scene { scene }], cx);
     ws.reply(r, Reply::ok(format!("Drawing {title} ({}).", plural(steps, "step", "steps")), data));
+}
+
+/// The manager's daily token cap (D6): with a cap, keep it in the token ledger; with none, say it
+/// and what today used. The person's alone, as in Settings › Manager.
+fn manager_budget(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::runtime::budget;
+    use glasscode_core::store::Store as _;
+    person_only(caller, "change the manager's daily token cap")?;
+    let cap = op.text("cap").map(budget::parse_cap).transpose().map_err(usage)?;
+    let what = match cap {
+        Some(cap) => format!("set the manager's daily token cap to {}", budget::cap_words(cap)),
+        None => "say the manager's daily token cap".to_string(),
+    };
+    memory_plan(Kind::Settings, what, move || {
+        let result = match cap {
+            Some(cap) => budget::set_daily_cap(cap),
+            None => budget::Ledger::load(),
+        };
+        match result {
+            Ok(ledger) => {
+                let now = glasscode_core::clock::now_ms();
+                let today = ledger.today(now);
+                let used: u64 = today.values().sum();
+                let off = ledger.daily_cap == budget::NO_CAP;
+                let is = if cap.is_some() { "is now" } else { "is" };
+                Reply::ok(
+                    format!("The manager's daily cap {is} {}; today (UTC) it used {}.", budget::cap_words(ledger.daily_cap), budget::thousands(used)),
+                    json!({ "daily_cap": if off { Value::Null } else { json!(ledger.daily_cap) }, "off": off, "used_today": used, "today": today }),
+                )
+            }
+            Err(err) => failed(format!("Could not keep the daily cap: {err}")),
+        }
+    })
 }
 
 fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
