@@ -3072,11 +3072,12 @@ fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::
 
 fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    // A token lets a device listen and speak in the manager's room as the person: for the person
-    // and their own devices (the voice server asks for the glasses and the phone), never for an
-    // agent in a session or the manager's own.
-    if caller.is_agent() {
-        return Err(denied("A voice token is for the person's own devices, not for an agent."));
+    // A token lets a device listen and speak in the manager's room as the person: only for the
+    // person (the app, their own shell tab) and a phone this Mac paired, never for an agent in a
+    // session, the manager's own, or a program outside Glasscode (G02: the old voice server ran
+    // this for anyone holding its shared token).
+    if !voice_token_allowed(&caller.channel) {
+        return Err(denied("A voice token is only for you, in Glasscode, and the phone you paired."));
     }
     let url = settings.voice.livekit_url.trim().to_string();
     if url.is_empty() {
@@ -3276,6 +3277,14 @@ pub(crate) const OFF: &str = "The manager is off. Switch it on in Settings › M
 /// A voice token is good for this long.
 pub(crate) const TOKEN_SECS: u64 = 3600;
 
+/// Who may have a pass into the manager's voice room (G02): the person in the app or their own
+/// shell tab, and a phone this Mac paired (the gate checks the pairing). Never an agent, the
+/// manager, another machine or a program outside Glasscode.
+pub(crate) fn voice_token_allowed(channel: &glasscode_core::caller::Caller) -> bool {
+    use glasscode_core::caller::Caller as C;
+    matches!(channel, C::Ui | C::ShellTab { .. } | C::Phone { .. })
+}
+
 /// The screens `show --view` knows.
 pub(crate) const VIEWS: &[&str] = &["manager", "sessions", "today", "tickets", "usage", "settings"];
 
@@ -3432,6 +3441,26 @@ pub(crate) fn pick<'a, T>(items: &'a [T], which: &str, id: impl Fn(&T) -> &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G02: a voice pass goes to the person and a paired phone only; the old voice server ran
+    /// `manager voice-token` for anyone holding its shared token, as a terminal.
+    #[test]
+    fn voice_token_refused_to_a_terminal() {
+        use glasscode_core::caller::{Caller as C, Lane};
+        assert!(!voice_token_allowed(&C::Terminal { pid: Some(7) }));
+        assert!(!voice_token_allowed(&C::Terminal { pid: None }));
+        assert!(!voice_token_allowed(&C::Session { id: "s".into(), project: None }));
+        assert!(!voice_token_allowed(&C::Manager { lane: Lane::Chat, wake: None, project: None }));
+        assert!(!voice_token_allowed(&C::Machine { id: glasscode_core::paths::MachineId::parse("0123456789abcdef").unwrap() }));
+    }
+
+    #[test]
+    fn voice_token_for_the_person() {
+        use glasscode_core::caller::Caller as C;
+        assert!(voice_token_allowed(&C::Ui));
+        assert!(voice_token_allowed(&C::ShellTab { session: "s".into(), project: None }));
+        assert!(voice_token_allowed(&C::Phone { device: "phone-1a2b".into() }));
+    }
 
     /// The card of `data forget` says what it forgets (found in the journey run: "forget data").
     #[test]

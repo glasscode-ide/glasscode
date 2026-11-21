@@ -387,11 +387,13 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const BIND = process.env.VOICE_BIND || '0.0.0.0';
+// Loopback only (G02): off this Mac, the glasses reach Glasscode through the app's device door
+// with a paired key, never through a shared token. `VOICE_BIND` still overrides, at your risk.
+const BIND = process.env.VOICE_BIND || '127.0.0.1';
 server.listen(PORT, BIND, () => {
   console.log(`[glasscode-voice] control plane up on :${PORT}  (cli: ${CLI})`);
   console.log(`  loopback (IDE helper): http://127.0.0.1:${PORT}  — no token needed`);
-  for (const ip of lanIPs()) console.log(`  LAN (glasses):         http://${ip}:${PORT}  — token required`);
+  if (BIND !== '127.0.0.1') for (const ip of lanIPs()) console.log(`  LAN:                   http://${ip}:${PORT}  — token required`);
   console.log(`  Glasscode token: ${TOKEN}`);
   // Warm the memory from past conversations on boot.
   memory.ingest(EL_KEY, VOICE.agentId).then((r) => {

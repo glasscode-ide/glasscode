@@ -285,7 +285,7 @@ cards! {
 
     Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
     Phones in Server: "iPhone", "Phones that reach your server. Pair one with a code to scan in Glasscode for iPhone.";
-    Voice in Server: "Reach Glasscode on your network", "The glasses and the phone reach this computer over the same Wi-Fi or Tailscale, through the voice server on port 4517.";
+    Voice in Server: "The glasses", "The voice server on port 4517 answers this computer only. The glasses reach Glasscode with a device you pair, over Tailscale.";
 
     UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
     Channel in Updates: "Channel", "Beta gets new builds first.";

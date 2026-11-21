@@ -96,17 +96,12 @@ pub fn disable() -> anyhow::Result<bool> {
     Ok(false)
 }
 
-/// The Mac's voice control server (`control` channel). Port from `GLASSCODE_CONTROL_PORT`,
-/// default 4517.
-fn voice_addr() -> SocketAddr {
-    let port = std::env::var("GLASSCODE_CONTROL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4517u16);
-    SocketAddr::from(([127, 0, 0, 1], port))
-}
-
-/// Where each channel is joined locally: `control` → the voice server, `ssh` → the sshd.
+/// Where each channel is joined locally: `ssh` → the sshd. The `control` channel (the old voice
+/// server on port 4517) is closed (G02): a relayed connection reached it from loopback, where it
+/// asks for no token, so the relay's shared secret alone typed into sessions. Phones reach the
+/// Mac through its device door and the server over SSH.
 fn route(channel: &str) -> Option<SocketAddr> {
     match channel {
-        "control" | "" => Some(voice_addr()),
         "ssh" => Some(SocketAddr::from(([127, 0, 0, 1], 22))),
         _ => None,
     }
@@ -175,12 +170,15 @@ mod tests {
 
     #[test]
     fn routes_channels_to_local_ports() {
-        assert_eq!(route("control"), Some(voice_addr()));
-        assert_eq!(route(""), Some(voice_addr()));
         assert_eq!(route("ssh"), Some(SocketAddr::from(([127, 0, 0, 1], 22))));
         assert_eq!(route("anything-else"), None);
-        // control defaults to 4517 when the env var is unset.
-        assert_eq!(voice_addr().port(), std::env::var("GLASSCODE_CONTROL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4517u16));
+    }
+
+    /// G02: nothing relayed reaches port 4517, where a loopback request needs no token.
+    #[test]
+    fn relay_control_channel_is_closed() {
+        assert_eq!(route("control"), None);
+        assert_eq!(route(""), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 | Branch | `glasscode/mobile-glasses-manager` |
 | Builds on | [`manager-v2-design.md`](manager-v2-design.md) (P1 to P5, D1 to D31), [`manager-v2-slices.md`](manager-v2-slices.md) (format), [`server-sync-plan.md`](server-sync-plan.md) ("the phone is parked") |
 | Supersedes | D25's "this plan does not change `voice/` or the glasses' control API", for the parts the owner decides in section 9 |
-| Progress | G00: waiting for the owner. Nothing is built. |
+| Progress | G00 done: on 2026-11-21 the owner accepted every proposal of section 9 (O1 to O9) and asked for the whole plan to be built. Open: where the `ios/` source is (O1; G11 is written without it) and the hardware for G01 (O6). |
 
 ## Contents
 
