@@ -70,6 +70,30 @@ impl VoiceServer {
         self.status == Status::Running && self.livekit.is_some()
     }
 
+    /// End both before returning (the app is quitting: nothing runs after it): asked first, then
+    /// killed after two seconds, with what they started.
+    fn stop_now(&mut self) {
+        let children: Vec<Child> = [self.worker.take(), self.livekit.take()].into_iter().flatten().collect();
+        for child in &children {
+            terminate(child.id());
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for mut child in children {
+            while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = Command::new("/bin/kill").args(["-KILL", &format!("-{}", child.id())]).stderr(Stdio::null()).status();
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+        for name in ["worker.pid", "livekit.pid"] {
+            let _ = std::fs::remove_file(dir().join(name));
+        }
+        self.started_with = None;
+    }
+
     /// The room's address for this Mac's own helper.
     pub fn url(&self) -> String {
         format!("ws://127.0.0.1:{PORT}")
@@ -190,10 +214,40 @@ fn end_stale(pidfile: &Path, program: &str) {
     let command = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     if command.contains(program) {
         log::info!("voice: ending {program} ({pid}) left from an earlier run");
-        let _ = Command::new("/bin/kill").args(["-TERM", &format!("-{pid}")]).stderr(Stdio::null()).status();
-        let _ = Command::new("/bin/kill").args(["-TERM", &pid.to_string()]).stderr(Stdio::null()).status();
-        std::thread::sleep(Duration::from_millis(500));
+        // The worker takes TERM as "finish the calls first", which can take long: a few
+        // seconds, then it is killed.
+        for signal in ["-TERM", "-KILL"] {
+            let _ = Command::new("/bin/kill").args([signal, &format!("-{pid}")]).stderr(Stdio::null()).status();
+            let _ = Command::new("/bin/kill").args([signal, &pid.to_string()]).stderr(Stdio::null()).status();
+            for _ in 0..30 {
+                if !alive(pid) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
+}
+
+/// Whether a process still runs.
+fn alive(pid: u32) -> bool {
+    Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// The worker's files, copied out of the app into `~/.glasscode/voice/worker`: it runs from there,
+/// so an update of the app (which replaces the app's folder) never pulls them away from under it.
+fn copy_worker(from: &Path) -> Result<PathBuf, String> {
+    let to = dir().join("worker");
+    std::fs::create_dir_all(&to).map_err(|e| format!("Could not make {} ({e}).", to.display()))?;
+    let entries = std::fs::read_dir(from).map_err(|e| format!("Could not read the voice worker in {} ({e}).", from.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if (name.ends_with(".py") && !name.starts_with("test_")) || name == "requirements.txt" {
+            std::fs::copy(&path, to.join(&name)).map_err(|e| format!("Could not copy {name} of the voice worker ({e})."))?;
+        }
+    }
+    Ok(to)
 }
 
 /// The worker's Python, made the first time (and again when its requirements change).
@@ -312,7 +366,8 @@ fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
     if !talker.is_empty() && talker_key.is_none() {
         return Err("The talker's key is missing. Enter it in Settings › Manager › Voice, or set the talker to None.".into());
     }
-    let python = prepare(&plan.worker, &plan.uv)?;
+    let worker_dir = copy_worker(&plan.worker)?;
+    let python = prepare(&worker_dir, &plan.uv)?;
     let tailnet = glasscode_core::device_link::tailscale_ipv4();
 
     // LiveKit: this Mac and the tailnet only; the media goes to the tailnet address.
@@ -344,9 +399,9 @@ fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
     // The worker.
     let mut cmd = Command::new(&python);
     cmd.arg("-B")
-        .arg(plan.worker.join("worker.py"))
+        .arg(worker_dir.join("worker.py"))
         .arg("start")
-        .current_dir(&plan.worker)
+        .current_dir(&worker_dir)
         .env_clear()
         .env("HOME", &plan.home)
         .env("PATH", &plan.path)
@@ -485,7 +540,7 @@ impl Workspace {
             // However the app quits, LiveKit and the worker end with it.
             self.vserver.quit_hooked = true;
             cx.on_app_quit(|this: &mut Workspace, _| {
-                this.vserver.stop();
+                this.vserver.stop_now();
                 async {}
             })
             .detach();
