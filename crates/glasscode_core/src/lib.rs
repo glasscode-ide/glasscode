@@ -19,6 +19,7 @@ pub mod day;
 pub mod delegation;
 pub mod delivery;
 pub mod delivery_session;
+pub mod device_link;
 pub mod discover;
 pub mod effects;
 pub mod env;

@@ -251,7 +251,29 @@ fn kind_name(caller: &Caller) -> String {
 /// watch an agent's terminal, view only (`gate attach`); Today and its board, with the Mac's approvals
 /// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
 /// notifications go. No new session, no shell, no move, no sync, no other phone's key.
-pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
+///
+/// The glasses (G03): ask the manager and read its conversation (`manager.ask`, a tier-2 question;
+/// `manager.conversation`; `manager.stop`, its own answer only), where it is home
+/// (`manager.home`), and what the glasses are doing (`device.presence`). The Mac's device door
+/// keeps the same list (`device_link::allowed`), so a phone has one set of rights at both ends.
+pub const PHONE_ALLOWED: &[&str] = &[
+    "hello",
+    "state",
+    "sessions.transcript",
+    "sessions.peek",
+    "sessions.send",
+    "sessions.keys",
+    "sessions.answer",
+    "sessions.attach",
+    "today.get",
+    "today.op",
+    "phones.push_token",
+    "manager.home",
+    "manager.ask",
+    "manager.conversation",
+    "manager.stop",
+    "device.presence",
+];
 
 /// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
 /// [`PHONE_ALLOWED`]; the machine-only methods need a `Machine`; a `Machine`, the app and an
