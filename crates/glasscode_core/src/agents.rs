@@ -310,6 +310,49 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
     }
 }
 
+/// The file where Claude keeps an account's settings of each folder (its trust among them):
+/// `.claude.json` in the account's config folder, or the person's `~/.claude.json` for the login
+/// Claude had before Glasscode (never in a test: that one is the person's own).
+fn claude_config_file(account: Option<&Account>) -> Option<PathBuf> {
+    match account.and_then(Account::config_dir) {
+        Some(dir) => Some(dir.join(".claude.json")),
+        None if !paths::testing() => Some(paths::home().join(".claude.json")),
+        None => None,
+    }
+}
+
+/// Make Claude trust a worktree Glasscode made, as the person's "Yes, I trust this folder" does:
+/// its folder's `hasTrustDialogAccepted` in `file`. Best effort, and careful with a file Claude
+/// itself writes: nothing when the file is not there yet (Claude's first start writes it) or does
+/// not read as JSON, nothing when the folder is trusted already, and else one write that keeps
+/// everything else and replaces the file whole (a rename), with its permissions.
+fn ensure_claude_trusts(file: &Path, worktree: &Path) {
+    let Ok(text) = std::fs::read_to_string(file) else { return };
+    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let folder = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let Some(key) = folder.to_str() else { return };
+    let Some(top) = config.as_object_mut() else { return };
+    let projects = top.entry("projects").or_insert_with(|| serde_json::json!({}));
+    let Some(projects) = projects.as_object_mut() else { return };
+    let entry = projects.entry(key.to_string()).or_insert_with(|| serde_json::json!({}));
+    let Some(entry) = entry.as_object_mut() else { return };
+    if entry.get("hasTrustDialogAccepted").and_then(serde_json::Value::as_bool) == Some(true) {
+        return;
+    }
+    entry.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+    let Ok(out) = serde_json::to_string_pretty(&config) else { return };
+    let temp = file.with_file_name(format!(".claude.json.glasscode-{}", std::process::id()));
+    if std::fs::write(&temp, out).is_err() {
+        return;
+    }
+    if let Ok(meta) = std::fs::metadata(file) {
+        let _ = std::fs::set_permissions(&temp, meta.permissions());
+    }
+    if std::fs::rename(&temp, file).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
 /// Make Codex trust a worktree so it does not stop to ask on first use. Best effort: append
 /// the same entry a person would add by hand, and only when the file has none for the folder
 /// yet — never rewriting the file, so it cannot disturb the account's own config or block launch.
@@ -547,6 +590,14 @@ fn launch_of(
             // Versions are managed by Glasscode's approved-version list.
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
             let config_dir = account.map(Account::effective_dir);
+            // A worktree Glasscode made for the person's project, trusted up front as for Codex:
+            // Claude 2.1 asks "trust this folder?" in each new one, with "No, exit" chosen.
+            // Not for automation and quarantine sessions (trust-19): their folder's prompt stays.
+            if start && profile.is_none_or(|p| p.pretrust) && session.worktree.starts_with(paths::worktrees_dir()) {
+                if let Some(file) = claude_config_file(account) {
+                    ensure_claude_trusts(&file, &session.worktree);
+                }
+            }
             // Usage: where the status line keeps this session's limits, and the person's own
             // status line, which runs after it as before.
             env.insert("GLASSCODE_LIMITS".into(), crate::usage::limits_file(&session.id).to_string_lossy().into_owned());
@@ -1391,6 +1442,54 @@ mod tests {
         if let Some(dir) = account.config_dir() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// A worktree Glasscode made is trusted in the account's Claude config as the person's start
+    /// launches it (Claude 2.1's "trust this folder?" defaults to "No, exit"); everything else in
+    /// the file stays. Not for the argument lists, an automation session, a folder Glasscode did
+    /// not make, nor an account with no config file yet.
+    #[test]
+    fn claude_trusts_a_worktree_glasscode_made() {
+        use crate::profile::{ProfileFacts, SessionOrigin};
+        let account = Account { id: format!("claude-trust-{}", std::process::id()), agent: AgentKind::Claude, label: "Test".into(), plan: None, system_default: false };
+        let dir = account.config_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".claude.json");
+        let worktree = paths::worktrees_dir().join("app").join(format!("feat-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&worktree).unwrap();
+        let key = std::fs::canonicalize(&worktree).unwrap().to_string_lossy().into_owned();
+        let before = serde_json::json!({ "numStartups": 3, "projects": { "/other": { "allowedTools": ["Read"] } } });
+        let reset = || std::fs::write(&file, before.to_string()).unwrap();
+        let read = || serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut s = session(AgentKind::Claude, None);
+        s.worktree = worktree.clone();
+        // The argument lists write nothing; an automation session keeps its folder's prompt.
+        reset();
+        launch_args(&s, Some(&account), &HashMap::new(), None);
+        assert_eq!(read(), before);
+        let facts = ProfileFacts { worktree: worktree.clone(), ..ProfileFacts::default() };
+        let automation = crate::profile::session_profile(SessionOrigin::Automation, AgentKind::Claude, &crate::gate::ProjectPolicy::default(), &facts);
+        launch_with(&s, Some(&account), &HashMap::new(), Some(&automation));
+        assert_eq!(read(), before);
+        // The person's start trusts it, once, and keeps the rest.
+        launch_with(&s, Some(&account), &HashMap::new(), None);
+        let after = read();
+        assert_eq!(after["projects"][&key]["hasTrustDialogAccepted"], true, "{after}");
+        assert_eq!((after["numStartups"].clone(), after["projects"]["/other"].clone()), (serde_json::json!(3), serde_json::json!({ "allowedTools": ["Read"] })));
+        let person = crate::profile::session_profile(SessionOrigin::Person, AgentKind::Claude, &crate::gate::ProjectPolicy::default(), &facts);
+        launch_with(&s, Some(&account), &HashMap::new(), Some(&person));
+        assert_eq!(read(), after, "trusted once");
+        // A folder Glasscode did not make, and an account Claude never started in: untouched.
+        reset();
+        let mut own = s.clone();
+        own.worktree = std::env::temp_dir();
+        launch_with(&own, Some(&account), &HashMap::new(), None);
+        assert_eq!(read(), before);
+        std::fs::remove_file(&file).unwrap();
+        launch_with(&s, Some(&account), &HashMap::new(), None);
+        assert!(!file.exists(), "no config file is made");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&worktree);
     }
 
     /// Every Codex session starts with Codex's own update check off, new or resumed, the person's
