@@ -108,6 +108,9 @@ pub struct TicketsUi {
     pub reader_focus_due: Option<bool>,
     /// The reader's edge is being dragged: where the drag began, and the width it had (at 100 %).
     pub reader_drag: Option<(f32, f32)>,
+    /// Done shows as the other columns do (and its part of the list is open) until the person
+    /// folds it. It starts open: folded, it is a narrow strip at the board's end that reads as
+    /// a column that did not get its width.
     pub done_open: bool,
     /// Where the board is scrolled sideways.
     pub board_scroll: gpui::ScrollHandle,
@@ -212,7 +215,7 @@ impl TicketsUi {
             reader_focus: cx.focus_handle(),
             reader_focus_due: None,
             reader_drag: None,
-            done_open: false,
+            done_open: true,
             board_scroll: gpui::ScrollHandle::new(),
             column_scrolls: Default::default(),
             details: HashMap::new(),
