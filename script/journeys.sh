@@ -376,9 +376,11 @@ journey8() {
   start_app allow
   gc board add "Ship the release notes" --due tomorrow > "$T/j8-add.txt" 2>&1
   check "a task goes on the board" on_board "Ship the release notes"
-  # A program's "show Today" waits while the person is in a session; the person's own click goes.
+  # A program's "show Today" never takes the window by itself: the gate asks the person first
+  # (a program outside Glasscode may not move the window unasked, since #271/#336); the person's
+  # own click goes at once.
   gc ui open today > "$T/j8-today.txt" 2>&1
-  check "a program's \"show Today\" does not take the window from a session" grep -q "Not shown now" "$T/j8-today.txt"
+  check "a program's \"show Today\" asks the person before it takes the window" grep -q "Waiting for you to allow this" "$T/j8-today.txt"
   keys 'op:ui.open {"place":"today","go":true}'
   check "the person's Today is shown" wait_for 10 shown "today"
   keys "chat:what needs me?"
