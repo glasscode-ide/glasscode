@@ -62,7 +62,7 @@ fn profile_from_classes_only() {
 fn automation_denies_authority_and_credentials() {
     let p = profile(SessionOrigin::Automation, &ProjectPolicy::default());
     let rules = deny(&p);
-    let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(path.to_string_lossy().trim_start_matches('/')));
+    let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(super::posix(path).trim_start_matches('/')));
     for path in [paths::authority_dir(), paths::home().join(".ssh"), paths::home().join(".config").join("gh"), paths::root().join("state.json"), paths::root().join("events"), paths::root().join("journal")] {
         for tool in ["Read", "Edit"] {
             assert!(has(tool, &path), "{tool} {}", path.display());
@@ -105,10 +105,13 @@ fn memory_is_denied_to_sessions_the_person_does_not_drive() {
         let p = profile(origin, &ProjectPolicy::default());
         let deny_read: Vec<&str> = p.claude_settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(deny_read.contains(&text.as_str()), denied, "{origin:?}: the sandbox's denyRead");
-        let read_rule = deny(&p).iter().any(|r| r.starts_with("Read(//") && r.contains(text.trim_start_matches('/')));
+        // A rule has the path as Claude Code matches it (`posix`: /c/Users/… on Windows).
+        let in_rule = super::posix(&memory);
+        let in_rule = in_rule.trim_start_matches('/');
+        let read_rule = deny(&p).iter().any(|r| r.starts_with("Read(//") && r.contains(in_rule));
         assert_eq!(read_rule, denied, "{origin:?}: the Read rule");
         // Nobody writes it directly.
-        assert!(deny(&p).iter().any(|r| r.starts_with("Edit(//") && r.contains(text.trim_start_matches('/'))), "{origin:?}");
+        assert!(deny(&p).iter().any(|r| r.starts_with("Edit(//") && r.contains(in_rule)), "{origin:?}");
         let codex = session_profile(origin, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
         if origin != SessionOrigin::Person {
             assert!(codex.contains(&format!("{}=\"deny\"", json!(text))) && !codex.contains(&format!("{}=\"read\"", json!(text))), "{origin:?}: {codex}");

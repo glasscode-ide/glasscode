@@ -72,9 +72,23 @@ pub const CHECKBOX_CHECKED: &[u8] = include_bytes!("../assets/icons/checkbox-che
 pub const HANDOFF: &[u8] = include_bytes!("../assets/icons/handoff.svg");
 /// An arrow out of a box (↗), for what opens outside Glasscode (a browser, GitHub).
 pub const OPEN_OUTSIDE: &[u8] = include_bytes!("../assets/icons/open-outside.svg");
+/// For the Board's toolbar, where a narrow page shows the icon without its word: a person
+/// (assigned to me), an eye (to review), layers (both), columns (the board), a list, and a pulse
+/// (an agent is working).
+pub const USER: &[u8] = include_bytes!("../assets/icons/user.svg");
+pub const EYE: &[u8] = include_bytes!("../assets/icons/eye.svg");
+pub const LAYERS: &[u8] = include_bytes!("../assets/icons/layers.svg");
+pub const COLUMNS: &[u8] = include_bytes!("../assets/icons/columns.svg");
+pub const LIST: &[u8] = include_bytes!("../assets/icons/list.svg");
+pub const ACTIVITY: &[u8] = include_bytes!("../assets/icons/activity.svg");
+/// The manager's mark (its bubble, its panel, its name over what it says), and the two thumbs
+/// of "Useful" and "Not useful" under a nudge.
+pub const ASSISTANT: &[u8] = include_bytes!("../assets/icons/assistant.svg");
+pub const THUMB_UP: &[u8] = include_bytes!("../assets/icons/thumb-up.svg");
+pub const THUMB_DOWN: &[u8] = include_bytes!("../assets/icons/thumb-down.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 50] = [
+pub const ALL: [(&str, &[u8]); 59] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -125,6 +139,15 @@ pub const ALL: [(&str, &[u8]); 50] = [
     ("check box checked", CHECKBOX_CHECKED),
     ("hand off", HANDOFF),
     ("open outside", OPEN_OUTSIDE),
+    ("user", USER),
+    ("eye", EYE),
+    ("layers", LAYERS),
+    ("columns", COLUMNS),
+    ("list", LIST),
+    ("activity", ACTIVITY),
+    ("assistant", ASSISTANT),
+    ("thumb up", THUMB_UP),
+    ("thumb down", THUMB_DOWN),
 ];
 
 /// An icon `w`×`h` in `color`.

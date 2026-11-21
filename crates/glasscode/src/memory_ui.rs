@@ -54,15 +54,15 @@ impl Workspace {
         .detach();
     }
 
-    /// Settings › Manager › Memory: the Manager page's Memory, with the manager on or off.
-    pub(crate) fn memory_open(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        self.show_manager(window, cx);
-        self.manager_set_stage(crate::manager_view::Stage::Memory, cx);
+    /// Settings › Manager › Memory: Memory in the manager's panel on Today, with the manager on
+    /// or off.
+    pub(crate) fn memory_open(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.manager_open_stage(crate::manager_view::Stage::Memory, cx);
     }
 
     /// Each tick: the page reads memory again while it is shown.
     pub(crate) fn memory_tick(&mut self, cx: &mut Context<Self>) {
-        let shown = self.view == crate::shell::View::Manager && self.manager.stage == crate::manager_view::Stage::Memory;
+        let shown = self.assistant_docked() && self.manager.stage == crate::manager_view::Stage::Memory;
         if shown && !self.memory_page.busy && self.memory_page.loaded_at.is_none_or(|at| at.elapsed() >= AGAIN) {
             self.memory_load(cx);
         }

@@ -121,6 +121,20 @@ impl Activity {
         (self.sum(&format!("{year:04}-{month:02}-")), self.sum(&format!("{before_year:04}-{before_month:02}-")))
     }
 
+    /// This history with the conversations the person had in their agents before it starts
+    /// (`agent_history.rs`): each day before `since` gets its count, and the history then starts
+    /// at the first of them. A day Glasscode counted itself is left as it is, and nothing here is
+    /// saved: it is what Today shows.
+    pub fn with_history(&self, days: &BTreeMap<String, u32>) -> Activity {
+        let mut merged = self.clone();
+        let since = self.since.clone();
+        for (date, sessions) in days.iter().filter(|(date, n)| **n > 0 && (since.is_empty() || date.as_str() < since.as_str())) {
+            let counts = merged.day_mut(date);
+            counts.sessions = counts.sessions.saturating_add(*sessions);
+        }
+        merged
+    }
+
     fn sum(&self, prefix: &str) -> Day {
         let mut total = Day::default();
         for (_, counts) in self.days.range(prefix.to_string()..).take_while(|(date, _)| date.starts_with(prefix)) {
@@ -284,6 +298,25 @@ mod tests {
         record_session();
         assert_eq!(Activity::load().days[&today()].sessions, 1);
         assert!(file().with_extension("json.broken").is_file());
+    }
+
+    #[test]
+    fn the_agents_history_fills_only_the_days_before_the_record_starts() {
+        let mut activity = Activity::starting("2026-11-16");
+        activity.add_session("2026-11-16");
+        activity.add_session("2026-11-18");
+        let history = BTreeMap::from([("2026-09-01".to_string(), 4), ("2026-11-15".to_string(), 2), ("2026-11-16".to_string(), 9), ("2026-11-17".to_string(), 5), ("2026-10-01".to_string(), 0)]);
+        let merged = activity.with_history(&history);
+        assert_eq!(merged.since, "2026-09-01");
+        assert_eq!(merged.days["2026-09-01"].sessions, 4);
+        assert_eq!(merged.days["2026-11-15"].sessions, 2);
+        // From the first day Glasscode counted, its own count stands (a session it started is in
+        // the agents' files too).
+        assert_eq!(merged.days["2026-11-16"].sessions, 1);
+        assert!(!merged.days.contains_key("2026-11-17") && !merged.days.contains_key("2026-10-01"));
+        // The record itself is as it was.
+        assert_eq!((activity.since.as_str(), activity.days.len()), ("2026-11-16", 2));
+        assert_eq!(activity.with_history(&BTreeMap::new()), activity);
     }
 
     #[test]

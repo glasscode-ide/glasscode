@@ -197,7 +197,7 @@ pub static SETTINGS: &[Setting] = &[
     setting("general.startup", Type::Choice(&["restore", "restore_and_new_claude"]), Ask, "General", "what comes back when Glasscode opens", |s| to(s.startup), |s, v| s.startup = from(v)),
     setting("notify.needs", Type::Switch, Ask, "General", "a notice when a session needs you", |s| json!(!s.notify.needs_input_off), |s, v| s.notify.needs_input_off = !switch(v)),
     setting("notify.finished", Type::Switch, Ask, "General", "a notice when a session finishes its turn", |s| json!(!s.notify.finished_off), |s, v| s.notify.finished_off = !switch(v)),
-    setting("today.ask", Type::Switch, PersonOnly, "General", "Enter in the Today box asks the manager (off: it starts a session)", |s| json!(s.prefs.today_ask), |s, v| s.prefs.today_ask = switch(v)),
+    setting("today.ask", Type::Switch, PersonOnly, "General", "Enter in the Today box asks the manager (off: it starts a session)", |s| json!(s.prefs.today_ask.0), |s, v| s.prefs.today_ask = crate::prefs::OnUnlessOff(switch(v))),
     setting("notify.ci", Type::Switch, Ask, "General", "a notice when CI fails on one of your pull requests", |s| json!(!s.prefs.notify_ci_off), |s, v| s.prefs.notify_ci_off = !switch(v)),
     setting("notify.tickets", Type::Switch, Ask, "General", "a notice when a ticket or a review asks for you", |s| json!(!s.linear.notify_off), |s, v| s.linear.notify_off = !switch(v)),
     setting("notify.sound", Type::Switch, Free, "General", "a sound with each notice", |s| json!(!s.notify.sound_off), |s, v| s.notify.sound_off = !switch(v)),
@@ -255,6 +255,7 @@ pub static SETTINGS: &[Setting] = &[
     setting("automation.morning", Type::Switch, Ask, "Automation", "the morning update", |s| json!(!s.agents.morning_off), |s, v| s.agents.morning_off = !switch(v)),
     // Updates
     setting("updates.channel", Type::Choice(&["stable", "beta"]), PersonOnly, "Updates", "the update channel", |s| json!(if s.prefs.update_channel() == "beta" { "beta" } else { "stable" }), |s, v| s.prefs.update_channel = (word(v) == "beta").then(|| "beta".to_string())),
+    setting("updates.auto_check", Type::Switch, PersonOnly, "Updates", "look for a Glasscode update by itself", |s| json!(!s.prefs.update_check_off), |s, v| s.prefs.update_check_off = !switch(v)),
     setting("updates.install_on_quit", Type::Switch, PersonOnly, "Updates", "install an update when Glasscode quits", |s| json!(!s.prefs.install_on_quit_off), |s, v| s.prefs.install_on_quit_off = !switch(v)),
 ];
 

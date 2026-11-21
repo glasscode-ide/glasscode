@@ -28,6 +28,9 @@ members = [
 default-members = ["crates/glasscode"]
 
 [workspace.package]
+# The version of Glasscode: of the app, the console program, the core and the server daemon.
+# A release is the tag v<version> (docs/releasing.md); CHANGELOG.md says what it has.
+version = "0.1.0"
 publish = false
 edition = "2024"
 

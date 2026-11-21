@@ -2,12 +2,31 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A switch that is on until the person switches it off (only "off" is written to the file).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OnUnlessOff(pub bool);
+
+impl Default for OnUnlessOff {
+    fn default() -> Self {
+        OnUnlessOff(true)
+    }
+}
+
+impl OnUnlessOff {
+    fn is_on(&self) -> bool {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
-    /// The Today box asks the manager on Enter (Manager v2's chat, when the manager is on); off:
-    /// it starts a session, as it always did (ux-4).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub today_ask: bool,
+    /// The Today box asks the manager on Enter (Manager v2's chat, when the manager is on), and
+    /// starting a session directly is the box's second action; off: Enter starts a session, as
+    /// it did before there was a manager, and asking is the second action (ux-4). On unless the
+    /// person chose otherwise: the box is the manager's (a file from before wrote only "on").
+    #[serde(default, skip_serializing_if = "OnUnlessOff::is_on")]
+    pub today_ask: OnUnlessOff,
     /// The editor "Open in editor" and file links use: "zed", "code" or "cursor"; none: the
     /// first of Cursor, VS Code and Zed that is installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +43,9 @@ pub struct Prefs {
     /// Glasscode's release channel: "stable" (unless chosen) or "beta".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<String>,
+    /// Glasscode does not look for a new release by itself; "Check now" in Settings still does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub update_check_off: bool,
     /// A downloaded update waits for "Restart to update" instead of going in at quit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub install_on_quit_off: bool,

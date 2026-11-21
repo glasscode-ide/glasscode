@@ -248,6 +248,9 @@ fn due(at: Option<Instant>, every: Duration) -> bool {
 
 /// A glass card of the page (the owner, 2026-11-17: the page stands on the backdrop as Today
 /// does). In the light theme its soft shadow gives it the edge the white glass lacks.
+/// The width of the page's column at 100 %, in the middle of the page.
+const MAX_WIDTH: f32 = 960.;
+
 fn glass_panel() -> gpui::Div {
     backdrop::glass(theme::sz(12.)).when(theme::is_light(), |d| d.shadow_md())
 }
@@ -369,7 +372,8 @@ impl Workspace {
                     .child("Yours that are open, and the ones that ask for your review. Click one to open it on GitHub."),
             )
             .child(if busy {
-                ui::disabled_button("prs-refresh", "Refreshing…").into_any_element()
+                // The arc turns only for as long as the lists load.
+                ui::disabled_button("prs-refresh", "Refreshing…").child(crate::motion::spinner("prs-refresh-spinner", 12., theme::text_soft())).into_any_element()
             } else {
                 ui::button("prs-refresh", "Refresh")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -383,13 +387,16 @@ impl Workspace {
             .flex_col()
             .gap(theme::sz(14.))
             .w_full()
-            .max_w(theme::sz(900.))
-            .px(theme::sz(14.))
-            .pt(theme::sz(12.))
+            .max_w(theme::sz(MAX_WIDTH))
+            .px(theme::sz(20.))
+            .pt(theme::sz(16.))
             .pb(theme::sz(24.))
             .child(header);
+        // The first read of "Mine" has nothing to show yet: rows that stand for what comes.
+        let first_load = self.today.prs.is_none() && self.today.prs_loading;
         let body = match notice {
             Some(sentence) => body.child(glass_panel().px(theme::sz(14.)).py(theme::sz(12.)).text_color(theme::text_soft()).child(sentence)),
+            None if first_load => body.child(glass_panel().py(theme::sz(6.)).child(crate::motion::skeleton_rows("prs-loading", 5))),
             None => body
                 .child(self.prs_section("prs-mine", "MINE", &mine, mine_empty(self.today.prs.as_ref()), cx))
                 .child(self.prs_section("prs-asked", "ASKED OF ME", &asked, asked_empty(self.state.linear.review_prs_off, self.tickets.fetched_once, asked_failed), cx)),
@@ -406,7 +413,9 @@ impl Workspace {
             .bg(theme::bg())
             .text_color(theme::text())
             .child(layer)
-            .child(ui::scroll_area("prs-scroll", &scroll, body))
+            // The column is in the middle of the page, as on Today and in Settings: at the left
+            // edge of a wide window it left half of the page empty.
+            .child(ui::scroll_area("prs-scroll", &scroll, div().flex().justify_center().w_full().child(body)))
             .into_any_element()
     }
 
@@ -421,13 +430,16 @@ impl Workspace {
             .pb(theme::sz(8.))
             .child(ui::caps_label(title).text_color(theme::card_soft_text()))
             .when(!rows.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(rows.len().to_string())));
-        let card = glass_panel().flex().flex_col().child(heading);
-        if rows.is_empty() {
-            card.child(div().px(theme::sz(14.)).pb(theme::sz(12.)).text_color(theme::text_soft()).child(empty)).into_any_element()
-        } else {
-            // A little room under the last row, so its hover stays off the round corners.
-            card.pb(theme::sz(4.)).children(rows.iter().enumerate().map(|(i, row)| self.prs_row(id, i, row, cx))).into_any_element()
-        }
+        let card = crate::motion::fade_in(id, glass_panel().flex().flex_col().child(heading));
+        let card = card.map_element(|card| {
+            if rows.is_empty() {
+                card.child(div().px(theme::sz(14.)).pb(theme::sz(12.)).text_color(theme::text_soft()).child(empty))
+            } else {
+                // A little room under the last row, so its hover stays off the round corners.
+                card.pb(theme::sz(4.)).children(rows.iter().enumerate().map(|(i, row)| self.prs_row(id, i, row, cx)))
+            }
+        });
+        card.into_any_element()
     }
 
     fn prs_row(&self, list: &'static str, i: usize, row: &Row, cx: &mut Context<Self>) -> AnyElement {
