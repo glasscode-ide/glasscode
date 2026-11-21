@@ -319,6 +319,18 @@ impl glasscode_core::runtime::Host for DaemonHost {
         if let Some(reply) = self.act(op, _caller, false) {
             return reply;
         }
+        // A place shown on the glasses (G08): the phone that asked takes it with its next look,
+        // and only the chat may show one.
+        if op.name() == "device.open" {
+            if !matches!(_caller, caller::Caller::Manager { lane: Lane::Chat, .. }) {
+                return OpReply::Failed(OpError::new(ErrorCode::Denied, "A wake, a playbook or a schedule never shows anything on the glasses."));
+            }
+            let place = op.args.get("place").and_then(serde_json::Value::as_str).unwrap_or_default();
+            return match crate::phone_manager::show(place) {
+                Ok(said) => OpReply::Done { text: said, data: serde_json::json!({ "place": place, "shown": true }) },
+                Err(why) => OpReply::Failed(OpError::new(ErrorCode::Failed, why)),
+            };
+        }
         // A window op waits for the Mac (M57): it runs there, through its gate, when it connects.
         if op.spec.host == OpHost::Window && self.generation.is_some() {
             let id = crate::brain::queue_window_op(op);

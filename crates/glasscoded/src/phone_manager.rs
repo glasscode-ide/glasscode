@@ -34,6 +34,30 @@ static STOP: Mutex<Option<(String, Arc<AtomicBool>)>> = Mutex::new(None);
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// What each device said its glasses do, for the Mac.
 static PRESENCE: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
+/// A place the manager showed for the device whose question it answers: taken once, by that
+/// phone's next `manager.conversation`.
+static OPEN: Mutex<Option<(String, Value)>> = Mutex::new(None);
+
+/// `device.open` on the server (G08): only in answer to a phone's question being answered now.
+pub fn show(place: &str) -> Result<String, String> {
+    let device = lock(&STOP).as_ref().map(|(device, _)| device.clone()).filter(|d| !d.is_empty()).ok_or("It shows a place on the glasses only in answer to a question from them.")?;
+    let lower = place.trim().to_lowercase();
+    let data = if lower == "today" || lower == "glance" {
+        json!({ "kind": "today" })
+    } else if lower == "conversation" {
+        json!({ "kind": "conversation" })
+    } else if let Some(n) = lower.strip_prefix("pr:").or_else(|| lower.strip_prefix('#')).and_then(|n| n.trim().parse::<u64>().ok()) {
+        json!({ "kind": "pr", "number": n })
+    } else if let Some(project) = place.trim().strip_prefix("project:") {
+        json!({ "kind": "project", "title": project.trim() })
+    } else if !lower.is_empty() {
+        json!({ "kind": "session", "id": place.trim() })
+    } else {
+        return Err("device open <place>".into());
+    };
+    *lock(&OPEN) = Some((device, data));
+    Ok(format!("Shown on the glasses: {place}."))
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -107,7 +131,15 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
     let answer = match method {
         "manager.home" => Ok(home()),
         "manager.ask" => ask(caller, params),
-        "manager.conversation" => Ok(conversation(params)),
+        "manager.conversation" => Ok({
+            let mut seen = conversation(params);
+            // A place the manager showed for this phone, once.
+            let mut open = lock(&OPEN);
+            if open.as_ref().is_some_and(|(device, _)| matches!(caller, Caller::Phone { device: d } if d == device)) {
+                seen["open"] = open.take().map(|(_, data)| data).unwrap_or(Value::Null);
+            }
+            seen
+        }),
         "manager.stop" => stop(caller),
         "device.presence" => device_of(caller).map(|device| {
             let mut said = params.clone();
@@ -233,6 +265,22 @@ mod tests {
         assert_eq!(answer["elsewhere"], "mac");
         let home = dispatch(&phone, "manager.home", &json!({})).unwrap().unwrap();
         assert_eq!((home["home"].as_str(), home["here"].as_bool()), (Some("mac"), Some(false)));
+    }
+
+    #[test]
+    fn a_place_shown_reaches_the_asking_phone_once() {
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        assert!(show("pr:42").is_err(), "no question from the glasses is being answered");
+        let question = Conversation::load().post(Draft { author: Author::Person, kind: Kind::You { words: glasscode_core::words::record(glasscode_core::words::Origin::Device("phone-1a2b".into()), "open the checkout PR", None, None), reply_to: None }, text: "open the checkout PR".into(), refs: Vec::new(), topic: None }).unwrap();
+        answering(&question, Arc::new(AtomicBool::new(false)));
+        assert!(show("pr:42").is_ok());
+        let other = dispatch(&Caller::Phone { device: "phone-ffff".into() }, "manager.conversation", &json!({})).unwrap().unwrap();
+        assert!(other.get("open").is_none(), "not another phone's");
+        let seen = dispatch(&Caller::Phone { device: "phone-1a2b".into() }, "manager.conversation", &json!({})).unwrap().unwrap();
+        assert_eq!(seen["open"]["number"], 42);
+        let again = dispatch(&Caller::Phone { device: "phone-1a2b".into() }, "manager.conversation", &json!({})).unwrap().unwrap();
+        assert!(again.get("open").is_none(), "once");
+        answered(&question);
     }
 
     #[test]

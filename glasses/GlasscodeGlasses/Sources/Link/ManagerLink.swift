@@ -229,12 +229,16 @@ final class ManagerLink: ObservableObject {
 
     /// The server tells what is being written when asked: ask a few times a second.
     private func pollWriting(on carrier: Carrier, _ onUpdate: @escaping (AnswerUpdate) -> Void) -> Task<Void, Never> {
-        Task { [weak carrier] in
+        Task { [weak self, weak carrier] in
             var last = ""
             while !Task.isCancelled, let carrier {
                 try? await Task.sleep(for: .milliseconds(400))
-                guard let json = try? await carrier.call("manager.conversation", ["limit": 1], timeout: 5) as? JSON,
-                      let writing = json.object("writing"), let text = writing.string("text"), text != last else { continue }
+                guard let json = try? await carrier.call("manager.conversation", ["limit": 1], timeout: 5) as? JSON else { continue }
+                // A place the server's manager showed on the glasses.
+                if let open = json.object("open") {
+                    await MainActor.run { self?.onEvent?("device.open", open) }
+                }
+                guard let writing = json.object("writing"), let text = writing.string("text"), text != last else { continue }
                 last = text
                 await MainActor.run { onUpdate(AnswerUpdate(text: text, activity: nil, done: false)) }
             }
