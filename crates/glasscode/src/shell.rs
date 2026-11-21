@@ -473,7 +473,15 @@ impl Workspace {
         // bubble, and to the left of the open panel.
         let bubble = (self.view != View::FirstRun && self.popover.is_none()).then(|| self.render_manager_bubble(window, cx)).flatten();
         let toast_bottom = if bubble.is_some() && !self.mchat.overlay { 96. } else { 40. };
-        let toast_right = if bubble.is_some() && self.mchat.overlay { 428. } else { 16. };
+        // On Today the manager's box is at the foot of the right panel: a toast goes beside the
+        // panel, not on the box.
+        let toast_right = if bubble.is_some() && self.mchat.overlay {
+            theme::sz(428.)
+        } else if self.assistant_docked() {
+            px(self.right_width()) + theme::sz(16.)
+        } else {
+            theme::sz(16.)
+        };
         let shell = div()
             .size_full()
             .flex()
@@ -506,7 +514,7 @@ impl Workspace {
                         div()
                             .absolute()
                             .bottom(theme::sz(toast_bottom))
-                            .right(theme::sz(toast_right))
+                            .right(toast_right)
                             .max_w(theme::sz(460.))
                             .px_4()
                             .py_3()

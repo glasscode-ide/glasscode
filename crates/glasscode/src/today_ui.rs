@@ -17,7 +17,8 @@
 //! (`followups`, `messages`, `memory`: that part of the manager's tab). `sample`: made-up rows in
 //! each card (see `sample` at the end of this file). `chat`: a made-up conversation with the
 //! manager, kept in the scratch home's own store, and made-up answers to what is sent
-//! (`thinking`: an answer that is being written). `typed`: words in the start box, and the cursor
+//! (`thinking`: an answer that is being written; `long`: a long conversation). `scene`: a
+//! made-up picture the manager explains; `tour`: a made-up walk. `typed`: words in the start box, and the cursor
 //! in it. `panel`: the manager's panel over the window, on another page. `scrolled`: each card's
 //! list at its end. `end`: the page at its end. `loading`: the
 //! cards that wait for something as they are while they wait.
@@ -520,8 +521,11 @@ impl Workspace {
                             self.chat_overlay_input(cx);
                             self.mchat.overlay = true;
                         }
-                        "chat" => self.chat_debug_sample(false, cx),
-                        "thinking" => self.chat_debug_sample(true, cx),
+                        "chat" => self.chat_debug_sample(false, false, cx),
+                        "thinking" => self.chat_debug_sample(true, false, cx),
+                        "long" => self.chat_debug_sample(false, true, cx),
+                        "scene" => self.manager_debug_scene(cx),
+                        "tour" => self.manager_debug_tour(cx),
                         "sample" => {
                             self.today.debug_sample = true;
                             self.today.prs = Some(Ok(sample::pull_requests()));
@@ -1351,7 +1355,7 @@ impl Workspace {
                 .gap(theme::sz(10.))
                 .px(theme::sz(4.))
                 .pt(theme::sz(2.))
-                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "today-thread", limit: 2, compact: true, topics: false }, cx))
+                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "today-thread", limit: 2, compact: true, fold: true, topics: false }, cx))
                 .child(
                     div()
                         .flex()

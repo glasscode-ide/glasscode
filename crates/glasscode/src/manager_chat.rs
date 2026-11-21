@@ -92,6 +92,9 @@ pub struct ChatUi {
     pub today_asked: bool,
     /// The start box's placeholder as last set.
     pub placeholder: Option<String>,
+    /// The topics with something in them, newest first: (id, title). Made when the conversation
+    /// arrives, not each frame.
+    topics: Vec<(glasscode_core::conversation::TopicId, String)>,
     /// Debug builds, a screen check (`GLASSCODE_DEBUG_TODAY=chat`): a made-up answer comes to
     /// what is sent, in place of the brain's (`chat_debug_sample`).
     debug_sample: bool,
@@ -200,6 +203,14 @@ impl Workspace {
             while let Ok(conversation) = arrivals.recv().await {
                 if this.update(cx, |ws, cx| {
                     ws.mchat.items = conversation.items().into_iter().filter(|item| !matches!(item.kind, Kind::Summary { .. } | Kind::Rollover { .. })).cloned().collect();
+                    let mut topics: Vec<(glasscode_core::conversation::TopicId, String, u64)> = conversation
+                        .topics()
+                        .into_iter()
+                        .map(|topic| (topic.id.clone(), topic.title.clone(), conversation.topic_items(&topic.id).iter().map(|item| item.posted.wall_ms).max().unwrap_or(0)))
+                        .filter(|(_, _, last)| *last > 0)
+                        .collect();
+                    topics.sort_by(|a, b| b.2.cmp(&a.2));
+                    ws.mchat.topics = topics.into_iter().map(|(id, title, _)| (id, title)).collect();
                     ws.mchat.conversation = conversation;
                     // What was there when the app started, and what arrives while the chat is
                     // open or its page is shown, is seen.
@@ -777,6 +788,15 @@ impl Workspace {
         });
         let note = editing.then(|| div().text_size(theme::sz(11.5)).text_color(theme::muted()).child("Editing a queued message: Enter keeps it in its place, Esc leaves it as it was."));
         Some(div().flex().flex_col().flex_none().gap(theme::sz(6.)).children(menu).children(chip).children(note).into_any_element())
+    }
+
+    /// The conversation is on screen: what is in it is seen (the count of the bubble and of
+    /// Today's tab is of what came after).
+    pub(crate) fn chat_seen(&mut self) {
+        let newest = newest_ms(&self.mchat.conversation);
+        if self.mchat.seen_ms != Some(newest) && (self.mchat.seen_ms.is_some() || newest > 0) {
+            self.mchat.seen_ms = Some(newest);
+        }
     }
 
     /// How many items the panel's thread on Today has to show: the chosen topic's, or all.
@@ -1469,20 +1489,10 @@ impl Workspace {
     /// The topics of the panel's thread on Today: all of them, or one (M43's topics: a PR's, a
     /// session's, the general one), newest first. None while there is only one.
     pub(crate) fn render_chat_topics(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let conversation = &self.mchat.conversation;
-        let mut topics: Vec<(glasscode_core::conversation::TopicId, String, u64)> = conversation
-            .topics()
-            .into_iter()
-            .map(|topic| {
-                let last = conversation.topic_items(&topic.id).iter().map(|item| item.posted.wall_ms).max().unwrap_or(0);
-                (topic.id.clone(), topic.title.clone(), last)
-            })
-            .filter(|(_, _, last)| *last > 0)
-            .collect();
+        let topics = self.mchat.topics.clone();
         if topics.len() < 2 && self.mchat.topic.is_none() {
             return None;
         }
-        topics.sort_by(|a, b| b.2.cmp(&a.2));
         let chosen = self.mchat.topic.clone();
         let chip = |id: SharedString, label: String, on: bool, topic: Option<glasscode_core::conversation::TopicId>, cx: &mut Context<Self>| {
             div()
@@ -1509,7 +1519,7 @@ impl Workspace {
                 }))
         };
         let mut row: Vec<AnyElement> = vec![chip("chat-topic-all".into(), "All".into(), chosen.is_none(), None, cx).into_any_element()];
-        for (n, (id, title, _)) in topics.into_iter().take(12).enumerate() {
+        for (n, (id, title)) in topics.into_iter().take(12).enumerate() {
             let on = chosen.as_ref() == Some(&id);
             row.push(chip(SharedString::from(format!("chat-topic-{n}")), title, on, Some(id), cx).into_any_element());
         }
@@ -1523,9 +1533,11 @@ impl Workspace {
 pub struct ThreadView<'a> {
     pub id: &'a str,
     pub limit: usize,
-    /// A small surface (the panel over the window, under the Today box): smaller type, and long
-    /// answers start folded.
+    /// A small surface (the panel over the window, under the Today box): smaller type.
     pub compact: bool,
+    /// Long answers start folded, with "Read more" (ux-20): each item is laid out on each frame
+    /// the page draws, and Today draws ten times a second.
+    pub fold: bool,
     /// It shows the topic chosen in the assistant's panel on Today (the other mounts show all).
     pub topics: bool,
 }
@@ -1608,7 +1620,7 @@ impl Workspace {
         for row in chat::rows(&actions) {
             match row {
                 chat::Row::One(i) => {
-                    out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, says(i) && !last_said, cx));
+                    out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.fold, says(i) && !last_said, cx));
                     last_said = says(i);
                 }
                 chat::Row::Actions(run) => {
@@ -1617,7 +1629,7 @@ impl Workspace {
                     out.push(self.render_chat_run(&shown[run.clone()], first, open, &format!("{}-run-{}", view.id, from + run.start), size, cx));
                     if open {
                         for i in run {
-                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, false, cx));
+                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.fold, false, cx));
                         }
                     }
                 }
@@ -1736,7 +1748,7 @@ impl Workspace {
     }
 
     /// One item of the conversation. `named`: the manager's name stands over it.
-    fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, named: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_item(&self, item: &Item, key: &str, size: f32, fold: bool, named: bool, cx: &mut Context<Self>) -> AnyElement {
         let words = || div().text_size(theme::sz(size)).line_height(theme::sz(size * 1.5));
         // A note in the thread: what waits, what was decided, an error. As wide as the thread.
         let note = || words().flex().flex_col().flex_none().gap(theme::sz(8.)).px(theme::sz(12.)).py(theme::sz(10.)).rounded(theme::sz(12.));
@@ -1751,7 +1763,7 @@ impl Workspace {
             Kind::Manager { state } => {
                 let mut sel = crate::chat_select::Selection::default();
                 // A long answer in a small surface: its start, and "Read more" (ux-20).
-                let clipped = compact.then(|| chat::clip_long(&item.text, chat::READ_MORE_AT)).flatten();
+                let clipped = fold.then(|| chat::clip_long(&item.text, chat::READ_MORE_AT)).flatten();
                 let open = self.mchat.expanded.contains(&item.id);
                 let shown = match (&clipped, open) {
                     (Some(start), false) => start.clone(),
@@ -1898,13 +1910,14 @@ impl Workspace {
         let mut sel = crate::chat_select::Selection::default();
         let waits = turn.text.trim().is_empty();
         let body: AnyElement = if waits {
-            // It waits for the first words: the one place the panel shows motion, and only then.
+            // It waits for the first words. A still mark: a turn can last minutes, and a spinner
+            // would draw the whole window for all of it (the header's dot says "thinking" too).
             div()
                 .flex()
                 .items_center()
                 .gap(theme::sz(8.))
                 .text_color(theme::muted())
-                .child(crate::motion::spinner(SharedString::from(format!("{key}-thinking")), 13., theme::accent()))
+                .child(crate::ui::dot(theme::link()))
                 .child(if turn.stopping { "Stopping…".to_string() } else { turn.activity.clone().unwrap_or_else(|| "Thinking…".to_string()) })
                 .into_any_element()
         } else {
@@ -2006,7 +2019,7 @@ impl Workspace {
     /// folder (never the person's own: `GLASSCODE_HOME` must name one) when that store is empty,
     /// and a made-up answer to each message sent after it. `thinking`: an answer that is being
     /// written, and stays so. No name, repository or number here is a real one.
-    pub(crate) fn chat_debug_sample(&mut self, thinking: bool, cx: &mut Context<Self>) {
+    pub(crate) fn chat_debug_sample(&mut self, thinking: bool, long: bool, cx: &mut Context<Self>) {
         if !cfg!(debug_assertions) || !self.state.manager.enabled || std::env::var("GLASSCODE_HOME").map_or(true, |home| home.is_empty()) {
             return;
         }
@@ -2035,6 +2048,12 @@ Nothing else waits. Two sessions are moving without you."),
 For the import test I would start in a new worktree of `acme/app`, with the two failed runs as its first message. Say “go” and I start it."),
             Draft { author: Author::App, kind: Kind::Card { pending: "sample-decided".into() }, text: format!("{name} asked to send “The fix is pushed, please look again” to Sam Example."), refs: Vec::new(), topic: None },
         ];
+        // `long`: the same exchange many times over, to see a long thread and its earlier part.
+        let mut drafts = drafts;
+        if long {
+            let more: Vec<Draft> = (0..12).flat_map(|n| [you(&format!("And what about check {n}?")), says(&format!("Check {n} is green on `acme/app`. Nothing else changed since you last asked.\n\n- It ran {n} minutes\n- No test was skipped"))]).collect();
+            drafts.extend(more);
+        }
         self.chat_write(Box::new(move |conversation| {
             if !conversation.items().is_empty() {
                 return;

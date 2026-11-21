@@ -105,13 +105,20 @@ pub struct ManagerUi {
     pub tour_waits: bool,
     /// The picture it explains shows on Today (the person can put it away and bring it back).
     pub scene_open: bool,
+    /// Whether this build has the manager's voice helper (`manager_voice::helper_path`), looked
+    /// for in the background now and then, so Talk shows by itself once there is one; and when
+    /// it was last looked for. Without a helper there is no Talk: only the box to type in.
+    pub voice_helper: bool,
+    pub voice_looked: Option<Instant>,
+    /// The person chose Talk or Chat themselves (a helper found later does not change it).
+    pub mode_chosen: bool,
 }
 
 impl ManagerUi {
     pub fn new() -> Self {
         ManagerUi {
-            // Without a voice helper (Windows) the panel is where typing works: Chat.
-            mode: if crate::glasscode_ui::VOICE { Mode::default() } else { Mode::Chat },
+            // Typing works everywhere: Chat, until a voice helper is found (`manager_view_tick`).
+            mode: Mode::Chat,
             stage: Stage::default(),
             input: None,
             live: false,
@@ -133,9 +140,15 @@ impl ManagerUi {
             shown: (false, false),
             tour_waits: false,
             scene_open: false,
+            voice_helper: false,
+            voice_looked: None,
+            mode_chosen: false,
         }
     }
 }
+
+/// How often the voice helper is looked for.
+const VOICE_LOOK_EVERY: Duration = Duration::from_secs(30);
 
 /// How often the pull requests of managed sessions are read in full (reviewers, threads).
 const PRS_EVERY: Duration = Duration::from_secs(3 * 60);
@@ -162,6 +175,27 @@ impl Workspace {
         let mut changed = false;
         if !self.manager.prs_running && self.manager.next_prs.is_none_or(|t| at >= t) {
             self.manager_fetch_prs(cx);
+        }
+        // Is there a voice helper? A look at a few paths, off the main thread; Talk shows only
+        // while there is one, and comes by itself once one exists.
+        if self.manager.voice_looked.is_none_or(|looked| at.duration_since(looked) >= VOICE_LOOK_EVERY) {
+            self.manager.voice_looked = Some(at);
+            let task = cx.background_spawn(async { crate::manager_voice::helper_path().is_some() });
+            cx.spawn(async move |this, cx| {
+                let found = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    if ws.manager.voice_helper != found {
+                        ws.manager.voice_helper = found;
+                        // With a helper the panel opens on Talk, as its page did; without one
+                        // there is only Chat.
+                        if !found || !ws.manager.mode_chosen {
+                            ws.manager.mode = if found { Mode::Talk } else { Mode::Chat };
+                        }
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
 
         // A walk moves on when its sentence is over (and the voice has finished saying it).

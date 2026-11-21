@@ -53,9 +53,10 @@ pub struct PageUi {
 pub(crate) const TRY: [&str; 5] = ["Give me today's update", "What needs me?", "What is blocked?", "Which follow-ups are open?", "Explain what my last session changed"];
 
 /// How many items of the conversation the panel lays out: Today draws ten times a second while
-/// its backdrop moves, and each item is laid out on each frame.
-const DOCKED_ITEMS: usize = 30;
-const FLOATING_ITEMS: usize = 20;
+/// its backdrop moves, and each item is laid out on each frame (measured in a debug build: about
+/// 2 ms an item). The earlier ones are one click away ("Show earlier messages").
+const DOCKED_ITEMS: usize = 12;
+const FLOATING_ITEMS: usize = 12;
 /// The panel over the window, at 100 %: no wider and no higher than this, and never more than
 /// the window has room for.
 const FLOAT_WIDTH: f32 = 400.;
@@ -841,7 +842,9 @@ impl Workspace {
             self.chat_overlay_input(cx);
         }
         let stage = if docked { self.manager.stage } else { Stage::Chat };
-        let talk = docked && crate::glasscode_ui::VOICE && self.manager.mode == Mode::Talk;
+        // What is on screen is seen: the count on the bubble and on the tab starts again.
+        self.chat_seen();
+        let talk = docked && self.manager.voice_helper && self.manager.mode == Mode::Talk;
         let input = if docked { self.manager.input.clone() } else { self.mchat.overlay_input.clone() };
         let typing = input.as_ref().is_some_and(|input| input.read(cx).focus_handle_clone().is_focused(window));
         let body = match stage {
@@ -944,6 +947,7 @@ impl Workspace {
         let mode = |id: &'static str, mode: Mode, label: &'static str, cx: &mut Context<Self>| {
             ui::segment(id, m.mode == mode, label).h(theme::sz(24.)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.manager.mode = mode;
+                this.manager.mode_chosen = true;
                 this.manager.page.chat_scroll.scroll_to_bottom();
                 cx.notify();
             }))
@@ -954,8 +958,9 @@ impl Workspace {
                 .flex_none()
                 .items_center()
                 .gap(theme::sz(2.))
-                // Talk needs the voice helper, which is a macOS program.
-                .when(crate::glasscode_ui::VOICE, |d| d.child(ui::segmented().child(mode("manager-mode-talk", Mode::Talk, "Talk", cx)).child(mode("manager-mode-chat", Mode::Chat, "Chat", cx))))
+                // Talk needs the manager's voice helper: the choice shows only while this build
+                // has one (looked for while the app runs, not decided by the system).
+                .when(m.voice_helper, |d| d.child(ui::segmented().child(mode("manager-mode-talk", Mode::Talk, "Talk", cx)).child(mode("manager-mode-chat", Mode::Chat, "Chat", cx))))
                 .child(header_button("manager-settings", icons::GEAR, "Manager settings").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))
         } else {
             div()
@@ -1062,7 +1067,7 @@ impl Workspace {
     /// The conversation and its box.
     fn assistant_chat(&self, docked: bool, input: Option<gpui::Entity<TextInput>>, typing: bool, cx: &mut Context<Self>) -> AnyElement {
         let limit = DOCKED_ITEMS + self.manager.page.earlier;
-        let view = if docked { ThreadView { id: "manager-thread", limit, compact: false, topics: true } } else { ThreadView { id: "overlay-thread", limit: FLOATING_ITEMS, compact: true, topics: false } };
+        let view = if docked { ThreadView { id: "manager-thread", limit, compact: false, fold: true, topics: true } } else { ThreadView { id: "overlay-thread", limit: FLOATING_ITEMS, compact: true, fold: true, topics: false } };
         // The conversation is longer than what is laid out: the earlier part is one click away.
         let earlier = (docked && self.chat_items_shown() > limit).then(|| {
             div().flex().justify_center().child(crate::manager_chat::quiet_action("manager-earlier".into(), icons::CHEVRON_DOWN, "Show earlier messages").role(gpui::Role::Button).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1582,6 +1587,53 @@ impl Workspace {
                 .children(dots)
                 .into_any_element(),
         )
+    }
+}
+
+impl Workspace {
+    /// Debug builds, a screen check (`GLASSCODE_DEBUG_TODAY=scene`): a made-up picture, as the
+    /// manager would explain one. No name in it is a real one.
+    pub(crate) fn manager_debug_scene(&mut self, cx: &mut Context<Self>) {
+        use glasscode_core::manager::{Scene, SceneEdge, SceneKind, SceneNode, SceneStep};
+        if !cfg!(debug_assertions) || !self.state.manager.enabled {
+            return;
+        }
+        let node = |id: &str, label: &str, note: &str| SceneNode { id: id.into(), label: label.into(), note: note.into() };
+        let edge = |from: &str, to: &str, label: &str, bad: bool| SceneEdge { from: from.into(), to: to.into(), label: label.into(), bad };
+        let step = |say: &str, nodes: &[&str], edges: &[usize]| SceneStep { say: say.into(), nodes: nodes.iter().map(|n| n.to_string()).collect(), edges: edges.to_vec(), ..SceneStep::default() };
+        let scene = Scene {
+            title: "How the import test fails".into(),
+            kind: SceneKind::Flow,
+            nodes: vec![node("test", "import test", "Windows only"), node("cache", "build cache", "old key"), node("file", "large file", "2 GB"), node("fix", "retry with backoff", "acme/app#48")],
+            edges: vec![edge("test", "cache", "reads", false), edge("cache", "file", "times out", true), edge("fix", "cache", "replaces", false)],
+            steps: vec![
+                step("The import test reads the build cache.", &["test", "cache"], &[0]),
+                step("With the old key the cache asks for the large file again, and that times out.", &["file"], &[1]),
+                step("The fix in acme/app#48 retries with a backoff in place of the old read.", &["fix"], &[2]),
+            ],
+            ..Scene::default()
+        };
+        self.manager_play(scene, cx);
+        // The second step, and no moving on by itself: the picture stands still for the check.
+        if let Some(play) = self.manager.scene.as_mut() {
+            play.step = 1;
+            play.next_at = None;
+        }
+    }
+
+    /// Debug builds, a screen check (`GLASSCODE_DEBUG_TODAY=tour`): a made-up walk of three
+    /// stops, standing at its second.
+    pub(crate) fn manager_debug_tour(&mut self, cx: &mut Context<Self>) {
+        use glasscode_core::manager::{Show, TourStop};
+        if !cfg!(debug_assertions) || !self.state.manager.enabled {
+            return;
+        }
+        let stop = |say: &str| TourStop { show: Show::default(), say: say.into() };
+        let far = Instant::now() + std::time::Duration::from_secs(3600);
+        self.manager.tour = Some(crate::manager_view::Tour { stops: vec![stop("Two sessions moved on by themselves."), stop("The checks of the settings page fail on one test."), stop("Nothing else needs you today.")], index: 1, next_at: far });
+        self.manager.caption = "The checks of the settings page fail on one test.".into();
+        self.manager.caption_until = Some(far);
+        cx.notify();
     }
 }
 
