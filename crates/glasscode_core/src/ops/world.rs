@@ -223,6 +223,10 @@ pub fn find_task(board: &Board, outside: &[Outside], word: &str, person: bool) -
     }
 }
 
+/// The ops that act on one of this machine's sessions (their handlers look it up and, with none,
+/// would do nothing): the session must be there.
+const ON_A_SESSION: &[&str] = &["session.open", "session.close", "session.restart", "session.rename", "session.send"];
+
 /// What an op touches: the projects, sessions, repositories and folders its words name, resolved
 /// here from ids, and whether anything leaves this machine. The words are resolved as the op's
 /// handler resolves them, so an op whose words name nothing fails here as it fails there.
@@ -233,6 +237,12 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
     if op.spec.args.iter().any(|a| a.name == "session" && a.kind == super::ArgKind::Session)
         && let Some(id) = op.text("session")
     {
+        // An op that acts on one of this machine's sessions names one there. A button's, a tool's
+        // or a debug key's op is not parsed, so its id may name none: the handler then did
+        // nothing and said "Closed “”" (the live checks: `session.close` with an id's start).
+        if ON_A_SESSION.contains(&name) && !world.sessions.iter().any(|s| s.id == id) {
+            return Err(OpError::new(ErrorCode::NotFound, format!("No session “{id}”. `glasscode session list` shows them, by their whole ids.")));
+        }
         found.session(id);
     }
     // A project it names, or the one it is for.
@@ -474,6 +484,28 @@ mod tests {
     }
 
     /// A target is the project its session or worktree is in, never the one the caller says
+    /// A button's, a tool's or a debug key's op is not parsed: an id that names no session (the
+    /// start of one, a title) is not found, rather than closed with nothing closed.
+    #[test]
+    fn an_op_on_a_session_names_one_that_is_there() {
+        for name in ON_A_SESSION {
+            let mut args = serde_json::json!({ "session": "8765f51a" });
+            if *name == "session.rename" {
+                args["name"] = serde_json::json!("New");
+            }
+            if *name == "session.send" {
+                args["message"] = serde_json::json!("hi");
+            }
+            let short = crate::ops::typed(name, args.clone()).unwrap();
+            let refused = targets(&short, &world(true)).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::NotFound, "{name}: {}", refused.text);
+            assert!(refused.text.contains("No session “8765f51a”"), "{name}: {}", refused.text);
+            args["session"] = serde_json::json!(APP_SESSION);
+            let whole = crate::ops::typed(name, args).unwrap();
+            assert_eq!(targets(&whole, &world(true)).unwrap().sessions, [APP_SESSION.to_string()], "{name}");
+        }
+    }
+
     /// (trust-3): not `--project`, not the project a server session claims.
     #[test]
     fn targets_never_trust_caller_project() {
