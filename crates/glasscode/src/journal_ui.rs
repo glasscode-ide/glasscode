@@ -986,8 +986,16 @@ impl Workspace {
             .iter_mut()
             .flat_map(|(id, turns)| turns.machine.feed(now, &Signal::AppQuit).into_iter().filter_map(move |c| if let Change::Closed(closed) = c { Some((id.clone(), closed)) } else { None }))
             .collect();
+        // Read from each transcript at once: a quit cannot wait for the background.
         for (id, closed) in cut {
-            self.journal_turn_closed(&id, closed, None);
+            match self.state.session(&id).cloned() {
+                Some(session) => {
+                    let key = self.journal_key(&id);
+                    let report = turns::report_now(&session.id, session.agent, session.transcript_path.as_deref(), &closed, &session.worktree);
+                    self.journal_note(turns::ended_event(key.as_ref(), &report));
+                }
+                None => self.journal_turn_closed(&id, closed, None),
+            }
         }
         self.journal_note(Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": running })));
         if let Err(err) = self.journal.cursors.save() {
@@ -1093,6 +1101,7 @@ impl Workspace {
             .sessions
             .iter()
             .map(|s| reconcile::SessionNow {
+                starting: self.launched_recently(&s.id, std::time::Duration::from_secs(reconcile::STARTING_SECS)),
                 id: s.id.clone(),
                 project: self.control.project_keys.get(&s.project_id).cloned(),
                 running: self.terminals.contains_key(&s.id),
@@ -1104,9 +1113,22 @@ impl Workspace {
                 }),
             })
             .collect();
-        // Only once git listed every project's worktrees: an unread list is not an empty one.
-        let read = self.state.projects.iter().all(|p| self.worktrees_read.contains(&p.id));
-        let worktrees = read.then(|| self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| (self.control.project_keys.get(project).cloned(), w.path.clone()))).collect());
+        // Each project's list as git last read it: one that is not read waits alone.
+        let worktrees = Some(
+            self.state
+                .projects
+                .iter()
+                .map(|p| reconcile::ProjectWorktrees {
+                    project: self.control.project_keys.get(&p.id).cloned(),
+                    name: p.name.clone(),
+                    list: match self.worktree_reads.get(&p.id) {
+                        Some(Ok(())) => Ok(self.worktrees.get(&p.id).map(|list| list.iter().map(|w| w.path.clone()).collect()).unwrap_or_default()),
+                        Some(Err(why)) => Err(Some(why.clone())),
+                        None => Err(None),
+                    },
+                })
+                .collect(),
+        );
         reconcile::Snapshot { sessions, worktrees }
     }
 
@@ -1201,11 +1223,8 @@ pub(crate) fn scope_of(ws: &Workspace, caller: &Caller) -> Scope {
             let project = caller.cwd.as_ref().and_then(|cwd| ws.state.projects.iter().filter(|p| cwd.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len())).and_then(|p| key_of_project(&p.id));
             Scope::Projects(project.into_iter().collect())
         }
-        // D17: not a project bound to another account than the manager's.
-        Channel::Manager { .. } => {
-            let set = ws.control_policy_set();
-            Scope::Projects(ws.control.project_keys.values().filter(|key| set.manager_may_read(key)).cloned().collect())
-        }
+        // Not a project the person turned off for the manager, nor one bound to another account (D17).
+        Channel::Manager { .. } => Scope::manager(&ws.control.project_keys, &ws.state.manager.off_projects, &ws.control_policy_set()),
         other => Scope::of(other, &[]),
     }
 }

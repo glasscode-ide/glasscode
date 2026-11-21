@@ -48,9 +48,13 @@ pub(super) const OPS: &[OpSpec] = &[
     OpSpec {
         name: "data.import",
         cli: &["data", "import"],
-        summary: "import an export: memory merged entry by entry, project keys, cited words; policies set aside to approve again",
-        args: &[ArgSpec { name: "from", kind: ArgKind::Text, required: true, help: "the export's tar file", at: At::Rest(0), missing: "data import <file.tar>", default: None }],
-        examples: &["data import <file.tar>"],
+        summary: "import an export: memory merged entry by entry, new project keys, cited words; policies set aside to approve again",
+        args: &[
+            ArgSpec { name: "from", kind: ArgKind::Text, required: true, help: "the export's tar file", at: At::Rest(0), missing: "data import <file.tar>", default: None },
+            option("dry_run", ArgKind::Switch, &["dry-run"], "only say what it would bring, and what it would add to project keys you have"),
+            option("confirm", ArgKind::Many, &["confirm"], "a project key you have that may take the export's remotes and folders; may be given more than once"),
+        ],
+        examples: &["data import <file.tar>", "data import <file.tar> [--dry-run] [--confirm <key>]…"],
         ..DATA
     },
     OpSpec {

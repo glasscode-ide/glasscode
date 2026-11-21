@@ -1194,8 +1194,22 @@ fn file_read(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     // The managed projects' folders and their worktrees; a hidden project's are not.
     let mut roots: Vec<PathBuf> = ws.state.projects.iter().filter(|p| !ws.state.is_hidden(&p.id)).map(|p| p.root.clone()).collect();
     roots.extend(ws.worktrees.iter().filter(|(project, _)| !ws.state.is_hidden(project)).flat_map(|(_, list)| list.iter().map(|w| w.path.clone())));
+    // A session the person does not drive reads as its sandbox does: its own worktree and its
+    // project's folder, never another worktree. One the app has no record of reads nothing.
+    let mut kept_out: Vec<PathBuf> = Vec::new();
+    if let glasscode_core::caller::Caller::Session { id, .. } = &caller.channel {
+        let known = ws.state.session(id).cloned();
+        if known.is_none() || ws.control.authority.origin(id) != glasscode_core::gate::SessionOrigin::Person {
+            let mut worktrees: Vec<PathBuf> = ws.worktrees.values().flat_map(|list| list.iter().map(|w| w.path.clone())).collect();
+            worktrees.extend(ws.state.sessions.iter().map(|s| s.worktree.clone()));
+            (roots, kept_out) = match &known {
+                Some(session) => reads::session_reach(&session.worktree, ws.state.project(&session.project_id).map(|p| p.root.as_path()), &worktrees),
+                None => (Vec::new(), Vec::new()),
+            };
+        }
+    }
     read_off_main("read".into(), move || {
-        let text = reads::file_read(&path, &roots)?;
+        let text = reads::file_read_kept(&path, &roots, &kept_out)?;
         Ok((reads::as_data(&format!("The file {}", path.display()), &text), json!({ "path": path, "text": text })))
     })
 }

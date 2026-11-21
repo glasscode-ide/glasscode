@@ -79,6 +79,22 @@ pub fn no_agents() -> bool {
     cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
 }
 
+impl Workspace {
+    /// The app started this session's agent less than `within` ago.
+    pub(crate) fn launched_recently(&self, id: &str, within: Duration) -> bool {
+        self.launched_at.get(id).and_then(|at| at.elapsed().ok()).is_some_and(|since| since < within)
+    }
+}
+
+/// The state of a session whose agent ended while its terminal stays open (`session list`): it
+/// ended (exit 0), or it crashed (another status, or a signal). It is not "idle": nothing runs.
+pub fn exit_word(status: Option<i32>) -> &'static str {
+    match status {
+        Some(0) => "ended",
+        _ => "crashed",
+    }
+}
+
 /// Whether a session's program may start: a shell always, Claude and Codex unless `no_agents`.
 pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
@@ -130,12 +146,15 @@ pub struct Workspace {
     /// Claude sessions that wait on a question before Claude starts: their NeedsInput is ours.
     startup_waits: HashSet<String>,
     launched_at: HashMap<String, SystemTime>,
+    /// Sessions whose agent ended while its terminal stays open: its exit status (none: a signal).
+    pub exits: HashMap<String, Option<i32>>,
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
     pub worktrees: HashMap<String, Vec<Worktree>>,
-    /// The projects whose worktrees git listed at the last read (`refresh_worktrees`): an unread
-    /// or failed list is empty in `worktrees`, and the reconciler must not take it for one.
-    pub worktrees_read: HashSet<String>,
+    /// How git's last read of each project's worktrees went (`refresh_worktrees`): read, or why
+    /// not; none yet just after a start. An unread or failed list is empty in `worktrees`, and the
+    /// reconciler must not take it for one.
+    pub worktree_reads: HashMap<String, Result<(), String>>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
     pub right_tab: RightTab,
@@ -297,10 +316,11 @@ impl Workspace {
             hooked: HashSet::new(),
             startup_waits: HashSet::new(),
             launched_at: HashMap::new(),
+            exits: HashMap::new(),
             activity: HashMap::new(),
             attention: HashSet::new(),
             worktrees: HashMap::new(),
-            worktrees_read: HashSet::new(),
+            worktree_reads: HashMap::new(),
             changes: Vec::new(),
             changes_for: None,
             right_tab,
@@ -1220,6 +1240,7 @@ impl Workspace {
                 }
                 TerminalEvent::Exited(status) => {
                     this.activity.remove(&id);
+                    this.exits.insert(id.clone(), *status);
                     this.journal_turn_exit(&id, *status, cx);
                 }
                 TerminalEvent::TitleChanged => {}
@@ -1231,6 +1252,7 @@ impl Workspace {
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
         self.journal_tail_started(session_id);
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
+        self.exits.remove(session_id);
         if crate::platform::chat_status_fixes() {
             // A new launch: Claude's first hook event is still to come.
             self.hooked.remove(session_id);
@@ -1559,7 +1581,7 @@ impl Workspace {
             .collect();
         let task = cx.background_spawn(async move {
             let lists: Vec<(String, anyhow::Result<Vec<Worktree>>)> = projects.into_iter().map(|(id, root)| (id, git::worktrees(&root))).collect();
-            let read: HashSet<String> = lists.iter().filter(|(_, list)| list.is_ok()).map(|(id, _)| id.clone()).collect();
+            let read: HashMap<String, Result<(), String>> = lists.iter().map(|(id, list)| (id.clone(), list.as_ref().map(|_| ()).map_err(glasscode_core::git::short_error))).collect();
             (lists.into_iter().map(|(id, list)| (id, list.unwrap_or_default())).collect::<HashMap<_, _>>(), read)
         });
         cx.spawn(async move |this, cx| {
@@ -1578,7 +1600,7 @@ impl Workspace {
                     }
                 }
                 this.worktrees = result;
-                this.worktrees_read = read;
+                this.worktree_reads = read;
                 if changed {
                     this.save();
                 }
@@ -2221,6 +2243,16 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent that ended is not "idle" in `session list` (the live checks: killed sessions
+    /// listed as idle).
+    #[test]
+    fn an_ended_agent_is_ended_or_crashed() {
+        assert_eq!(exit_word(Some(0)), "ended");
+        assert_eq!(exit_word(Some(129)), "crashed", "SIGHUP's status, as Claude exits on a closed terminal");
+        assert_eq!(exit_word(Some(1)), "crashed");
+        assert_eq!(exit_word(None), "crashed", "killed by a signal");
+    }
 
     /// `GLASSCODE_DEBUG_NO_AGENTS` stops Claude and Codex, never a shell.
     #[test]

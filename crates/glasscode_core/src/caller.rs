@@ -100,6 +100,14 @@ impl Caller {
     }
 }
 
+/// Whether `caller` may have a voice token for the manager's room (`manager.voice_token`): one
+/// lets a device listen and speak there as the person, so only the person in the app and a device
+/// they paired get one; never a session, the manager, a command in a shell tab or a program
+/// outside Glasscode (which any session can pass for).
+pub fn may_have_voice_token(caller: &Caller) -> bool {
+    matches!(caller, Caller::Ui | Caller::Phone { .. })
+}
+
 /// How a request reached the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Channel {
@@ -676,6 +684,23 @@ mod tests {
         }
         // A server session is its own follower, not the Mac session of the same id.
         assert!(!Caller::Session { id: "server:s1".into(), project: None }.may_follow(&a.follower()));
+    }
+
+    /// A voice token speaks as the person in the manager's room: the app's window and a paired
+    /// device only.
+    #[test]
+    fn only_the_person_in_the_app_or_a_device_gets_a_voice_token() {
+        assert!(may_have_voice_token(&Caller::Ui) && may_have_voice_token(&Caller::Phone { device: "phone-1a2b".into() }));
+        for other in [
+            Caller::Terminal { pid: Some(7) },
+            Caller::Terminal { pid: None },
+            Caller::Session { id: "s1".into(), project: None },
+            Caller::ShellTab { session: "s1".into(), project: None },
+            Caller::Manager { lane: Lane::Chat, wake: None, project: None },
+            Caller::Machine { id: MachineId::parse("0123456789abcdef").unwrap() },
+        ] {
+            assert!(!may_have_voice_token(&other), "{other:?}");
+        }
     }
 
     #[test]

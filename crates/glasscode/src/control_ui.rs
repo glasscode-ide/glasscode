@@ -722,6 +722,13 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
     }
 }
 
+/// The heading of a card that waits for the person: who asks ("A program outside Glasscode asks
+/// you"), or, for what the person asked themselves (a `glasscode` line in a shell tab), a check of
+/// their own request, never "You asks you".
+pub(crate) fn card_title(caller: &Caller) -> String {
+    if caller.is_person() { "Confirm your request".to_string() } else { format!("{} asks you", caller.who) }
+}
+
 fn shell_line(args: &[String]) -> String {
     let words: Vec<String> = args
         .iter()
@@ -1143,6 +1150,40 @@ impl Workspace {
 
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
+    /// Mark a session quarantined before its agent first starts (D27): it was started for a
+    /// pull request's text by an author who is not trusted, so it runs under the quarantine profile
+    /// for its whole life, whoever started it.
+    pub(crate) fn control_mark_quarantined(&mut self, id: &str, by: &str) {
+        let now = glasscode_core::clock::now_ms();
+        let origins = self.control.authority.origins.get_or_insert_with(Default::default);
+        if !origins.mark(id, gate::SessionOrigin::Quarantine, by, now) {
+            return;
+        }
+        let (id, by) = (id.to_string(), by.to_string());
+        std::thread::spawn(move || {
+            if let Err(err) = gate::mark_session(&id, gate::SessionOrigin::Quarantine, &by) {
+                log::warn!("gate: could not record {id} as quarantined: {err}");
+            }
+        });
+    }
+
+    /// The person's own GitHub logins, and the teammates they confirmed: whose text is trusted
+    /// (`gate::trusted_author`, D27).
+    pub(crate) fn control_trusted_logins(&self) -> (Vec<String>, Vec<String>) {
+        let mut me: Vec<String> = self.manager.me.iter().cloned().collect();
+        me.extend(self.github.list.iter().flatten().map(|a| a.login.clone()));
+        let confirmed = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+        (me, confirmed)
+    }
+
+    /// Quarantine `id` when it was started for a pull request by an author who is not trusted.
+    pub(crate) fn control_quarantine_for(&mut self, id: &str, author: &str, association: Option<&str>) {
+        let (me, confirmed) = self.control_trusted_logins();
+        if glasscode_core::gate::origin_for_input(gate::SessionOrigin::Person, author, association, &me, &confirmed) == gate::SessionOrigin::Quarantine {
+            self.control_mark_quarantined(id, &format!("untrusted:{author}"));
+        }
+    }
+
     pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
         if caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
             return;
@@ -1821,7 +1862,7 @@ impl Workspace {
             sink.send(&Reply::Waiting { approval: id, summary: summary.clone() });
         }
         let agent = approval.caller.agent.unwrap_or(AgentKind::Claude);
-        let title = format!("{} asks you", approval.caller.who);
+        let title = card_title(&approval.caller);
         let body = match &approval.why {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
@@ -2262,6 +2303,15 @@ mod tests {
 
     /// A card the server asked says it is the server's: its words (who, what, why) are the
     /// server's to write, so the person knows whose they read. One asked here is as it says.
+    /// The person's own request (a `glasscode` line in a shell tab) is never "You asks you"; a
+    /// program's says who asks.
+    #[test]
+    fn a_card_of_the_persons_own_request_is_worded_for_them() {
+        assert_eq!(card_title(&Caller::you()), "Confirm your request");
+        let program = Caller { who: "A program outside Glasscode".into(), channel: caller::Caller::Terminal { pid: Some(1) }, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None };
+        assert_eq!(card_title(&program), "A program outside Glasscode asks you");
+    }
+
     #[test]
     fn a_server_card_says_it_is_from_the_server() {
         assert_eq!(card_who("The manager on the server", Some("devbox")), "The manager on the server, from devbox");

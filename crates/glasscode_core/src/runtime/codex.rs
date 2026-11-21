@@ -77,6 +77,24 @@ pub fn parse_line(line: &str, said: &mut String) -> Vec<Update> {
     }
 }
 
+/// What Settings › Manager says of Codex as the manager's brain, and why choosing it is refused,
+/// when this Codex shows the brain tools Glasscode cannot switch off.
+pub const BRAIN_BLOCKED: &str = "Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off).";
+
+/// The Codex versions whose brain keeps tools that no flag turns off. Codex 0.167.0 keeps its five
+/// `multi_agent_v1__*` sub-agent tools under `--disable multi_agent`, `-c features.multi_agent=false`,
+/// `--disable multi_agent_v2`, `--disable collaboration_modes` and `--disable
+/// deferred_tool_world_state` (`--disable multi_agent_v1` is no feature): the live checks of
+/// 2026-11-20 and 21, `ALL_TOOLS` read in a live run.
+const BLOCKED_VERSIONS: &[&str] = &["0.167.0"];
+
+/// Whether this Codex (its version as `codex --version` says it, "codex-cli 0.167.0" or "0.167.0")
+/// is known to keep tools the brain's check refuses: it fails closed at its first question, so
+/// Settings says so before the person picks it.
+pub fn brain_blocked(version: Option<&str>) -> bool {
+    version.and_then(|v| v.split_whitespace().last()).is_some_and(|v| BLOCKED_VERSIONS.contains(&v))
+}
+
 /// The tools Codex's code mode shows the model besides Glasscode's: `exec` (a JavaScript isolate
 /// with no file system or network of its own), `wait`, `request_user_input`, and `apply_patch` and
 /// `view_image`, which the read-only sandbox keeps from writing (P02); and Codex's readers of MCP
@@ -326,6 +344,12 @@ mod tests {
         let end = parse_line(r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":7}}"#, &mut said);
         assert_eq!(end, vec![Update::Usage(Usage { input: 40, output: 7, cache_read: 60, cache_write: 0 }), Update::Ended(TurnEnd::Answered("Two sessions run.".into()))]);
         assert_eq!(parse_line(r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#, &mut said), vec![Update::Ended(TurnEnd::Failed("usage limit reached".into()))]);
+    }
+
+    #[test]
+    fn a_codex_known_to_keep_agent_tools_cannot_be_the_brain() {
+        assert!(brain_blocked(Some("0.167.0")) && brain_blocked(Some("codex-cli 0.167.0")));
+        assert!(!brain_blocked(Some("0.171.0")) && !brain_blocked(None), "a version not known to keep them is checked at its first question");
     }
 
     #[test]

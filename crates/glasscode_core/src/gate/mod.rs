@@ -188,6 +188,13 @@ pub fn trusted_author(login: &str, association: Option<&str>, person: &[String],
     matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
 }
 
+/// The origin of a session started for a pull request's text by `author` (D27): quarantine when
+/// the author is not trusted ([`trusted_author`]), whoever starts it, the person included, as its
+/// text is a stranger's; else `started`. An origin is never lowered.
+pub fn origin_for_input(started: SessionOrigin, author: &str, association: Option<&str>, person: &[String], confirmed: &[String]) -> SessionOrigin {
+    if trusted_author(author, association, person, confirmed) { started } else { SessionOrigin::Quarantine }
+}
+
 /// An op group's key in a policy: `session_start`.
 pub fn group_key(group: OpGroup) -> &'static str {
     match group {
