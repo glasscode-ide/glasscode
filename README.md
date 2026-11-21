@@ -252,7 +252,7 @@ and another person builds the Mac version.
 | `crates/glasscode_core` | All non-UI logic: agents, git/GitHub, board, sync, CLI; operating system code in `sys/` |
 | `crates/glasscoded` | The Linux server daemon that hosts handed-off sessions |
 | `relay/` | Optional self-hosted relay, to reach the Mac or a server from any network |
-| `glasses/` | The iPhone app that puts your sessions on Meta Ray-Ban Display glasses |
+| `glasses/` | The iPhone app for Meta Ray-Ban Display glasses: talk to the manager from them |
 | `voice/` | The voice control server, the Mac helpers, and the manager's voice worker (`voice/manager/`) |
 | `vendor/` | Vendored [Zed](https://github.com/zed-industries/zed) GPUI crates (Apache-2.0) |
 | `script/` | Build, bundle, and release scripts |

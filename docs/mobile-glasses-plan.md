@@ -61,7 +61,7 @@
 - **Chat** (M52): every question goes through `manager_chat.rs` into one conversation (`~/.glasscode/manager/conversation/`), by topic. Session and PR references become chips; "Show me" chips move the window when accepted. The focus is a `ui.state` snapshot taken when the message is sent.
 - **Whose words** (D1): composer text is tier 1. Device and voice input are tier 2. Tier 2 cannot back a chat grant (D3), and a spoken "yes" never binds.
 - **Navigation and acts** are registry ops: `ui.open`, `ui.panel`, `ui.state`, `session.open`, `worktree.open` (Window host), `session.send`, `session.answer`, `session.keys`, `session.new`, `pr.view`, `pr.checks`, `pr.diff`, `approvals.list`, `approvals.decide`.
-- **Who is home when you walk away.** Under Automatic with a server paired, the Mac is home only while the person was present at it for a minute (`home::mac_should_be_home`, `PRESENT_FOR_MS`; presence is the Mac's own input). So away from the desk **the server is normally home**, even with the Mac awake. The server's manager acts only on the server's own sessions: for a Mac session every op but a window op answers "runs on the Mac; the server has no handler for it yet" (`brain_host.rs`, `run_op`), and window ops wait for the Mac.
+- **Who is home when you walk away.** Under Automatic with a server paired, the Mac *claims* home only after the person was present at it for a minute (`home::mac_should_be_home`, `PRESENT_FOR_MS`; presence is the Mac's own input), and then *keeps* it while it stays awake and reaches the server (a renewal needs no presence). It loses it on sleep, so after a wake the server is home until the person is back at the Mac. The server's manager acts only on the server's own sessions: for a Mac session every op but a window op answers "runs on the Mac; the server has no handler for it yet" (`brain_host.rs`, `run_op`), and window ops wait for the Mac.
 - **The server as home** (M57, M58): glasscoded's chat lane answers the newest unanswered message in the synced conversation, checking every 2 seconds, and posts the answer when it is complete (no streaming). The phone has no way to post a question there: `manager.*` is not in `PHONE_ALLOWED`, and nothing tells a phone where the manager is home (`state` does not say; `home.*` is machine-only).
 - **Voice**: the LiveKit room (`voice/manager`) turns speech into text and back; the device that heard a sentence asks the brain. Its token is a Window op: the LiveKit keys are in the Mac's Keychain, so no token can be made while the Mac sleeps. No real speech service has been tried.
 
@@ -104,7 +104,7 @@ Each flow starts with the glasses on, the app connected, and the manager on. "Pi
 **F8. A card that needs you.** "Message Sam that the fix is ready." The outbox drafts it; sending needs the person's OK. The lens shows the card with the **full** text. Allow is offered on the lens only when the whole payload fits on it; otherwise *Read it on the phone*, and Allow is there. The phone signs `approvals.decide` over the op's argument hash. A spoken "yes" does nothing.
 
 **F9. Away from the desk.** This is the normal case, not an edge case (section 2: the server is home when the person has not used the Mac for a minute).
-- **The Mac is awake** (lid open at home or at the office): proposed (O9), a paired device's use counts as presence, so the Mac stays home while the glasses are in use and it is reachable. F1 to F8 work as at the desk, through the Mac's door.
+- **The Mac is awake** (lid open at home or at the office): the Mac stays home (its lease is renewed without presence), so F1 to F8 work as at the desk, through the Mac's door. After a wake, O9 lets the glasses' use count as presence, so the Mac claims home back.
 - **The Mac sleeps**: the server is home. Questions, reads, answers from code and cards work. Acting works on the server's own sessions, which is where Server mode put the open ones before you left. A Mac session cannot be driven: the manager says so ("checkout-fix is on your Mac, which is asleep"). What only the Mac can do (its window, the messenger) is queued and said: "That waits for your Mac."
 
 **F10. "Show it on my Mac."** Where "go to" shows is decision O8. Proposed: the lens always; the Mac's window as well while the Mac is home and you were at it (D5's presence), as the old glasses app moved the IDE to the session it opened; and always when you say "on my Mac". Otherwise a move becomes a *Show me* chip in the Mac's conversation.
@@ -248,7 +248,7 @@ The phone's own screen shows the same conversation in full, the session and PR v
 **Proposed (decision O4):**
 - The **ElevenLabs copilot**: `voice/server.mjs`, `voice/public/`, `voice/memory.mjs`, `voice/scripts/`, `voice.config.json`, the `luna-voice` helper (`glasscode-voice`), `GlasscodeVoice.swift`, `WakeWord.swift` ("Hey Glasscode"), and the ElevenLabs Swift package. The Today microphone, the status bar microphone and the voice screen (U19) then start the manager's own voice (`manager_voice.rs`), so `glasscode_ui.rs` keeps only what the voice screen needs, or goes into it.
 - The **shared token and its client**: `GlasscodeConfig.swift`, `GlasscodeControl.swift`, `GlasscodeLink.swift`.
-- The **relay**: `relay/`, `glasscoded relay`, `relay_link.rs`, `GlasscodeRelayProxy.swift`, `prefs.glasscode_relay_off`. It only carried port 4517; Tailscale is the path.
+- The **relay's use by the glasses**: `GlasscodeRelayProxy.swift`, and the relay's `control` channel to port 4517 (G02). The relay itself stays: it also carries SSH between the Mac and the server (`ServerConfig::through_relay`), which this plan does not touch.
 - Settings › Server's row "Reach Glasscode on your network" (port 4517).
 - [`CONNECTIVITY.md`](CONNECTIVITY.md) is rewritten for the tailnet and pairing.
 
@@ -478,3 +478,45 @@ From Meta's pages (read 2026-11-21):
 - Testers: one private "Beta" channel per integration, with a limit shown in the developer center (100 during the preview); testers need a regular Meta account. Full access only in countries where the glasses are sold. Developer Mode: in the Meta AI app.
 
 Not stated by Meta's pages, so proved in G01: how an iOS app gets the glasses' microphone, whether the lens updates while the app is in the background, whether the camera streams during a lens session, and whether the mock device draws display content.
+
+## 13. Results (2026-11-21)
+
+Built on `glasscode/mobile-glasses-manager`, one commit or more per slice, with `origin/main`
+merged in between. Nothing is pushed.
+
+| Slice | Built | Checked by |
+|---|---|---|
+| G00 | The owner accepted section 9 | this document |
+| G01 | **Not run: it needs the glasses** (O6) | waiting for the owner |
+| G02 | `server.mjs` on loopback; the relay's control channel closed; the voice token rule (main's, #327, taken in the merge) | `relay_control_channel_is_closed` |
+| G03 | `glasscode_core::device_link`; one `PHONE_ALLOWED` | 11 tests, the pinned cross-language vector |
+| G04 | `crates/glasscode/src/device_door.rs` | 6 tests, and the Swift link code end to end (`door_end_to_end_with_the_swift_client`) |
+| G05 | Pairing without a server; Settings › Server › Glasses | the app's tests |
+| G06 | `gate::phone()`, `caller::rule` | `a_paired_phone_never_acts_as_the_person`, `phone_cannot_start_a_bypass_session`, `the_rules_list_agrees_for_a_phone`, the callers evals |
+| G07 | `manager.home/ask/conversation/stop`, `device.presence`, `device.list`, `device.open`, the glasses block, O8, O9 | registry goldens, chat tests |
+| G08 | `crates/glasscoded/src/phone_manager.rs`, the chat lane woken and streaming, presence in the sync | 4 tests |
+| G09 | Cards and questions through Today; `shown` = lens checked against `LENS_FITS` | `lens_allow_refused_for_a_long_payload` |
+| G10 | No Glasscode tab; the title bar's glasses icon | `indicator_states_from_presence` |
+| G11 to G14 | The app, rebuilt (`glasses/GlasscodeGlasses`) | 17 Swift tests; `StayOnTests` on the simulated glasses |
+| G15 | Push registration; the server's topic | — |
+| G16 | The ElevenLabs copilot removed; the voice screen starts the manager's voice | `the_screen_follows_the_managers_voice` |
+| G17 | **Not measured: it needs the glasses** | waiting for G01 |
+| G18 | **Not done: TestFlight and Meta's channel need the owner's accounts.** DAT stays at 1.0.1 until G01 shows 1.1.0 changes nothing | waiting for the owner |
+| G19 | `architecture.md`, `CONNECTIVITY.md`, `voice/README.md`, this section | — |
+
+**Changed from the plan while building:**
+- Speech to text uses `SFSpeechRecognizer` on the device (with `requiresOnDeviceRecognition` where the
+  language has it), not `SpeechAnalyzer`: it runs on iOS 18 and is well known. `SpeechAnalyzer` can
+  replace it after G01 measures both.
+- The relay stays for the Mac and the server (section 7, corrected).
+- Under Automatic, an awake Mac keeps home without presence (section 2 and F9, corrected); O9 only
+  matters after a wake.
+- The phone's on-screen pad repeats the band's moves for when the band is not attached.
+- `StayOnTests` passes each test on its own; in one full run one test failed once with the
+  simulated glasses' "No eligible device available" after the test before it. It passed twice
+  alone.
+
+**Not tested here**, because they need hardware or accounts: the app on a phone and on the
+glasses, the band's real events, the microphone path, background running, the SSH carrier against
+a real server (it builds; the gate side is covered by glasscoded's tests), push delivery, and the
+latency targets of section 8.
