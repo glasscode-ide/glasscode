@@ -716,6 +716,13 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
     }
 }
 
+/// The heading of a card that waits for the person: who asks ("A program outside Glasscode asks
+/// you"), or, for what the person asked themselves (a `glasscode` line in a shell tab), a check of
+/// their own request, never "You asks you".
+pub(crate) fn card_title(caller: &Caller) -> String {
+    if caller.is_person() { "Confirm your request".to_string() } else { format!("{} asks you", caller.who) }
+}
+
 fn shell_line(args: &[String]) -> String {
     let words: Vec<String> = args
         .iter()
@@ -1778,7 +1785,7 @@ impl Workspace {
             sink.send(&Reply::Waiting { approval: id, summary: summary.clone() });
         }
         let agent = approval.caller.agent.unwrap_or(AgentKind::Claude);
-        let title = format!("{} asks you", approval.caller.who);
+        let title = card_title(&approval.caller);
         let body = match &approval.why {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
@@ -2219,6 +2226,15 @@ mod tests {
 
     /// A card the server asked says it is the server's: its words (who, what, why) are the
     /// server's to write, so the person knows whose they read. One asked here is as it says.
+    /// The person's own request (a `glasscode` line in a shell tab) is never "You asks you"; a
+    /// program's says who asks.
+    #[test]
+    fn a_card_of_the_persons_own_request_is_worded_for_them() {
+        assert_eq!(card_title(&Caller::you()), "Confirm your request");
+        let program = Caller { who: "A program outside Glasscode".into(), channel: caller::Caller::Terminal { pid: Some(1) }, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None };
+        assert_eq!(card_title(&program), "A program outside Glasscode asks you");
+    }
+
     #[test]
     fn a_server_card_says_it_is_from_the_server() {
         assert_eq!(card_who("The manager on the server", Some("devbox")), "The manager on the server, from devbox");
