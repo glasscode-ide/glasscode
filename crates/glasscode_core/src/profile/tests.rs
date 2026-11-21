@@ -108,9 +108,27 @@ fn quarantine_network_forge_only() {
     assert_eq!(q.claude_settings["sandbox"]["network"]["allowedDomains"], json!(["github.com", "api.github.com"]));
     let a = profile(SessionOrigin::Automation, &ProjectPolicy::default());
     assert_eq!(a.claude_settings["sandbox"]["network"]["allowedDomains"], json!(["github.com", "api.github.com", "registry.npmjs.org", "crates.io"]));
-    // Codex: the network off for both, the control socket allowed.
+    // Codex: the network off for both, and no control socket (below).
     let codex = session_profile(SessionOrigin::Quarantine, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
-    assert!(codex.contains("permissions.glasscode.network={\"enabled\"=false, \"unix_sockets\"={"), "{codex}");
+    assert!(codex.contains("permissions.glasscode.network={\"enabled\"=false}"), "{codex}");
+}
+
+/// A session the manager drives cannot reach the control socket from its sandbox: there, any
+/// program may leave out a session's signature and pass for one outside Glasscode. Its `glasscode`
+/// commands go as request files in its own worktree, the app's to attribute
+/// (`caller::by_channel_proven`). The person's sessions keep the socket.
+#[test]
+fn no_control_socket_in_a_restricted_sandbox() {
+    let socket = facts(Path::new("/x")).socket.to_string_lossy().into_owned();
+    for (origin, reaches) in [(SessionOrigin::Automation, false), (SessionOrigin::Quarantine, false), (SessionOrigin::Person, true)] {
+        let p = profile(origin, &ProjectPolicy::default());
+        let allowed = p.claude_settings["sandbox"]["network"]["allowUnixSockets"].as_array().unwrap().iter().any(|v| v.as_str() == Some(socket.as_str()));
+        assert_eq!(allowed, reaches, "{origin:?}");
+        // Codex's restricted profile opens no unix socket (its network is off); the person's
+        // session has no permission profile at all.
+        let codex = session_profile(origin, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
+        assert!(!codex.contains("unix_sockets"), "{origin:?}: {codex}");
+    }
 }
 
 #[test]
