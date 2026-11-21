@@ -158,7 +158,13 @@ pub fn rule(caller: &Caller, kind: Kind, settings: &AgentSettings) -> Rule {
     match caller {
         Caller::Ui | Caller::ShellTab { .. } => Rule::Allow,
         Caller::Session { .. } | Caller::Manager { .. } => settings.rule(kind),
-        Caller::Phone { .. } | Caller::Machine { .. } | Caller::Terminal { .. } => outside_rule(kind, settings),
+        // A paired phone reads as Settings allows and does nothing else itself (G06): it asks the
+        // manager, or approves a card with its signature (the gate's `phone`).
+        Caller::Phone { .. } => match kind {
+            Kind::Read => settings.rule(kind),
+            _ => Rule::Never,
+        },
+        Caller::Machine { .. } | Caller::Terminal { .. } => outside_rule(kind, settings),
     }
 }
 
