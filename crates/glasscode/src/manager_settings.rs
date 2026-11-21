@@ -35,7 +35,14 @@ enum Field {
     Messenger,
     Livekit,
     Brief,
+    TalkerModel,
+    TalkerUrl,
+    VoiceName,
+    Language,
 }
+
+/// The talkers Settings › Manager › Voice offers: the value kept, and its label.
+const TALKERS: &[(&str, &str)] = &[("", "None"), ("anthropic", "Claude"), ("openai", "OpenAI"), ("mistral", "Mistral"), ("groq", "Groq"), ("custom", "Other")];
 
 /// The text fields of Settings › Manager.
 pub struct ManagerForm {
@@ -54,6 +61,15 @@ pub struct ManagerForm {
     pub voice_secret: Entity<TextInput>,
     /// Why the last Save kept nothing (None: it did, or there was none).
     pub voice_keys_note: RefCell<Option<String>>,
+    /// The voice on this Mac: the talker's model and address, the voice's name and language.
+    pub talker_model: Entity<TextInput>,
+    pub talker_url: Entity<TextInput>,
+    pub voice_name: Entity<TextInput>,
+    pub language: Entity<TextInput>,
+    /// The Soniox key and the talker's key as typed; Save keeps them in the Keychain.
+    pub soniox_key: Entity<TextInput>,
+    pub talker_key: Entity<TextInput>,
+    pub secrets_note: RefCell<Option<String>>,
     /// Counts the edits, so a burst of typing is saved once, and which of them is saved.
     pub edits: Cell<u64>,
     pub saved: Cell<u64>,
@@ -100,6 +116,13 @@ impl ManagerForm {
             voice_key: cx.new(|cx| TextInput::new("LiveKit key", cx).mono()),
             voice_secret: cx.new(|cx| TextInput::new("LiveKit secret", cx).mono().masked()),
             voice_keys_note: RefCell::new(None),
+            talker_model: field(Field::TalkerModel, "Its default", settings.voice.talker_model.clone(), true, cx),
+            talker_url: field(Field::TalkerUrl, "https://…/v1", settings.voice.talker_url.clone(), true, cx),
+            voice_name: field(Field::VoiceName, "Its default (Maya)", settings.voice.voice.clone(), false, cx),
+            language: field(Field::Language, "en", settings.voice.language.clone(), true, cx),
+            soniox_key: cx.new(|cx| TextInput::new("Soniox key", cx).mono().masked()),
+            talker_key: cx.new(|cx| TextInput::new("The talker's key", cx).mono().masked()),
+            secrets_note: RefCell::new(None),
             edits: Cell::new(0),
             saved: Cell::new(0),
         }
@@ -113,6 +136,10 @@ impl ManagerForm {
             Field::Messenger => &self.messenger,
             Field::Livekit => &self.livekit,
             Field::Brief => &self.brief,
+            Field::TalkerModel => &self.talker_model,
+            Field::TalkerUrl => &self.talker_url,
+            Field::VoiceName => &self.voice_name,
+            Field::Language => &self.language,
         }
     }
 }
@@ -148,6 +175,10 @@ fn apply(settings: &mut Settings, field: Field, text: &str) -> bool {
         Field::Model => settings.model = (!text.is_empty()).then(|| text.to_string()),
         Field::Messenger => settings.messenger = text.to_string(),
         Field::Livekit => settings.voice.livekit_url = text.to_string(),
+        Field::TalkerModel => settings.voice.talker_model = text.to_string(),
+        Field::TalkerUrl => settings.voice.talker_url = text.to_string(),
+        Field::VoiceName => settings.voice.voice = text.to_string(),
+        Field::Language => settings.voice.language = text.to_lowercase(),
         // A time that does not read as one changes nothing: the brief stays where it was. The
         // field never switches the brief on; its switch does.
         Field::Brief => {
@@ -374,15 +405,74 @@ impl Workspace {
     }
 
     pub fn manager_voice_keys_check(&mut self, cx: &mut Context<Self>) {
-        let looked = cx.background_spawn(async { voice::keys().is_some() });
+        let looked = cx.background_spawn(async { (voice::keys().is_some(), voice::secret(voice::SONIOX_ACCOUNT).is_some(), voice::secret(voice::TALKER_ACCOUNT).is_some()) });
         cx.spawn(async move |this, cx| {
-            let kept = looked.await;
+            let (kept, soniox, talker) = looked.await;
             let _ = this.update(cx, |this, cx| {
                 this.manager.voice.keys_kept = Some(kept);
+                this.manager.voice.soniox_kept = Some(soniox);
+                this.manager.voice.talker_kept = Some(talker);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Save (or, `remove`, forget) the Soniox key or the talker's key typed into Voice. The
+    /// voice on this Mac starts again with it.
+    fn manager_save_secret(&mut self, account: &'static str, remove: bool, cx: &mut Context<Self>) {
+        let Some(form) = self.manager.page.form.get() else { return };
+        let input = if account == voice::SONIOX_ACCOUNT { form.soniox_key.clone() } else { form.talker_key.clone() };
+        let value = if remove { String::new() } else { input.read(cx).text() };
+        if !remove && value.trim().is_empty() {
+            *form.secrets_note.borrow_mut() = Some("Not saved: the field is empty.".into());
+            cx.notify();
+            return;
+        }
+        let task = cx.background_spawn(async move { (voice::set_secret(account, &value).map_err(|e| format!("{e:#}")), voice::secret(account).is_some()) });
+        cx.spawn(async move |this, cx| {
+            let (result, kept) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if account == voice::SONIOX_ACCOUNT {
+                    this.manager.voice.soniox_kept = Some(kept);
+                } else {
+                    this.manager.voice.talker_kept = Some(kept);
+                }
+                let Some(form) = this.manager.page.form.get() else { return };
+                match result {
+                    Ok(()) => {
+                        *form.secrets_note.borrow_mut() = None;
+                        input.update(cx, |input, cx| input.set_text("", cx));
+                        this.manager.voice.problem = None;
+                        this.voice_server_restart(cx);
+                    }
+                    Err(why) => *form.secrets_note.borrow_mut() = Some(keys_problem(&why)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A key's row in Voice: its field, Save, and Remove once one is kept.
+    fn manager_secret_row(&self, label: &'static str, detail: &str, account: &'static str, input: &Entity<TextInput>, kept: Option<bool>, cx: &mut Context<Self>) -> Div {
+        let state = match kept {
+            Some(true) => "saved",
+            Some(false) => "not set",
+            None => "looking…",
+        };
+        let control = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme::sz(8.))
+            .child(field_of(input, 200.))
+            .when(kept == Some(true), |d| {
+                d.child(ui::button(SharedString::from(format!("manager-{account}-remove")), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_save_secret(account, true, cx))))
+            })
+            .child(ui::button(SharedString::from(format!("manager-{account}-save")), "Save").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_save_secret(account, false, cx))))
+            .into_any_element();
+        row(format!("{label}: {state}"), detail.to_string(), Some(control))
     }
 
     /// Save: keep the LiveKit key and secret typed into Voice in the Keychain. Remove
@@ -779,21 +869,66 @@ impl Workspace {
             .child(ui::button("manager-voice-keys-save", "Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_save_voice_keys(false, cx))))
             .into_any_element();
         let store = crate::platform::secret_store();
-        out.push(titled_group(
-            "Voice",
-            "",
-            vec![
-                row(
-                    "He listens",
-                    "In Glasscode, on the phone and on the glasses",
-                    Some(self.manager_choice("manager-listen", &[(Listen::Wake, "On the wake word"), (Listen::Hold, "While you hold"), (Listen::Never, "Never")], settings.listen, |m, listen| m.listen = listen, cx)),
-                ),
-                row("LiveKit URL", "LiveKit on your server: speech to text, his brain, text to speech", Some(field(&form.livekit).into_any_element())),
-                row("LiveKit key", "", Some(field(&form.voice_key).into_any_element())),
-                row("LiveKit secret", "", Some(field(&form.voice_secret).into_any_element())),
-                row(format!("Key and secret: {keys_state}"), format!("{keys_detail}Kept in {store}, not in the settings file."), Some(keys_control)),
-            ],
-        ));
+        let local = settings.voice.local;
+        let local_detail = match &self.vserver.status {
+            crate::voice_server::Status::Off if local => "Starts in a moment…".to_string(),
+            crate::voice_server::Status::Off => "Off: nothing of it runs. On: Glasscode runs LiveKit and the voice worker on this Mac, and your glasses reach it over Tailscale.".to_string(),
+            crate::voice_server::Status::Preparing(what) => what.clone(),
+            crate::voice_server::Status::Running => match self.vserver.phone_url() {
+                Some(phone) => format!("Running on this Mac ({}); your glasses reach it at {phone}.", self.vserver.url()),
+                None => format!("Running on this Mac ({}). Tailscale is not running, so only this Mac reaches it.", self.vserver.url()),
+            },
+            crate::voice_server::Status::Failed(why) => why.clone(),
+        };
+        let local_control = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(10.))
+            .when(local && matches!(self.vserver.status, crate::voice_server::Status::Failed(_)), |d| {
+                d.child(ui::button("manager-voice-local-again", "Start again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.voice_server_restart(cx))))
+            })
+            .child(switch("manager-voice-local", local).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set(|m| m.voice.local = !m.voice.local, cx))))
+            .into_any_element();
+        let mut rows = vec![
+            row(
+                "He listens",
+                "In Glasscode, on the phone and on the glasses",
+                Some(self.manager_choice("manager-listen", &[(Listen::Wake, "On the wake word"), (Listen::Hold, "While you hold"), (Listen::Never, "Never")], settings.listen, |m, listen| m.listen = listen, cx)),
+            ),
+            row("On this Mac", local_detail, Some(local_control)),
+        ];
+        if local {
+            let secrets_note = form.secrets_note.borrow().clone().map(|note| format!("{note} ")).unwrap_or_default();
+            rows.push(self.manager_secret_row("Soniox key", &format!("{secrets_note}One key for listening and speaking (soniox.com). Kept in {store}."), voice::SONIOX_ACCOUNT, &form.soniox_key, self.manager.voice.soniox_kept, cx));
+            let current = TALKERS.iter().map(|(v, _)| *v).find(|v| *v == settings.voice.talker.as_str()).unwrap_or("");
+            rows.push(row(
+                "Talker",
+                "A fast model that talks with you while the manager works, and hands it the work. None: every sentence goes to the manager.",
+                Some(self.manager_choice("manager-talker", TALKERS, current, |m, talker| m.voice.talker = talker.to_string(), cx)),
+            ));
+            if !settings.voice.talker.is_empty() {
+                let model_help = match settings.voice.talker.as_str() {
+                    "anthropic" => "Empty: claude-haiku-5-5",
+                    "mistral" => "Empty: mistral-small-latest",
+                    "groq" => "Empty: llama-3.3-70b-versatile",
+                    _ => "Required, as the service names it",
+                };
+                rows.push(row("Talker's model", model_help, Some(field(&form.talker_model).into_any_element())));
+                if settings.voice.talker == "custom" {
+                    rows.push(row("Talker's address", "An OpenAI-compatible address", Some(field(&form.talker_url).into_any_element())));
+                }
+                rows.push(self.manager_secret_row("Talker's key", &format!("Kept in {store}."), voice::TALKER_ACCOUNT, &form.talker_key, self.manager.voice.talker_kept, cx));
+            }
+            rows.push(row("His voice", "The voice's name, as Soniox names it", Some(field(&form.voice_name).into_any_element())));
+            rows.push(row("Language", "What you speak to him: en, de, …", Some(field_of(&form.language, 90.).into_any_element())));
+        } else {
+            rows.push(row("LiveKit URL", "LiveKit on your server: speech to text, his brain, text to speech", Some(field(&form.livekit).into_any_element())));
+            rows.push(row("LiveKit key", "", Some(field(&form.voice_key).into_any_element())));
+            rows.push(row("LiveKit secret", "", Some(field(&form.voice_secret).into_any_element())));
+            rows.push(row(format!("Key and secret: {keys_state}"), format!("{keys_detail}Kept in {store}, not in the settings file."), Some(keys_control)));
+        }
+        out.push(titled_group("Voice", "", rows));
 
         // Daily brief.
         let brief_on = settings.brief_at.is_some();

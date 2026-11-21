@@ -64,6 +64,7 @@ mod theme;
 mod ui;
 mod update_ui;
 mod usage_ui;
+mod voice_server;
 mod voice_view;
 mod server_ui;
 mod settings_ui;

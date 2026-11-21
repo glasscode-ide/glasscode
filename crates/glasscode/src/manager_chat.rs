@@ -128,6 +128,13 @@ pub struct Turn {
     question: Asked,
 }
 
+impl Turn {
+    /// How long it has been working, in seconds.
+    pub fn running_secs(&self) -> u64 {
+        self.sent.elapsed().as_secs()
+    }
+}
+
 /// A question as the person asked it, and the turn's text as it went to the brain (where they were
 /// then, what they attached: ux-5), so a held or re-asked one goes as it was.
 #[derive(Clone, Debug)]

@@ -30,6 +30,11 @@ pub const STATE: &str = "manager.state";
 /// A client's `{"name","listen"}` for the worker: the wake word and when to listen
 /// ("wake", "always" or "never"). Sent after joining and again whenever `WORKER` joins.
 pub const CONFIG: &str = "manager.config";
+/// With a talker (`voice/manager/worker/talker.py`): what the talker itself says, one of its
+/// tools for the device to run, and what the device found.
+pub const SAID: &str = "manager.said";
+pub const TOOL: &str = "manager.tool";
+pub const RESULT: &str = "manager.result";
 
 /// Where the LiveKit API key and secret are kept in the Keychain: one item, "key:secret".
 const KEYCHAIN_SERVICE: &str = "glasscode-manager-voice";
@@ -63,6 +68,47 @@ pub fn set_keys(key: &str, secret: &str) -> anyhow::Result<()> {
 }
 
 /// "key:secret" as it is kept, taken apart. The key never holds a colon; the secret may.
+/// The keys of the voice's own services, each in the Keychain next to the LiveKit one.
+pub const SONIOX_ACCOUNT: &str = "soniox";
+pub const TALKER_ACCOUNT: &str = "talker";
+
+/// A key kept for the voice (`SONIOX_ACCOUNT`, `TALKER_ACCOUNT`).
+pub fn secret(account: &str) -> Option<String> {
+    crate::keychain::read(KEYCHAIN_SERVICE, account).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Keep a key for the voice; an empty one forgets it.
+pub fn set_secret(account: &str, value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        crate::keychain::delete(KEYCHAIN_SERVICE, account);
+        return Ok(());
+    }
+    if value.contains(char::is_whitespace) {
+        bail!("a key has no spaces in it");
+    }
+    crate::keychain::write(KEYCHAIN_SERVICE, account, value)
+}
+
+/// The LiveKit key and secret for the server on this Mac: the kept ones, else new ones (kept
+/// too). The server there is started with them, so any pair works.
+pub fn local_keys() -> anyhow::Result<(String, String)> {
+    if let Some(kept) = keys() {
+        return Ok(kept);
+    }
+    let rng = ring::rand::SystemRandom::new();
+    let mut bytes = [0u8; 30];
+    ring::rand::SecureRandom::fill(&rng, &mut bytes).map_err(|_| anyhow::anyhow!("no random numbers"))?;
+    let key = format!("APIgc{}", hex(&bytes[..6]));
+    let secret = hex(&bytes[6..]);
+    set_keys(&key, &secret)?;
+    Ok((key, secret))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn split_keys(kept: &str) -> Option<(String, String)> {
     let (key, secret) = kept.trim().split_once(':')?;
     (!key.is_empty() && !secret.is_empty()).then(|| (key.to_string(), secret.to_string()))

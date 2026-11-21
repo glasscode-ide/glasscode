@@ -611,6 +611,7 @@ impl Workspace {
                 Ok(json!({ "items": self.door_items(after, limit) }))
             }
             "manager.ask" => return self.door_ask(conn, device, id, &params, cx),
+            "manager.voice" => return self.door_voice(conn, device, id, cx),
             "manager.stop" => {
                 if self.door.ask.as_ref().is_some_and(|ask| ask.device == device) {
                     self.chat_stop(cx);
@@ -763,6 +764,44 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let page = task.await;
             let _ = this.update(cx, |ws, _| ws.door_reply(conn, id, page));
+        })
+        .detach();
+    }
+
+    /// `manager.voice`: a pass to the manager's voice room for this phone (its address over
+    /// Tailscale, a token for an hour, the room). Only while a voice runs: on this Mac (Settings ›
+    /// Manager › Voice › On this Mac) or on a server whose address is set.
+    fn door_voice(&mut self, conn: u64, device: String, id: u64, cx: &mut Context<Self>) {
+        let settings = self.state.manager.clone();
+        if !settings.enabled {
+            return self.door_reply(conn, id, Err("The manager is off. Switch it on in Settings › Manager on your Mac.".into()));
+        }
+        let url = if settings.voice.local {
+            match (&self.vserver.status, self.vserver.phone_url()) {
+                (crate::voice_server::Status::Running, Some(url)) => url,
+                (crate::voice_server::Status::Running, None) => return self.door_reply(conn, id, Err("The voice runs on your Mac, but Tailscale does not, so your phone cannot reach it.".into())),
+                (crate::voice_server::Status::Failed(why), _) => return self.door_reply(conn, id, Err(why.clone())),
+                _ => return self.door_reply(conn, id, Err("The voice on your Mac is not running yet.".into())),
+            }
+        } else {
+            let url = settings.voice.livekit_url.trim().to_string();
+            if url.is_empty() {
+                return self.door_reply(conn, id, Err("Voice is not set up: switch on Settings › Manager › Voice › On this Mac.".into()));
+            }
+            url
+        };
+        let room = glasscode_core::manager::voice::room(&settings);
+        let short: String = device.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+        let identity = format!("phone-{short}");
+        let (name, talker) = (settings.name.clone(), !settings.voice.talker.trim().is_empty() && settings.voice.local);
+        // The Keychain may take a moment: not on the main thread.
+        let task = cx.background_spawn(async move {
+            let (key, secret) = glasscode_core::manager::voice::keys().ok_or_else(|| "The voice's key is missing on your Mac.".to_string())?;
+            glasscode_core::manager::voice::token(&key, &secret, &identity, &room, 60 * 60).map(|token| json!({ "url": url, "token": token, "room": room, "identity": identity, "name": name, "talker": talker })).map_err(|e| format!("Could not make a voice pass: {e:#}"))
+        });
+        cx.spawn(async move |this, cx| {
+            let pass = task.await;
+            let _ = this.update(cx, |ws, _| ws.door_reply(conn, id, pass));
         })
         .detach();
     }

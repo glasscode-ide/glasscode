@@ -232,6 +232,8 @@ pub struct Workspace {
     pub pairing: Option<crate::pair_ui::Pairing>,
     /// The device door: the glasses app on the person's iPhone, over the tailnet (G04).
     pub door: crate::device_door::DoorUi,
+    /// The manager's voice on this Mac: LiveKit and the voice worker (`voice_server.rs`).
+    pub vserver: crate::voice_server::VoiceServer,
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
@@ -341,6 +343,7 @@ impl Workspace {
             cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
             door: Default::default(),
+            vserver: Default::default(),
             manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
@@ -1788,6 +1791,7 @@ impl Workspace {
         }
         self.glasscode_tick(cx);
         self.manager_view_tick(cx);
+        self.voice_server_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);

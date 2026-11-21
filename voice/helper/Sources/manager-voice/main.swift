@@ -8,11 +8,14 @@ import LiveKit
 //
 //   stdout   {"ready":true}   {"heard":"text"}   {"state":"idle|listening|thinking|speaking"}
 //            {"error":"why, in words"}
+//            with a talker in the worker: {"heard":"text","handled":true} (shown, not asked),
+//            {"said":"what the talker said"}, {"tool":{"call","name","arguments"}}
 //   Exit codes: 0 ended as asked, 2 started wrong, 3 could not join, 4 the connection was
 //   lost, 5 the worker reported a failure and closed the room.
 //
 //   stdin    {"say":{"id":"…","text":"…"}}   {"stop":true}
-//            {"config":{"name":"…","listen":"wake|always|never"}}
+//            {"config":{"name":"…","listen":"wake|always|never","talker":true,"place":"mac"}}
+//            {"result":{"call":"…","text":"…"}}   (what one of the talker's tools found)
 //            ("wake": after the manager's name; "always": everything counts, as while the
 //            talk key is held; "never": the microphone is off)
 //
@@ -26,6 +29,9 @@ let topicSay = "manager.say"
 let topicStop = "manager.stop"
 let topicState = "manager.state"
 let topicConfig = "manager.config"
+let topicSaid = "manager.said"
+let topicTool = "manager.tool"
+let topicResult = "manager.result"
 let listenValues = ["wake", "always", "never"]
 
 // ---- options: flags first, then the environment ----
@@ -35,6 +41,9 @@ struct Options {
     var token = ""
     var name = "Manager"
     var listen = "wake"
+    /// The app runs the talker's tools (it says so in `config`).
+    var talker = false
+    var place = ""
     /// For tests: join and speak the protocol, but touch no microphone and play nothing.
     var noAudio = false
 
@@ -178,7 +187,10 @@ final class Helper {
 
     func sendConfig() async {
         guard connected else { return }
-        await publish(topicConfig, ["name": options.name, "listen": options.listen])
+        var config: [String: Any] = ["name": options.name, "listen": options.listen]
+        if options.talker { config["talker"] = true }
+        if !options.place.isEmpty { config["place"] = options.place }
+        await publish(topicConfig, config)
     }
 
     // -- from Glasscode --
@@ -193,9 +205,14 @@ final class Helper {
         if object["stop"] as? Bool == true {
             await publish(topicStop, [:])
         }
+        if let result = object["result"] as? [String: Any], let call = result["call"] as? String {
+            await publish(topicResult, ["call": call, "text": (result["text"] as? String) ?? ""])
+        }
         if let config = object["config"] as? [String: Any] {
             if let name = config["name"] as? String, !name.isEmpty { options.name = name }
             if let listen = config["listen"] as? String, listenValues.contains(listen) { options.listen = listen }
+            if let talker = config["talker"] as? Bool { options.talker = talker }
+            if let place = config["place"] as? String { options.place = place }
             await applyMicrophone()
             await sendConfig()
         }
@@ -211,7 +228,17 @@ final class Helper {
             let from = (object["from"] as? String) ?? ""
             guard from.isEmpty || from == identity else { return }
             guard let text = object["text"] as? String, !text.isEmpty, (object["final"] as? Bool) ?? true else { return }
-            emit(["heard": text])
+            if object["handled"] as? Bool == true {
+                emit(["heard": text, "handled": true])
+            } else {
+                emit(["heard": text])
+            }
+        case topicSaid:
+            if let text = object["text"] as? String, !text.isEmpty { emit(["said": text]) }
+        case topicTool:
+            // Only the device the worker listens to runs the talker's tools.
+            guard (object["to"] as? String) == identity, let call = object["call"] as? String, let name = object["name"] as? String else { return }
+            emit(["tool": ["call": call, "name": name, "arguments": object["arguments"] ?? [String: Any]()]])
         case topicState:
             // The state first: Glasscode takes a state line as "it works again".
             if let state = object["state"] as? String { emit(["state": state]) }
