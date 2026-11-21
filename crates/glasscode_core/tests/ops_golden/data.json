@@ -81,6 +81,28 @@
    }
   },
   {
+   "help": "data import <file.tar> [--dry-run] [--confirm <key>]…",
+   "words": [
+    "data",
+    "import",
+    "/tmp/glasscode-export.tar",
+    "--dry-run",
+    "--confirm",
+    "app-3f9a1c"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.import",
+    "args": {
+     "from": "/tmp/glasscode-export.tar",
+     "dry_run": true,
+     "confirm": [
+      "app-3f9a1c"
+     ]
+    }
+   }
+  },
+  {
    "words": [
     "data",
     "import"

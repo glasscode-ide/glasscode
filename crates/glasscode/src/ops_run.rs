@@ -2242,12 +2242,13 @@ impl Workspace {
             let Some(path) = paths.into_iter().next() else { return };
             let _ = this.update(cx, |ws, cx| {
                 ws.show_toast(format!("Importing {}…", home_relative(&path)), cx);
-                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                let shown = path.clone();
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path, &[]) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |ws, cx| match result {
                         Ok(done) => ws.show_toast(
-                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}", done.memory_files, done.project_keys, done.words_records, done.set_aside, import_refused(done.refused)),
+                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}{}", done.memory_files, done.project_keys, done.words_records, done.set_aside, import_refused(done.refused), import_held(&done.held, &shown)),
                             cx,
                         ),
                         Err(err) => ws.show_toast(format!("Could not import: {err:#}"), cx),
@@ -2464,20 +2465,57 @@ fn import_refused(refused: usize) -> String {
     }
 }
 
+/// What an import's reply says of the project keys it left unchanged: what the export would add
+/// to each, and how to let it.
+pub(crate) fn import_held(held: &[glasscode_core::portability::KeyAdditions], from: &std::path::Path) -> String {
+    if held.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = held.iter().map(|add| add.line()).collect();
+    format!(
+        " It left {} project keys you have unchanged; the export would add {}. To add them to a key, run `glasscode data import {} --confirm <key>`.",
+        held.len(),
+        lines.join(" and "),
+        from.display()
+    )
+}
+
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
     let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
-    memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
+    let mut confirm = Vec::new();
+    for word in op.texts("confirm") {
+        confirm.push(glasscode_core::paths::ProjectKey::parse(word.trim()).ok_or_else(|| usage(format!("“{word}” is not a project key (such as app-3f9a1c); `glasscode data import <file> --dry-run` lists them.")))?);
+    }
+    if op.on("dry_run") {
+        return memory_plan(Kind::Read, format!("read {}", home_relative(&from)), move || match glasscode_core::portability::preview(&from) {
+            Ok(seen) => {
+                let keys = if seen.new_keys.is_empty() { "no new project keys".to_string() } else { format!("new project keys {}", seen.new_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) };
+                let adds = if seen.additions.is_empty() {
+                    " It adds nothing to the project keys you have.".to_string()
+                } else {
+                    format!(" To project keys you have it would add, only with --confirm <key>: {}.", seen.additions.iter().map(|a| a.line()).collect::<Vec<_>>().join("; "))
+                };
+                Reply::ok(
+                    format!("This import would bring {} memory files and {keys}.{adds} Nothing was changed.", seen.memory_files),
+                    json!({ "memory_files": seen.memory_files, "new_keys": seen.new_keys, "additions": seen.additions }),
+                )
+            }
+            Err(err) => failed(format!("Could not read the export: {err:#}")),
+        });
+    }
+    memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from, &confirm) {
         Ok(done) => Reply::ok(
             format!(
-                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.{}",
+                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.{}{}",
                 done.memory_files,
                 done.project_keys,
                 done.words_records,
                 done.set_aside,
-                import_refused(done.refused)
+                import_refused(done.refused),
+                import_held(&done.held, &from)
             ),
-            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside, "refused": done.refused }),
+            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside, "refused": done.refused, "held": done.held }),
         ),
         Err(err) => failed(format!("Could not import: {err:#}")),
     })
