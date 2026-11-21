@@ -449,7 +449,8 @@ fn codex_no_tools() -> Vec<String> {
     for feature in CODEX_FEATURES_OFF {
         args.extend(["--disable".to_string(), feature.to_string()]);
     }
-    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#] {
+    // Its own update check too: versions are Glasscode's, and a run asks no release server.
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#, crate::agents::CODEX_NO_UPDATE_CHECK] {
         args.extend(["-c".to_string(), setting.to_string()]);
     }
     args
