@@ -1,8 +1,4 @@
-# Glasscode's ElevenLabs key + the shared control-plane token — never commit
-.glasscode-key
-.glasscode-token
-.luna-key
-.luna-token
 .env
 node_modules/
 *.log
+.build/

@@ -1,11 +1,32 @@
 import MWDATCore
 import SwiftUI
+import UserNotifications
+
+/// Push (G15): the server tells the phone what needs the person while the app is away.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    static var onToken: ((String) -> Void)?
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            guard granted else { return }
+            DispatchQueue.main.async { application.registerForRemoteNotifications() }
+        }
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Self.onToken?(deviceToken.map { String(format: "%02x", $0) }.joined())
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
+}
 
 /// Glasscode for Ray-Ban Display (G11): one app, the iPhone and the glasses, built around the
 /// manager. A pairing link (`glasscode://pair?…`) pairs; the toolkit's own links go to it.
 @main
 struct GlasscodeApp: App {
     @StateObject private var app: AppModel
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
         do {
@@ -15,8 +36,14 @@ struct GlasscodeApp: App {
         }
         let model = AppModel()
         _app = StateObject(wrappedValue: model)
-        // In the background the app stays awake for as long as the glasses should be on Glasscode.
-        BackgroundKeepAlive.shared.wanted = { [weak glasses = model.glasses] in glasses?.stayOn ?? false }
+        AppDelegate.onToken = { [weak model] token in
+            #if DEBUG
+            let sandbox = true
+            #else
+            let sandbox = false
+            #endif
+            Task { @MainActor in model?.pushToken = (token, sandbox) }
+        }
     }
 
     var body: some Scene {

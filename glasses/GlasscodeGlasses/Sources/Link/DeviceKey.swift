@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(NIOSSH)
 import NIOSSH
+#endif
 import Security
 
 /// This phone's key (G11): P-256, made once and kept in the Secure Enclave where the phone has
@@ -67,6 +69,7 @@ final class DeviceKey {
     /// The device id the Mac gives this key (`gate::device_id`: SHA-256 of "type body", 8 bytes hex).
     var macDeviceID: String { Self.macDeviceID(openSSH) }
 
+    #if canImport(NIOSSH)
     /// The same key for SSH to the server (the gate, G11).
     var sshPrivateKey: NIOSSHPrivateKey {
         switch backing {
@@ -74,6 +77,7 @@ final class DeviceKey {
         case .software(let key): return NIOSSHPrivateKey(p256Key: key)
         }
     }
+    #endif
 
     func sign(_ message: String) -> String {
         let data = Data(message.utf8)

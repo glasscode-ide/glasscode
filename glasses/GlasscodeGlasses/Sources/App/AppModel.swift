@@ -10,7 +10,13 @@ import SwiftUI
 @MainActor
 final class AppModel: ObservableObject {
     let link = ManagerLink()
-    let glasses = GlassesSession()
+    /// Made when the app starts, never in the test host: the tests' simulated glasses take one
+    /// session at a time.
+    private(set) lazy var glasses: GlassesSession = {
+        let glasses = GlassesSession()
+        glasses.onInput = { [weak self] input in self?.band(input) }
+        return glasses
+    }()
     private let listener = Listener()
     private let voice = Voice()
 
@@ -29,9 +35,9 @@ final class AppModel: ObservableObject {
     private var seenQuestions = Set<String>()
     private var presenceSent = ""
     private var refreshing = false
+    private var started = false
 
     init() {
-        glasses.onInput = { [weak self] input in self?.band(input) }
         listener.onWords = { [weak self] words in self?.heard(words) }
         listener.onError = { [weak self] why in self?.problem = why }
         voice.onFinished = { [weak self] in self?.voiceDone() }
@@ -48,7 +54,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The phone's push token (G15), for the server's notes while the app is away.
+    var pushToken: (token: String, sandbox: Bool)? {
+        didSet { if let pushToken { Task { await link.pushToken(pushToken.token, sandbox: pushToken.sandbox) } } }
+    }
+
     func start() {
+        // In the background the app stays awake for as long as the glasses should be on Glasscode.
+        BackgroundKeepAlive.shared.wanted = { [weak self] in self?.glasses.stayOn ?? false }
+        started = true
         link.start()
         glasses.connect()
         Task { await refresh() }
@@ -379,7 +393,7 @@ final class AppModel: ObservableObject {
 
     private func decide(_ card: LensModel.ApprovalCard, allow: Bool) async {
         do {
-            try await link.decide(approval: card.id, allow: allow, launch: card.launch)
+            try await link.decide(approval: card.id, allow: allow, launch: card.launch, shown: "lens")
             var model = lens
             model.show(.note(title: allow ? "Allowed" : "Denied", body: card.what, tone: allow ? .ok : .plain, open: nil))
             lens = model
@@ -404,7 +418,7 @@ final class AppModel: ObservableObject {
     // MARK: - keeping things current
 
     func refresh() async {
-        guard !refreshing, link.status == .connected else { return }
+        guard started, !refreshing, link.status == .connected else { return }
         refreshing = true
         defer { refreshing = false }
         await link.refreshHome()
@@ -426,6 +440,7 @@ final class AppModel: ObservableObject {
 
     /// What the glasses do, for the Mac's title bar.
     private func reportPresence() {
+        guard started else { return }
         let presence: JSON = ["glasses": glasses.isConnected, "worn": glasses.isConnected, "lens": glasses.isConnected && glasses.displayOn, "voice": turn.word, "via": link.home?.place.rawValue ?? "mac"]
         let text = "\(presence)"
         guard text != presenceSent else { return }
@@ -451,6 +466,7 @@ final class AppModel: ObservableObject {
 
     /// Draw the lens again.
     func redraw() {
+        guard started else { return }
         if link.status != .connected, case .glance = lens.card {
             var model = lens
             model.glance.line = problemText

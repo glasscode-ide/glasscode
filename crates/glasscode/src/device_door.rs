@@ -1057,6 +1057,72 @@ mod tests {
         assert_eq!(glasses_look(1, 1, &[&off], false, false), GlassesLook::Amber);
     }
 
+    /// The iPhone app's own link code against this door (script/glasses-e2e): the handshake both
+    /// ways, a call and its answer, a refused method, a signed input the Mac's #288 check takes,
+    /// and an event. Skipped unless GLASSCODE_DOOR_E2E names the built stand-in.
+    #[test]
+    fn door_end_to_end_with_the_swift_client() {
+        let Some(client) = std::env::var_os("GLASSCODE_DOOR_E2E") else {
+            eprintln!("skipped: build the stand-in with script/glasses-e2e/build.sh and set GLASSCODE_DOOR_E2E");
+            return;
+        };
+        let phone = DoorKey::from_hex(&"09".repeat(32)).unwrap();
+        let device = glasscode_core::gate::device_id(&phone.public_openssh());
+        let (addrs, info, rx, stop) = door(&[&phone]);
+        let child = std::process::Command::new(client)
+            .env("DOOR_ADDR", addrs[0].to_string())
+            .env("DOOR_KEY", info.key.public_openssh())
+            .env("PHONE_RAW", "09".repeat(32))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut out: Option<mpsc::Sender<String>> = None;
+        let mut used = std::collections::HashSet::new();
+        let mut answered = 0;
+        while answered < 2 && Instant::now() < deadline {
+            let Ok(msg) = rx.try_recv() else {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            match msg {
+                DoorMsg::Connected { device: d, out: o, .. } => {
+                    assert_eq!(d, device);
+                    out = Some(o);
+                }
+                DoorMsg::Request { request, .. } => {
+                    let reply = match request.method.as_str() {
+                        "manager.home" => json!({ "home": "mac", "manager": { "name": "Bigboss", "enabled": true } }),
+                        "sessions.send" => {
+                            let p = &request.params;
+                            let input = MirrorInput::Text { text: p["text"].as_str().unwrap().into(), enter: p["enter"].as_bool().unwrap(), device: None, signed: serde_json::from_value(p["signed"].clone()).ok() };
+                            let checked = glasscode_core::remote::check_relayed(&input, "s1", glasscode_core::model::AgentKind::Claude, &info.launch, &|d| d == device, &mut used);
+                            assert_eq!(checked, Ok(()), "the Mac takes the phone's signed input");
+                            json!({ "ok": true })
+                        }
+                        other => panic!("{other} reached the window"),
+                    };
+                    let o = out.as_ref().unwrap();
+                    o.send(serde_json::to_string(&Response { id: request.id, result: Some(reply), error: None }).unwrap()).unwrap();
+                    answered += 1;
+                    if answered == 2 {
+                        o.send(device_link::event_line(events::OPEN, json!({ "kind": "session", "id": "s1" }))).unwrap();
+                    }
+                }
+                DoorMsg::Gone { .. } => break,
+            }
+        }
+        let output = child.wait_with_output().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let has = |key: &str| lines.iter().find(|l| l.get(key).is_some()).cloned().unwrap_or_else(|| panic!("no {key} in {lines:?}"));
+        assert_eq!(has("connected")["launch"], json!("launch-1"));
+        assert_eq!(has("home")["home"]["manager"]["name"], json!("Bigboss"));
+        assert_eq!(has("refused")["refused"], json!(true), "sessions.create is refused at the door");
+        assert_eq!(has("sent")["sent"]["ok"], json!(true));
+        assert_eq!(has("event")["event"], json!("device.open"));
+    }
+
     #[test]
     fn device_places_parse() {
         assert!(matches!(DevicePlace::parse("pr:42"), Some(DevicePlace::Pr(42))));

@@ -1926,7 +1926,6 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-segmentation",
- "ureq",
 ]
 
 [[package]]

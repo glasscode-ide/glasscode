@@ -285,7 +285,7 @@ cards! {
 
     Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
     Phones in Server: "Glasses", "The Glasscode app on your iPhone, with your Ray-Ban Display: it talks to the manager on this Mac, and on your server while the Mac sleeps, over Tailscale.";
-    Voice in Server: "The glasses", "The voice server on port 4517 answers this computer only. The glasses reach Glasscode with a device you pair, over Tailscale.";
+    Voice in Server: "Reach from the glasses", "Your glasses reach this computer's device door over Tailscale, with the key you paired in Glasses above. Nothing else on your network can.";
 
     UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
     Channel in Updates: "Channel", "Beta gets new builds first.";

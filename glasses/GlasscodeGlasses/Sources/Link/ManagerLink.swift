@@ -282,10 +282,11 @@ final class ManagerLink: ObservableObject {
         return json.string("text") ?? ""
     }
 
-    /// Allow or deny a card: signed by this phone, for the Mac's run that asked.
-    func decide(approval: Int, allow: Bool, launch: String) async throws {
+    /// Allow or deny a card: signed by this phone, for the Mac's run that asked. `shown`: where
+    /// the person saw it ("lens" or "phone"); the Mac allows a card on the lens only when it fits.
+    func decide(approval: Int, allow: Bool, launch: String, shown: String) async throws {
         let message = LinkProtocol.decideMessage(launch: launch, approval: approval, allow: allow)
-        let op: JSON = ["op": "decide", "approval": approval, "allow": allow, "launch": launch, "key": key.openSSH, "sig": key.sign(message)]
+        let op: JSON = ["op": "decide", "approval": approval, "allow": allow, "launch": launch, "key": key.openSSH, "sig": key.sign(message), "shown": shown]
         guard let carrier: Carrier = mac ?? server else { throw LinkError(text: "Not connected.") }
         _ = try await carrier.call("today.op", op, timeout: 15)
     }
@@ -309,6 +310,11 @@ final class ManagerLink: ObservableObject {
         params["session_id"] = session
         params["signed"] = LinkProtocol.signed(input, session: session, launch: launch, key: key)
         _ = try await carrier.call(method, params, timeout: 15)
+    }
+
+    /// Where the server sends notes while this phone is not connected (G15).
+    func pushToken(_ token: String, sandbox: Bool) async {
+        _ = try? await server?.call("phones.push_token", ["token": token, "sandbox": sandbox, "name": phoneName], timeout: 10)
     }
 
     /// What the glasses are doing, to both ends (the Mac's title bar shows it).

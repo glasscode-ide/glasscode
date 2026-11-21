@@ -48,6 +48,10 @@ targets:
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+    entitlements:
+      path: Sources/GlasscodeGlasses.entitlements
+      properties:
+        aps-environment: development
     info:
       path: Sources/Info.plist
       properties:

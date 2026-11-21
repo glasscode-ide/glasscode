@@ -60,6 +60,7 @@
 		72F4967BB97526E80AE314EE /* DoorLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoorLink.swift; sourceTree = "<group>"; };
 		8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlasscodeGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8EB8114759B3FAA9F6D004D4 /* LensCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensCards.swift; sourceTree = "<group>"; };
+		91CE76E135BB3BDD2D2A354C /* GlasscodeGlasses.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GlasscodeGlasses.entitlements; sourceTree = "<group>"; };
 		A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerLink.swift; sourceTree = "<group>"; };
 		A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
 		B1D3A4BF8DB346A7E50431CC /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
@@ -111,6 +112,7 @@
 			children = (
 				6ED117763B964885A22E2551 /* AudioRoute.swift */,
 				A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */,
+				91CE76E135BB3BDD2D2A354C /* GlasscodeGlasses.entitlements */,
 				CA7030BE5C5E270404A9245D /* GlassesSession.swift */,
 				22D03E4C7937AF4310FE8262 /* Info.plist */,
 				3DADB2F517A4125069560C4D /* App */,
@@ -426,6 +428,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/GlasscodeGlasses.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -448,6 +451,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/GlasscodeGlasses.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

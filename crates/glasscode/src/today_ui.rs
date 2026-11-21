@@ -792,9 +792,12 @@ impl Workspace {
             // Only the person may allow an agent's request. The phone signs the answer with its
             // device key (which this Mac knows from pairing), and names this run of the app, so a
             // number from an earlier run, or from anyone but the phone, does nothing.
-            TodayOp::Decide { approval, allow, launch, key, sig } => {
+            TodayOp::Decide { approval, allow, launch, key, sig, shown } => {
+                let payload = self.control.approvals.iter().find(|a| a.id == approval).map(|a| a.command.chars().count()).unwrap_or(0);
                 if launch != self.control.launch {
                     Ok(())
+                } else if allow && !lens_may_allow(shown.as_deref(), payload) {
+                    Err("That card is too long for the lens: allow it on the phone, where it shows whole.".to_string())
                 } else if !self.phone_signed(&key, &sig, &glasscode_core::remote::decide_message(&launch, approval, allow)) {
                     Err("That answer did not come from your paired iPhone.".to_string())
                 } else {
@@ -2295,4 +2298,20 @@ mod tests {
 /// The start box's label for screen readers: what typing there does.
 fn placeholder_label(asking: bool, name: &str) -> String {
     if asking { format!("Ask {name}") } else { "Describe a task to start a session on it".into() }
+}
+
+/// A card allowed on the glasses' lens must fit there whole (G09): the person saw all of it.
+fn lens_may_allow(shown: Option<&str>, payload_chars: usize) -> bool {
+    shown != Some("lens") || payload_chars <= glasscode_core::remote::LENS_FITS
+}
+
+#[cfg(test)]
+mod lens_tests {
+    #[test]
+    fn lens_allow_refused_for_a_long_payload() {
+        assert!(super::lens_may_allow(Some("lens"), 120));
+        assert!(!super::lens_may_allow(Some("lens"), 400));
+        assert!(super::lens_may_allow(Some("phone"), 400), "the phone shows it whole");
+        assert!(super::lens_may_allow(None, 400), "an older phone");
+    }
 }

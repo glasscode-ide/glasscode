@@ -404,8 +404,16 @@ pub enum TodayOp {
         key: String,
         #[serde(default)]
         sig: String,
+        /// Where the person saw it: "lens" when they allowed it on their glasses (G09), where the
+        /// Mac allows it only when the whole payload fits there ([`LENS_FITS`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shown: Option<String>,
     },
 }
+
+/// The most characters of a card's payload the glasses' lens shows whole (G09): a card allowed
+/// on the lens must fit there, so the person saw all of what they allowed.
+pub const LENS_FITS: usize = 280;
 
 /// What a phone signs to answer an approval.
 pub fn decide_message(launch: &str, approval: u64, allow: bool) -> String {

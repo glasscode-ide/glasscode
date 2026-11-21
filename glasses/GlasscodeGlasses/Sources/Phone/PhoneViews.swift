@@ -177,7 +177,7 @@ struct HomeView: View {
     private func decide(_ approval: JSON, _ allow: Bool) {
         guard let id = approval.int("id") else { return }
         let launch = app.today?.string("launch") ?? ""
-        Task { try? await link.decide(approval: id, allow: allow, launch: launch); await app.refresh() }
+        Task { try? await link.decide(approval: id, allow: allow, launch: launch, shown: "phone"); await app.refresh() }
     }
 
     @ViewBuilder private var sessionsList: some View {

@@ -24,8 +24,9 @@ struct Config {
     topic: String,
 }
 
+/// The glasses app's bundle id (G15; Glasscode for iPhone, `dev.glasscode`, is retired).
 fn default_topic() -> String {
-    "dev.glasscode".into()
+    "dev.glasscode.glasses".into()
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
