@@ -497,7 +497,7 @@ merged in between. Nothing is pushed.
 | G08 | `crates/glasscoded/src/phone_manager.rs`, the chat lane woken and streaming, presence in the sync | 4 tests |
 | G09 | Cards and questions through Today; `shown` = lens checked against `LENS_FITS` | `lens_allow_refused_for_a_long_payload` |
 | G10 | No Glasscode tab; the title bar's glasses icon | `indicator_states_from_presence` |
-| G11 to G14 | The app, rebuilt (`glasses/GlasscodeGlasses`) | 17 Swift tests; `StayOnTests` on the simulated glasses |
+| G11 to G14 | The app, rebuilt (`glasses/GlasscodeGlasses`); a long explanation goes point by point; a session's question shows on the lens | 17 Swift tests; `StayOnTests` on the simulated glasses; journey 9 |
 | G15 | Push registration; the server's topic | — |
 | G16 | The ElevenLabs copilot removed; the voice screen starts the manager's voice | `the_screen_follows_the_managers_voice` |
 | G17 | **Not measured: it needs the glasses** | waiting for G01 |
@@ -516,7 +516,26 @@ merged in between. Nothing is pushed.
   simulated glasses' "No eligible device available" after the test before it. It passed twice
   alone.
 
-**Not tested here**, because they need hardware or accounts: the app on a phone and on the
-glasses, the band's real events, the microphone path, background running, the SSH carrier against
-a real server (it builds; the gate side is covered by glasscoded's tests), push delivery, and the
-latency targets of section 8.
+**Checked live** (no hardware): `script/journeys.sh 9` runs a debug Glasscode on a scratch home
+and the iPhone app's own link code against its door: the handshake both ways, `manager.home`,
+`state`, `today.get`, `device.presence`, a question the manager answers (in the one conversation,
+as the device's words) and a refused method. 9 of 9 pass.
+
+**Not run anywhere yet:** the app on a phone and on the glasses, the band's real events, the
+microphone path, a full spoken turn, background running, the SSH carrier against a real server (it
+builds; the gate's side is covered by glasscoded's tests), push delivery, the manager's brain
+answering the glasses (only an answer from code was run), and the latency targets of section 8.
+
+**Planned and not built:**
+- the glasses mark beside a question in the Mac's Manager page;
+- the title bar icon's own panel (a click opens Settings › Glasses) and its pulse (it is
+  highlighted instead: GPUI animations redraw every frame);
+- the wake word (an option, off by default);
+- a pull request view on the phone (the lens has one);
+- lens notes for a session's finished turn (a session's question and a card do show).
+
+**Behaviour that changed for the person:**
+- The Mac's microphone buttons and voice screen now start the manager's own voice, which needs
+  its LiveKit room (`voice/manager`); the ElevenLabs copilot is gone.
+- The old glasses app cannot reach the Mac any more (G02); the new one replaces it.
+- O8's "the person was at the Mac" is "Glasscode's window is in front" (`window_active`).

@@ -211,9 +211,14 @@ final class AppModel: ObservableObject {
         for sentence in sentences.next(said, final: true) { speak(sentence) }
         let chips = chips(for: said)
         var model = lens
+        // A long explanation with nothing to open goes a point at a time (F6), in step with the
+        // voice; a short answer, or one with places, is one card.
+        var points = Sentences()
+        let sentences = points.next(said, final: true)
+        let card: LensModel.Card = sentences.count > 3 && chips.isEmpty ? .points(title: "Explaining", points: sentences, at: 0) : .answer(said, chips)
         // A place the manager showed meanwhile stays on top; the answer is under it.
-        if case .answer = model.card { model.replaceTop(.answer(said, chips)) }
-        else if case .working = model.card { model.show(.answer(said, chips)) }
+        if case .answer = model.card { model.replaceTop(card) }
+        else if case .working = model.card { model.show(card) }
         lens = model
         if !voice.isSpeaking { turn.done(); BackgroundKeepAlive.shared.resume() }
         reportPresence()
@@ -390,6 +395,24 @@ final class AppModel: ObservableObject {
         redraw()
     }
 
+    /// A session that started asking something: its question on the lens, once, unless the
+    /// person is talking or waiting for an answer.
+    private func noteQuestions() {
+        var model = lens
+        for entry in sessions {
+            guard let id = entry.object("session")?.string("id"), let prompt = entry.object("prompt") else { continue }
+            let key = id + "|" + (prompt.string("question") ?? "")
+            guard !seenQuestions.contains(key) else { continue }
+            seenQuestions.insert(key)
+            switch model.card {
+            case .listening, .working, .approval, .question: continue
+            default: break
+            }
+            if let card = questionCard(id) { model.show(.question(card)) }
+        }
+        lens = model
+    }
+
     // MARK: - acting
 
     private func decide(_ card: LensModel.ApprovalCard, allow: Bool) async {
@@ -425,6 +448,7 @@ final class AppModel: ObservableObject {
         await link.refreshHome()
         let found = await link.sessions()
         if !found.isEmpty || sessions.isEmpty { sessions = found }
+        noteQuestions()
         if let snapshot = await link.today() { takeToday(snapshot) }
         if conversation.isEmpty { conversation = await link.conversation() }
         if let home = link.home {
