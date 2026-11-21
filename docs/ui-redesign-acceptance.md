@@ -57,7 +57,7 @@ Do the steps in Dark at 100 % first. The steps use the Windows keys; the macOS k
 |---|---|---|---|---|---|---|
 | 1 | Shell and title bar | 10 | | | | |
 | 2 | Tree sidebar | 10 | | | | |
-| 3 | Today | 11 | | | | |
+| 3 | Today | 16 | | | | |
 | 4 | Session view and tabs | 10 | | | | |
 | 5 | File tabs | 9 | | | | |
 | 6 | Editor | 13 | | | | |
@@ -166,7 +166,7 @@ Other variables:
 | `GLASSCODE_DEBUG_SETTINGS_SCROLL=<px>` | Settings starts scrolled that far down (px at 100 %), to see the lower groups of a long section without input. |
 | `GLASSCODE_DEBUG_SETTINGS_OPEN=<part>[,<part>]` | Opens what a click opens in Settings: `trust:allows`, `trust:add`, `trust:delegate`, `trust:site` (that part of the first project's row in Manager › Trust level), `trust:sample` (the first project shows a made-up condition, delegated decision and site, the second is Standard and the third Autopilot; nothing is written), `cli` (the Details of each CLI in Updates), `account-add` (the fields of a new Claude account). |
 | `GLASSCODE_DEBUG_CLI=sample` | Updates › CLI versions shows four made-up CLIs: one that refuses arguments and has an update, one as it should be, one not installed, one of your own. |
-| `GLASSCODE_DEBUG_TODAY=still,inbox,activity` | `still`: the backdrop stands still, as with less motion; `inbox` or `activity`: that tab of Today's right panel. |
+| `GLASSCODE_DEBUG_TODAY=still,manager,inbox,activity,…` | `still`: the backdrop stands still, as with less motion; `manager`, `inbox` or `activity`: that tab of Today's right panel (`followups`, `messages`, `memory`: that part of the manager's tab). `sample`: made-up rows in each card. `chat`: a made-up conversation with the manager (kept in the check home's own store) and made-up answers to what is sent; `thinking`: an answer that is being written. `panel`: the manager's panel over the window, on a page that is not Today. `typed`: words in the start box, with the cursor in it. |
 | `GLASSCODE_DEBUG_RIGHT_TAB=files\|changes\|checks\|pr` | That tab of the session's right panel. `files:changed` shows only changed files, `files:<path>` opens that file; `checks:sample` and `pr:sample` give the active session a made-up pull request. |
 | `GLASSCODE_DEBUG_EDIT=<path>` | Opens that file of the active session's worktree in a tab, in Edit. |
 | `GLASSCODE_DEBUG_USAGE=1\|table\|claude\|codex\|30\|hover:<day>` | Opens the Usage page so. |
@@ -253,10 +253,15 @@ the program from starting, or the stand-in agents on the `PATH` show one.
 | 9 | Click another window, so that Glasscode is in the back. Look at Task Manager. Click Glasscode again. | In the back the backdrop stands still and Glasscode uses almost no processor time; in front it moves again. | |
 | 10 | Settings › Appearance › Backdrop: None. Open Today. | A plain ground; the cards are still cards and can be read. | |
 | 11 | Open the agent list of the start box where the left sidebar is under it, and click a part of the list that is over the sidebar. | The click chooses the entry; it does not reach the sidebar row below (U12 saw this defect with another menu). | |
+| 12 | Switch the manager on (Settings › Manager, or `"manager": { "enabled": true }` in the check home's `state.json`; start with `GLASSCODE_DEBUG_TODAY=chat`). Look at the left sidebar and at Today. | No "Manager" row in the sidebar: Today is the one home. The start box says "Ask <name>…", with one row of things to ask under it; beside its pills, the quiet button "Start session". The right panel has the tabs Manager, Inbox and Activity; Manager shows the manager's mark, name and state (idle, thinking, needs you), the tabs Chat, Follow-ups, Messages and Memory, the conversation, and a box with its keys under it. | |
+| 13 | Type a question in the start box, Enter. Type a task, click "Start session". | The question goes to the manager and its answer comes in the Manager tab (under the box when the right panel is hidden). "Start session" starts a session with the words, as the box did before. | |
+| 14 | Open a session. Click the round mark at the bottom right, or press Ctrl+Shift+J. Type, Enter. Press Esc; open it again and click ×; click the "Open in Today" button of its header. | The manager's panel opens over the window: header (name, state, what the next message is about), the conversation, the box. Esc and × close it. "Open in Today" shows Today with the Manager tab and the cursor in its box. | |
+| 15 | In Jump, choose "Go to the manager". | Today, the Manager tab, the cursor in its box. | |
+| 16 | On a home with Claude or Codex conversations from before Glasscode counted (or with `GLASSCODE_DEBUG_DISCOVER_HOME` on a made-up home that has `.claude\projects\<folder>\<id>.jsonl` files). Look at Activity. | The heat map shows those days too, and "Since" names the first of them. A check home (`GLASSCODE_HOME` set) reads only its own accounts and the made-up home, never the real one. | |
 
 | Look again at | Dark | Light | 90 % | 130 % | 900 x 560 at 130 % |
 |---|---|---|---|---|---|
-| Steps 1, 2, 6, 7 | | | | | |
+| Steps 1, 2, 6, 7, 12, 14 | | | | | |
 
 ## 4. Session view and tabs
 
@@ -679,9 +684,11 @@ others have no slice yet.
 - **The setup runs only locally,** not on the server (U22). A restart forgets a new worktree in
   which no session started (U22).
 - **File tabs are not saved over a restart,** and they are not places of Back and Forward (U13).
-- **The heat map starts at the first run of the new build.** There is no history from before; the
-  card says "Since <date>". Merges while Glasscode is closed and pull requests with no session are
-  not counted (U07).
+- **The heat map counts merges from the first run of the new build.** Sessions from before come
+  from the agents' own files (Claude Code's `projects`, Codex's `sessions`: the count of each day,
+  nothing of their text), for the days before Glasscode's own record starts; the card says
+  "Since <date>". Merges while Glasscode is closed and pull requests with no session are not
+  counted (U07).
 - Today's start box starts Claude or Codex sessions; Shell sessions come from New session. A
   project whose default agent is the shell gets Claude there (U11, U23).
 - The caret of the editor does not blink. Nothing removes the copies in `~/.glasscode/unsaved/`:

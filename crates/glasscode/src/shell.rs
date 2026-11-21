@@ -24,8 +24,6 @@ pub enum View {
     Settings,
     /// The first run (`first_run.rs`): no sidebars, no status bar.
     FirstRun,
-    /// The manager's page (`manager_ui.rs`): the agent above every session.
-    Manager,
 }
 
 /// A tab of the centre: a session of the worktree on screen, or a file (`file_view.rs`). The
@@ -321,7 +319,6 @@ impl Workspace {
             }
             View::FirstRun => self.open_first_run(crate::first_run::Step::Projects, cx),
             View::Usage => self.show_view(View::Usage, cx),
-            View::Manager => self.show_manager(window, cx),
             View::Settings => {
                 let section = self.settings.section;
                 self.open_settings(section, window, cx);
@@ -373,9 +370,10 @@ impl Workspace {
         !matches!(self.view, View::Settings | View::FirstRun)
     }
 
-    /// The view has a right panel to show: the session's, or Today's Inbox and Activity. The
-    /// ticket being read on the Board is a panel over the Board (`tickets_view.rs`), not this one:
-    /// it takes no width from the page, and nothing of the window moves when it opens.
+    /// The view has a right panel to show: the session's, or Today's (the manager, Inbox and
+    /// Activity). The ticket being read on the Board is a panel over the Board
+    /// (`tickets_view.rs`), not this one: it takes no width from the page, and nothing of the
+    /// window moves when it opens.
     pub(crate) fn view_has_right(&self) -> bool {
         matches!(self.view, View::Sessions | View::Today)
     }
@@ -469,11 +467,21 @@ impl Workspace {
         // The first run has no status bar: nothing of it is in use yet.
         let status_bar = (self.view != View::FirstRun).then(|| frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element()));
         let popover = self.popover.map(|p| self.render_popover(p, window, cx));
-        // The manager's bubble, in the bottom right corner of each view but its own page and
-        // the first run, and not while a popover of the status bar takes that corner. A toast
-        // goes above it.
-        let bubble = (self.view != View::FirstRun && self.popover.is_none()).then(|| self.render_manager_bubble(cx)).flatten();
-        let toast_bottom = if bubble.is_some() { 96. } else { 40. };
+        // The manager's bubble (or its panel over the window), in the bottom right corner of each
+        // view but the first run, and not where its panel is a part of the page (Today's right
+        // panel) or while a popover of the status bar takes that corner. A toast goes above the
+        // bubble, and to the left of the open panel.
+        let bubble = (self.view != View::FirstRun && self.popover.is_none()).then(|| self.render_manager_bubble(window, cx)).flatten();
+        let toast_bottom = if bubble.is_some() && !self.mchat.overlay { 96. } else { 40. };
+        // On Today the manager's box is at the foot of the right panel: a toast goes beside the
+        // panel, not on the box.
+        let toast_right = if bubble.is_some() && self.mchat.overlay {
+            theme::sz(428.)
+        } else if self.assistant_docked() {
+            px(self.right_width()) + theme::sz(16.)
+        } else {
+            theme::sz(16.)
+        };
         let shell = div()
             .size_full()
             .flex()
@@ -506,7 +514,7 @@ impl Workspace {
                         div()
                             .absolute()
                             .bottom(theme::sz(toast_bottom))
-                            .right(theme::sz(16.))
+                            .right(toast_right)
                             .max_w(theme::sz(460.))
                             .px_4()
                             .py_3()
@@ -523,6 +531,9 @@ impl Workspace {
             })
             .children(frames::last_mark())
             .into_any_element();
+        // The manager's orb, at the sizes this frame drew it at: an image not made yet is made
+        // now, in the background.
+        self.orbs_make(window, cx);
         frames::built();
         shell
     }
@@ -536,7 +547,6 @@ impl Workspace {
             View::Usage => self.render_usage(window, cx),
             View::Settings => self.render_settings(window, cx),
             View::FirstRun => self.render_first_run(window, cx),
-            View::Manager => self.render_manager(window, cx),
             View::Sessions => match self.center.clone() {
                 crate::center::Center::Session => self.render_center(window, cx).into_any_element(),
                 crate::center::Center::Server(id) => self.render_server_center(&id, cx),
@@ -549,8 +559,9 @@ impl Workspace {
     /// Server group and "Add project…" at its end), and Settings at the bottom.
     pub fn render_left(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let view = self.view;
-        // Today: what is due or late, and what waits for the person's OK; Board: review requests.
-        let today_count = self.today_view().due + self.control.approvals.len();
+        // Today: what is due or late, what waits for the person's OK, and what the manager holds
+        // for them (a message to allow, a follow-up to look at again); Board: review requests.
+        let today_count = self.today_view().due + self.control.approvals.len() + self.manager_waits().len();
         let board_count = self.tickets.reviews.len();
         let prs_count = self.prs_count();
         // Over all projects, also folded ones: a dot and a number each, as words do not fit at
@@ -613,8 +624,7 @@ impl Workspace {
             .pb(theme::sz(6.))
             .border_b_1()
             .border_color(theme::border())
-            // The manager first, where the rail had it (only while it is on).
-            .children(self.render_manager_nav(cx))
+            // Today first: it is the home, and the manager's too (it has no row of its own).
             .child(nav_row("nav-today", crate::icons::TODAY, "Today", view == View::Today, today_count, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Today, window, cx))))
             .child(
                 nav_row("nav-board", crate::icons::TICKETS, "Board", view == View::Board, board_count, None)
@@ -650,11 +660,11 @@ impl Workspace {
     }
 
     /// The right panel of the view: the session's (Files, Changes, Checks, Pull request), or
-    /// Today's (Inbox, Activity).
-    pub fn render_right(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Today's (the manager, Inbox, Activity).
+    pub fn render_right(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
-            View::Today => Some(self.render_today_right(cx)),
+            View::Today => Some(self.render_today_right(window, cx)),
             _ => None,
         }
     }
@@ -680,7 +690,6 @@ impl Workspace {
                 String::new(),
             ),
             _ if self.view == View::Today => ("Today".to_string(), String::new()),
-            _ if self.view == View::Manager => (self.state.manager.name.clone(), String::new()),
             _ if self.view == View::FirstRun => ("Set up Glasscode".to_string(), String::new()),
             _ if self.view == View::PullRequests => ("Pull requests".to_string(), "GitHub".to_string()),
             _ if self.view == View::Board => (

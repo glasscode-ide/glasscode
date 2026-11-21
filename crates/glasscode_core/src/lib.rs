@@ -2,6 +2,7 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod activity;
+pub mod agent_history;
 pub mod agents;
 pub mod autofix;
 pub mod backdrop;

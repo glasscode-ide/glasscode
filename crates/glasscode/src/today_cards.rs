@@ -142,6 +142,9 @@ pub enum Open {
     Inbox,
     /// The Usage page.
     Usage,
+    /// A part of the manager's panel in Today's right panel: its conversation, the follow-ups,
+    /// the messages, memory.
+    Manager(crate::manager_view::Stage),
 }
 
 /// The colour of a row's icon (never of its text: text on glass is `text`, `text_soft` or
@@ -265,13 +268,16 @@ pub fn needs(needs: &[Need], approvals: usize) -> List {
         });
     }
     for need in needs {
+        // What the manager holds (a message to allow, a follow-up to look at again) has its mark.
+        let held = matches!(need.open, Open::Manager(_));
         let mark = match (need.failing, need.agent) {
             (true, _) => Mark::Icon(icons::PULL_REQUEST, Tone::Bad),
             (false, Some(agent)) => Mark::Agent(agent),
+            (false, None) if held => Mark::Icon(icons::ASSISTANT, Tone::Attention),
             (false, None) => Mark::Icon(icons::BELL, Tone::Attention),
         };
         lines.push(Line {
-            action: Some(if need.failing { "Open" } else { "Answer" }),
+            action: Some(if need.failing || held { "Open" } else { "Answer" }),
             ..Line::new(
                 mark,
                 need.title.clone(),
@@ -569,6 +575,10 @@ pub struct Recent {
     pub agent: AgentKind,
     pub state: RowState,
     pub created_at: u64,
+    /// What the manager knows of it: its state and where its last reply ends. Empty: nothing.
+    pub line: String,
+    /// It runs on the server (the manager sees it there).
+    pub on_server: bool,
 }
 
 pub const RECENT_EMPTY: &str = "The sessions you start show here.";
@@ -580,14 +590,25 @@ pub fn recent(mut sessions: Vec<Recent>, now: u64) -> List {
     let lines = sessions
         .into_iter()
         .map(|s| {
-            let detail = if s.project.is_empty() {
+            // The manager's line says more than when the session started.
+            let what = if s.line.is_empty() {
                 ago(s.created_at, now)
             } else {
-                format!("{} · {}", s.project, ago(s.created_at, now))
+                s.line.clone()
+            };
+            let detail = if s.project.is_empty() {
+                what
+            } else {
+                format!("{} · {what}", s.project)
+            };
+            let open = if s.on_server {
+                Open::Server(s.id)
+            } else {
+                Open::Session(s.id)
             };
             Line {
                 state: Some(s.state),
-                ..Line::new(Mark::Agent(s.agent), s.title, detail, Open::Session(s.id))
+                ..Line::new(Mark::Agent(s.agent), s.title, detail, open)
             }
         })
         .collect();
@@ -1670,6 +1691,11 @@ mod tests {
         );
         assert_eq!((list.count.as_deref(), list.empty), (Some("5"), None));
         assert_eq!(needs(&[], 1).lines[0].title, "1 request waits for your OK");
+        // What the manager holds for the person has its mark, and opens its part of the panel.
+        let held = Need { title: "A message to Sam Example waits for your OK".into(), what: "The fix is pushed.".into(), agent: None, failing: false, open: Open::Manager(crate::manager_view::Stage::Messages) };
+        let line = &needs(&[held], 0).lines[0];
+        assert_eq!((line.action, &line.mark), (Some("Open"), &Mark::Icon(icons::ASSISTANT, Tone::Attention)));
+        assert_eq!(line.open, Open::Manager(crate::manager_view::Stage::Messages));
     }
 
     #[test]
@@ -1782,10 +1808,20 @@ mod tests {
             agent: AgentKind::Codex,
             state,
             created_at: 1_000_000 + n * 60,
+            line: String::new(),
+            on_server: false,
         };
         let mut sessions: Vec<Recent> = (0..8).map(|n| session(n, RowState::Idle)).collect();
         sessions[7].state = RowState::NeedsYou;
         sessions[6].state = RowState::Working;
+        // What the manager knows of a session stands in place of when it started, and a session
+        // on the server opens there.
+        let mut known = sessions.clone();
+        known[6].line = "Working · Running the tests now".into();
+        known[5].on_server = true;
+        let with_manager = recent(known, 1_000_000 + 7 * 60);
+        assert_eq!(with_manager.lines[0].detail, "app · Working · Running the tests now");
+        assert_eq!(with_manager.lines[1].open, Open::Server("s5".into()));
         let list = recent(sessions, 1_000_000 + 7 * 60);
         let ids: Vec<&Open> = list.lines.iter().map(|l| &l.open).collect();
         assert_eq!(

@@ -81,9 +81,14 @@ pub const LAYERS: &[u8] = include_bytes!("../assets/icons/layers.svg");
 pub const COLUMNS: &[u8] = include_bytes!("../assets/icons/columns.svg");
 pub const LIST: &[u8] = include_bytes!("../assets/icons/list.svg");
 pub const ACTIVITY: &[u8] = include_bytes!("../assets/icons/activity.svg");
+/// The manager's mark (its bubble, its panel, its name over what it says), and the two thumbs
+/// of "Useful" and "Not useful" under a nudge.
+pub const ASSISTANT: &[u8] = include_bytes!("../assets/icons/assistant.svg");
+pub const THUMB_UP: &[u8] = include_bytes!("../assets/icons/thumb-up.svg");
+pub const THUMB_DOWN: &[u8] = include_bytes!("../assets/icons/thumb-down.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 56] = [
+pub const ALL: [(&str, &[u8]); 59] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -140,6 +145,9 @@ pub const ALL: [(&str, &[u8]); 56] = [
     ("columns", COLUMNS),
     ("list", LIST),
     ("activity", ACTIVITY),
+    ("assistant", ASSISTANT),
+    ("thumb up", THUMB_UP),
+    ("thumb down", THUMB_DOWN),
 ];
 
 /// An icon `w`×`h` in `color`.

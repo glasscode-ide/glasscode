@@ -54,9 +54,14 @@ fn a_claude_session_has_a_settings_file_and_starts_without_cmd() {
     assert!(file.starts_with(home.path()), "{}", file.display());
     let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     let hooks = settings["hooks"].as_object().unwrap();
-    assert_eq!(hooks.len(), 4);
+    // The four of a session's state, and whatever else a version adds (Manager v2: SessionEnd):
+    // each runs the same command, which is one that `cmd.exe` never has to parse.
     for event in ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] {
-        assert_eq!(hooks[event][0]["hooks"][0]["command"], "glasscode hook", "{event}");
+        assert!(hooks.contains_key(event), "{event}");
+    }
+    for (event, hook) in hooks {
+        let command = hook[0]["hooks"][0]["command"].as_str().unwrap_or_default();
+        assert!(command == "glasscode hook" || command.starts_with("glasscode hook --"), "{event}: {command}");
     }
     assert_eq!(settings["statusLine"]["command"], "glasscode statusline");
 
