@@ -895,6 +895,10 @@ impl Workspace {
         if section == Section::Browser {
             self.browser_refresh(cx);
         }
+        // What each account's CLI says of its login: asked here, in the background, never while drawing.
+        if section == Section::Accounts {
+            self.accounts_ask_logins(cx);
+        }
         // Whether the manager's voice key is kept: asked once here, never while drawing.
         if section == Section::Manager {
             self.manager_voice_keys_check(cx);
@@ -1060,7 +1064,7 @@ impl Workspace {
                 .child(column),
         );
         #[cfg(debug_assertions)]
-        self.settings_debug_scroll();
+        self.settings_debug_scroll(cx);
         let scroll = ui::scroll_area("settings-scroll", &self.settings.scroll, content);
         let page = if narrow {
             div().flex().flex_col().flex_1().min_h_0().child(scroll)
@@ -1092,7 +1096,7 @@ impl Workspace {
     /// It holds for the first draws only (the page has no height before its first layout), then
     /// the page scrolls as always.
     #[cfg(debug_assertions)]
-    fn settings_debug_scroll(&mut self) {
+    fn settings_debug_scroll(&mut self, cx: &mut Context<Self>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static DRAWS: AtomicUsize = AtomicUsize::new(0);
         if DRAWS.load(Ordering::Relaxed) >= 12 {
@@ -1109,6 +1113,13 @@ impl Workspace {
                     "account-add" => {
                         if let Some(form) = self.settings.form.as_mut() {
                             form.adding = Some(glasscode_core::model::AgentKind::Claude);
+                        }
+                    }
+                    // The first Claude account signs in, with whatever `claude` is first on the
+                    // PATH: a check puts a stand-in there and sets GLASSCODE_DEBUG_SIGNIN.
+                    "signin" => {
+                        if let Some(id) = self.state.accounts.iter().find(|a| a.agent == glasscode_core::model::AgentKind::Claude).map(|a| a.id.clone()) {
+                            self.signin_begin(&id, cx);
                         }
                     }
                     part => self.trust_debug_open(part.strip_prefix("trust:").unwrap_or_default()),

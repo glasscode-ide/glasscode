@@ -73,6 +73,7 @@ pub mod resources;
 pub mod save;
 pub mod schedule;
 pub mod settings;
+pub mod signin;
 pub mod store;
 pub mod switch;
 pub mod sync;
