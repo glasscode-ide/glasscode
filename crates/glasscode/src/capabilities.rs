@@ -33,6 +33,9 @@ pub enum Place {
     Settings(Section),
     /// A tab of a session's side panel.
     Tab(RightTab),
+    /// The manager: its panel on Today (the conversation, follow-ups, messages, memory). It has
+    /// no view of its own.
+    Manager,
 }
 
 impl Place {
@@ -42,6 +45,7 @@ impl Place {
             Place::View(view) => view_name(view).to_string(),
             Place::Settings(section) => format!("settings:{}", section.slug()),
             Place::Tab(tab) => format!("tab:{}", tab_name(tab)),
+            Place::Manager => "manager".to_string(),
         }
     }
 
@@ -54,12 +58,15 @@ impl Place {
         if let Some(tab) = text.strip_prefix("tab:") {
             return TABS.into_iter().find(|t| tab_name(*t) == tab).map(Place::Tab);
         }
+        if text == "manager" {
+            return Some(Place::Manager);
+        }
         VIEWS.into_iter().find(|v| view_name(*v) == text).map(Place::View)
     }
 }
 
 /// Every view of the centre.
-pub const VIEWS: [View; 8] = [View::Today, View::Sessions, View::Board, View::PullRequests, View::Usage, View::Settings, View::FirstRun, View::Manager];
+pub const VIEWS: [View; 7] = [View::Today, View::Sessions, View::Board, View::PullRequests, View::Usage, View::Settings, View::FirstRun];
 
 /// Every tab of a session's side panel.
 pub const TABS: [RightTab; 4] = [RightTab::PullRequest, RightTab::Checks, RightTab::Changes, RightTab::Files];
@@ -75,7 +82,6 @@ fn view_name(view: View) -> &'static str {
         View::Usage => "usage",
         View::Settings => "settings",
         View::FirstRun => "first-run",
-        View::Manager => "manager",
     }
 }
 
@@ -171,6 +177,7 @@ pub fn card_key(card: CardId) -> CardKey {
         CardId::Voice => ActionOnly,
         CardId::UpdateStatus => ActionOnly,
         CardId::Channel => Key("updates.channel"),
+        CardId::AutoCheck => Key("updates.auto_check"),
         CardId::InstallOnQuit => Key("updates.install_on_quit"),
         CardId::CliVersions => ActionOnly,
         CardId::Shortcuts => ActionOnly,
@@ -270,10 +277,16 @@ pub const INVENTORY: &[Capability] = &[
     op("Today", "the board", "render_today", "board.list"),
     op("Today", "a task's card", "today_open", "board.show"),
     op("Today", "the start box: a task", "today_send", "board.add"),
-    op("Today", "Session or Ask: what Enter does in the start box", "chat_set_today_mode", "settings.set"),
+    op("Today", "what Enter does in the start box: ask the manager, or start a session (Jump: Today box)", "chat_today_mode", "settings.set"),
     op("Today", "ask the manager from the start box", "today_enter", "manager.ask"),
+    op("Today", "the start box's second action: start a session directly (or ask the manager, when Enter starts a session)", "today_other", "session.new"),
+    op("Today", "a thing to ask the manager, one click (under the start box)", "today_start_box", "manager.ask"),
     op("Today", "open the full conversation", "show_manager", "manager.show"),
     local("Today", "hide the answer under the start box", "today_start_box"),
+    local("Today", "the right panel's tab: the manager, Inbox or Activity", "render_today_right"),
+    local("Today", "a row of what the manager holds (Needs you, Coming up): its part of the manager's panel", "manager_open_stage"),
+    local("Today", "the start box: a click in the field puts the cursor there", "today_start_box"),
+    local("Today", "a card's list scrolls in the card", "scrolling"),
     local("Today", "Activity: every event, or the turns and the work's only", "today_journal"),
     op("Today", "tick a task off", "today_apply", "board.done"),
     op("Today", "untick a task", "today_apply", "board.undo"),
@@ -337,6 +350,21 @@ pub const INVENTORY: &[Capability] = &[
     op("Board", "a ticket's status", "ticket_move", "ticket.move"),
     op("Board", "comment on a ticket", "ticket_comment", "ticket.comment"),
     op("Board", "review a pull request", "work_on_pr", "pr.review"),
+    // The toolbar and the ticket panel (the Windows branch's Board): what they change is what the
+    // page shows, but for where the tickets come from, which is the person's choice.
+    local("Board", "whose tickets: assigned to me, to review, or both", "render_tickets_toolbar"),
+    local("Board", "Board or List", "render_tickets_toolbar"),
+    local("Board", "a quick filter", "render_tickets_toolbar"),
+    local("Board", "the filter field", "render_tickets_toolbar"),
+    local("Board", "sync now", "tickets_refresh"),
+    local("Board", "what a control of the toolbar is called, under the pointer", "tip"),
+    person("Board", "the service the tickets come from", "tickets_pick_provider", "Only you can choose where the Board's tickets come from.", Place::View(View::Board)),
+    person("Board", "the repository or team of the Board", "tickets_pick_project", "Only you can choose the Board's repository or team.", Place::View(View::Board)),
+    local("Board", "the ticket panel: a click outside it closes it", "close_reader"),
+    local("Board", "the ticket panel: Esc closes it", "reader_keys"),
+    local("Board", "the ticket panel: drag its edge to another width", "reader_drag_move"),
+    local("Board", "the ticket panel: let its edge go", "reader_drag_end"),
+    local("Board", "the ticket panel: a double click on its edge", "render_reader_overlay"),
     person("Board", "connect Linear", "linear_connect", "Only you can connect Linear: it needs your API key.", Place::Settings(Section::Integrations)),
     person("Board", "disconnect Linear", "linear_disconnect", "Only you can disconnect Linear.", Place::Settings(Section::Integrations)),
     // ----- pull requests
@@ -366,7 +394,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Jump", "jump Go to the manager", "go", "manager.show"),
     op("Jump", "jump Open or close the chat with the manager", "chat_overlay_set", "ui.panel"),
     op("Jump", "jump Stop the manager's answer", "chat_stop", "manager.stop"),
-    op("Jump", "jump Today box: what Enter does", "chat_set_today_mode", "settings.set"),
+    op("Jump", "jump Today box: what Enter does", "chat_today_mode", "settings.set"),
     op("Jump", "a session, worktree, project or ticket found", "palette_run", "app.open"),
     // ----- Settings
     op("Settings", "a setting's switch or choice", "settings_card", "settings.set"),
@@ -392,6 +420,13 @@ pub const INVENTORY: &[Capability] = &[
     person("Settings", "the policy changed: Keep what I approved", "control_answer_policy", "Only you can decide about a change to a project's policy.", Place::Settings(Section::Projects)),
     person("Settings", "add a Claude or Codex account", "add_account_from_form", "Only you can add an account: it signs in with your password.", ACCOUNTS),
     person("Settings", "sign in to an account", "start_login", "Only you can sign in to an account.", ACCOUNTS),
+    person("Settings", "sign in to an account in a terminal", "start_login_terminal", "Only you can sign in to an account.", ACCOUNTS),
+    person("Settings", "sign out of an account", "account_sign_out", "Only you can sign an account out.", ACCOUNTS),
+    person("Settings", "the code from the browser page of a sign-in", "signin_send_code", "Only you can sign in to an account.", ACCOUNTS),
+    local("Settings", "a sign-in: open the page again", "signin_row"),
+    local("Settings", "a sign-in: copy the link", "signin_row"),
+    local("Settings", "a sign-in: cancel, or close", "signin_cancel"),
+    local("Settings", "a sign-in that failed: try again", "signin_row"),
     person("Settings", "remove an account", "remove_account", "Only you can remove an account.", ACCOUNTS),
     person("Settings", "the default GitHub account", "set_github_default", "Only you can choose the default GitHub account.", ACCOUNTS),
     person("Settings", "the email a GitHub account commits with", "save_github_email", "Only you can change the email your commits carry.", ACCOUNTS),
@@ -408,6 +443,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Settings", "restart to update", "update_restart", "Only you can restart Glasscode to update it.", Place::Settings(Section::Updates)),
     planned("Settings", "the update's status", "update_rows", "update.status"),
     person("Settings", "add a CLI version", "open_add_cli", "Only you can add a CLI version: the team approves each one.", Place::Settings(Section::Updates)),
+    local("Settings", "a CLI's row: show or hide the argument lists it refuses", "cli_details_toggle"),
     person("Settings", "run the first run again", "open_first_run", "Only you can run the first run again.", SETTINGS),
     op("Settings", "the manager's status", "settings_manager", "manager.status"),
     // ----- status bar, usage, resources, ports
@@ -435,6 +471,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "add a site a project's sessions may open", "trust_change", "Only you add a site sessions may open.", Place::Settings(Section::Manager)),
     person("Manager", "remove a site a project's sessions may open", "trust_change", "Only you remove a site sessions may open.", Place::Settings(Section::Manager)),
     op("Manager", "try a playbook on the last 7 days", "trust_try", "playbook.test"),
+    local("Manager", "a project's trust row: open what its level allows, or the field of a thing to add", "trust_panel"),
     op("Manager", "move in what agents already know", "open_move_in", "movein.open"),
     person("Manager", "try moving the old manager's data again", "migration_retry", "Only you can run the move of the old manager's data again: Settings › Manager has it while it fails.", Place::Settings(Section::Manager)),
     person("Manager", "use the server's copy when this Mac's clock went back", "clock_use_server", "Only you can choose the server's copy: what this Mac changed while its clock was wrong stays here.", Place::Settings(Section::Manager)),
@@ -456,23 +493,24 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "give Claude its notes back (move out)", "data_move_out_now", "Only you move your notes out.", Place::Settings(Section::Manager)),
     person("Manager", "turn memory's learning on or off", "learning_set", "Only you decide whether memory learns from what you type.", Place::Settings(Section::Manager)),
     person("Manager", "open memory: what it keeps and what waits for you", "memory_open", "Only you open your memory page.", Place::Settings(Section::Manager)),
-    person("Manager", "accept or reject a proposal for memory", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
-    person("Manager", "accept every proposal waiting for memory", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
-    person("Manager", "keep or discard an edit made by hand in the memory folder", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
-    person("Manager", "forget an entry of memory", "memory_change", "Only you decide what memory forgets.", Place::View(View::Manager)),
+    person("Manager", "accept or reject a proposal for memory", "memory_change", "Only you decide what memory keeps.", Place::Manager),
+    person("Manager", "accept every proposal waiting for memory", "memory_change", "Only you decide what memory keeps.", Place::Manager),
+    person("Manager", "keep or discard an edit made by hand in the memory folder", "memory_change", "Only you decide what memory keeps.", Place::Manager),
+    person("Manager", "forget an entry of memory", "memory_change", "Only you decide what memory forgets.", Place::Manager),
     // ----- voice
-    person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
-    person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),
+    person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::Manager),
+    person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::Manager),
     // ----- programs outside Glasscode
     person("Programs outside", "open a link or a folder", "start_outside", "Only you can open programs outside Glasscode.", Place::View(View::Sessions)),
     // ----- the manager
-    op("Manager", "the manager's page", "show_manager", "manager.show"),
+    op("Manager", "the manager on Today: its panel, with the cursor in its box", "show_manager", "manager.show"),
     op("Manager", "ask the manager", "manager_ask_as", "manager.ask"),
-    // The v2 chat (M52.1): one thread, on the Manager page and under the Today box.
+    // The v2 chat (M52.1): one thread, in the manager's panel (Today's right panel, and over the
+    // window on the other pages) and under the Today box.
     op("Manager", "a chip in the chat that opens a session or a pull request", "chat_open", "ui.open"),
     op("Manager", "Stop the answer being written", "chat_stop", "manager.stop"),
     op("Manager", "the bubble: open or close the chat over the window", "render_manager_bubble", "ui.panel"),
-    op("Manager", "close the chat over the window", "render_chat_overlay", "ui.panel"),
+    op("Manager", "close the chat over the window", "assistant_header", "ui.panel"),
     op("Manager", "open the full conversation from the chat", "show_manager", "manager.show"),
     op("Manager", "send in the chat over the window", "chat_overlay_send", "manager.ask"),
     // M52.2: cards, Show me, Undo, the failure line's way out, and the About chip.
@@ -484,7 +522,17 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "Open Updates, when its CLI version is not approved", "chat_recover", "ui.open"),
     op("Manager", "Manager settings, when its agent is missing or its cap is reached", "chat_recover", "ui.open"),
     op("Manager", "Try again, when an answer did not come", "chat_recover", "manager.ask"),
-    local("Manager", "send the next message without where you are (the About chip)", "render_chat_overlay"),
+    local("Manager", "send the next message without where you are (the About chip)", "assistant_header"),
+    local("Manager", "the panel's tab on Today: Chat, Follow-ups, Messages or Memory", "assistant_stages"),
+    op("Manager", "a thing to ask, one click (in the panel, until there is a conversation)", "assistant_composer", "manager.ask"),
+    op("Manager", "send in the panel on Today", "manager_send_typed", "manager.ask"),
+    local("Manager", "a click in the panel's field puts the cursor there", "assistant_composer"),
+    local("Manager", "show earlier messages of the conversation", "assistant_chat"),
+    local("Manager", "put the picture away, or bring it back", "render_scene_card"),
+    local("Manager", "a step of the picture it explains", "manager_scene_go"),
+    local("Manager", "a stop of its walk (the dots over the bubble)", "manager_tour_go"),
+    op("Manager", "Manager settings, from the panel's header", "assistant_header", "ui.open"),
+    op("Manager", "a follow-up's session or pull request", "manager_followups", "ui.open"),
     local("Manager", "the chat's line of why it cannot think", "render_chat_failure"),
     // ux-15's leftovers: the limit-reset hold, and the other agent as the way out.
     local("Manager", "Ask the other agent instead (its account), when the manager's own is out of usage or signed out", "chat_ask_other"),
@@ -505,25 +553,25 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "Useful, on a nudge in the chat", "render_chat_item", "manager.feedback"),
     op("Manager", "Not useful, on a nudge in the chat", "render_chat_item", "manager.feedback"),
     op("Manager", "Fewer like this, on a nudge in the chat", "render_chat_item", "manager.feedback"),
-    op("Manager", "a topic of the conversation on the Manager page", "render_chat_topics", "ui.topic"),
-    person("Manager", "remove a queued message", "render_chat_thread", "Only you can take back a message you queued.", Place::View(View::Manager)),
+    op("Manager", "a topic of the conversation in the panel on Today", "render_chat_topics", "ui.topic"),
+    person("Manager", "remove a queued message", "render_chat_thread", "Only you can take back a message you queued.", Place::Manager),
     op("Manager", "what the manager says", "manager_voice_speak", "manager.say"),
-    op("Manager", "the walk through today's update", "render_manager", "manager.tour"),
-    op("Manager", "what it remembers", "render_manager", "manager.memory"),
-    op("Manager", "leave it a note", "render_manager", "manager.remember"),
-    op("Manager", "drop a note", "render_manager", "manager.forget"),
+    op("Manager", "the walk through today's update", "manager_start_tour", "manager.tour"),
+    op("Manager", "what it remembers", "manager_memory", "manager.memory"),
+    op("Manager", "leave it a note", "manager_memory", "manager.remember"),
+    op("Manager", "drop a note", "manager_memory", "manager.forget"),
     op("Manager", "a scene it draws", "render_scene", "manager.scene"),
-    op("Manager", "follow-ups", "render_manager", "manager.follow_up.list"),
-    op("Manager", "add a follow-up", "render_manager", "manager.follow_up.add"),
-    op("Manager", "close a follow-up", "render_manager", "manager.follow_up.done"),
-    op("Manager", "drop a follow-up", "render_manager", "manager.follow_up.drop"),
-    op("Manager", "the messages it drafted", "render_manager", "manager.message.list"),
-    op("Manager", "draft a message", "render_manager", "manager.message.draft"),
-    op("Manager", "allow a message", "render_manager", "manager.message.approve"),
-    op("Manager", "reject a message", "render_manager", "manager.message.reject"),
-    op("Manager", "the checks it runs", "render_manager", "manager.check.list"),
-    op("Manager", "add a check", "render_manager", "manager.check.add"),
-    op("Manager", "stop a check", "render_manager", "manager.check.remove"),
+    op("Manager", "follow-ups", "manager_followups", "manager.follow_up.list"),
+    op("Manager", "add a follow-up", "manager_followups", "manager.follow_up.add"),
+    op("Manager", "close a follow-up", "manager_follow_done", "manager.follow_up.done"),
+    op("Manager", "drop a follow-up", "manager_followups", "manager.follow_up.drop"),
+    op("Manager", "the messages it drafted", "manager_messages", "manager.message.list"),
+    op("Manager", "draft a message", "manager_messages", "manager.message.draft"),
+    op("Manager", "allow a message", "manager_decide_buttons", "manager.message.approve"),
+    op("Manager", "reject a message", "manager_decide_buttons", "manager.message.reject"),
+    op("Manager", "the checks it runs", "manager_next", "manager.check.list"),
+    op("Manager", "add a check", "manager_next", "manager.check.add"),
+    op("Manager", "stop a check", "manager_next", "manager.check.remove"),
     op("Manager", "a token for a device's voice", "manager_voice_keys_check", "manager.voice_token"),
     op("Glasses", "the paired phones and glasses", "door_devices", "device.list"),
     local("Title bar", "glasses icon: open Settings › Glasses", "render_glasses_icon"),
@@ -670,8 +718,8 @@ mod tests {
     /// Every view, Settings section and side-panel tab has a place, and its name finds it again.
     #[test]
     fn every_view_section_and_tab_has_a_place() {
-        let places: Vec<Place> = VIEWS.into_iter().map(Place::View).chain(Section::all().into_iter().map(Place::Settings)).chain(TABS.into_iter().map(Place::Tab)).collect();
-        assert_eq!(places.len(), 8 + 13 + 4);
+        let places: Vec<Place> = VIEWS.into_iter().map(Place::View).chain(Section::all().into_iter().map(Place::Settings)).chain(TABS.into_iter().map(Place::Tab)).chain([Place::Manager]).collect();
+        assert_eq!(places.len(), 7 + 13 + 4 + 1);
         let mut names = BTreeSet::new();
         for place in places {
             let name = place.name();

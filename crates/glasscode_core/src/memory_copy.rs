@@ -24,7 +24,7 @@ pub const SERVER_REF: &str = "refs/glasscode/memory-server";
 
 fn git(repo: &Path) -> std::process::Command {
     let mut cmd = crate::sys::command("git");
-    cmd.arg("-C").arg(repo).args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"]).env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("-C").arg(repo).args(["-c", crate::sys::NO_HOOKS, "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"]).env("GIT_TERMINAL_PROMPT", "0");
     cmd
 }
 
@@ -108,10 +108,14 @@ fn pointing_at(repo: &Path, commit: &str, excluded: &[String]) -> anyhow::Result
 /// committed with `previous` (the copy's last commit) as its only parent, so the copy's history
 /// holds filtered trees only. The same tree as `previous` gives `previous` back.
 pub fn server_commit(repo: &Path, commit: &str, excluded: &[String], previous: Option<&str>) -> anyhow::Result<String> {
-    let index = tempfile::NamedTempFile::new().context("no temporary index")?;
+    // A path in a folder of its own, with no file there yet: git writes a new index beside it and
+    // moves that into its place, which Windows does not allow over a file that this process holds
+    // open ("unable to write new index file").
+    let folder = tempfile::tempdir().context("no temporary index")?;
+    let index = folder.path().join("index");
     let with_index = |args: &[&str]| {
         let mut cmd = git(repo);
-        cmd.env("GIT_INDEX_FILE", index.path()).args(args);
+        cmd.env("GIT_INDEX_FILE", &index).args(args);
         cmd
     };
     run(with_index(&["read-tree", commit]))?;
@@ -250,7 +254,7 @@ mod tests {
     use super::*;
 
     fn sh(repo: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git").arg("-C").arg(repo).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        let out = std::process::Command::new("git").arg("-C").arg(repo).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"]).args(args).output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }

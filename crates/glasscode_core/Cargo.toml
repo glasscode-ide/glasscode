@@ -1,6 +1,6 @@
 [package]
 name = "glasscode_core"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
@@ -46,10 +46,11 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["c
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# RFC 3339 stamps in the agents' history (`agent_history`), on every system; on Windows also the
+# local time zone (`sys::local_time`), where Unix asks the C library instead.
+chrono = { workspace = true, features = ["clock"] }
 
 [target.'cfg(windows)'.dependencies]
-# The local time zone (`sys::local_time`); Unix asks the C library instead.
-chrono = { workspace = true, features = ["clock"] }
 # The named pipe of the `glasscode` command (`sys::control`), open only to this user;
 # Credential Manager (`sys::secrets`), where macOS asks /usr/bin/security instead; and the
 # notification sounds (`sys::play_sound`); and the tables of listening ports (`sys::listeners`).

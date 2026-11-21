@@ -78,7 +78,7 @@ pub fn main(args: Vec<String>) -> i32 {
             return code::OK;
         }
         Some("version" | "--version" | "-V") => {
-            println!("glasscode {}", if crate::update::BUILD == 0 { "development build".to_string() } else { crate::update::BUILD.to_string() });
+            println!("glasscode {}", crate::update::describe(crate::update::VERSION, crate::update::BUILD));
             return code::OK;
         }
         // What Claude Code runs in a session on Windows (`agents::launch`), not words for people.

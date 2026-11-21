@@ -166,9 +166,22 @@ pub fn class_paths(classes: &[PathClass]) -> Vec<PathBuf> {
 /// A permission rule's path: absolute rules start with `//` (one `/` is relative to the settings
 /// file, P07), and a folder covers everything under it.
 fn rule(tool: &str, path: &Path, folder: bool) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let text = if text.starts_with('/') { format!("/{text}") } else { format!("//{text}") };
+    let text = format!("/{}", posix(path));
     if folder { format!("{tool}({}/**)", text.trim_end_matches('/')) } else { format!("{tool}({text})") }
+}
+
+/// A path as Claude Code matches it in a permission rule: with `/` between its parts and from
+/// the root. Windows: Claude Code brings a path to this form before it matches, a drive as a
+/// folder with a small letter (`C:\Users\sam` is `/c/Users/sam`), so a rule with `C:` in it would
+/// deny nothing.
+pub(crate) fn posix(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let mut letters = text.chars();
+    match (letters.next(), letters.next()) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => format!("/{}{}", drive.to_ascii_lowercase(), &text[2..]),
+        _ if text.starts_with('/') => text,
+        _ => format!("/{text}"),
+    }
 }
 
 /// Whether a layout path is a folder: the rows without an extension are folders.
@@ -612,9 +625,30 @@ fn expand(path: &str, cwd: &Path) -> PathBuf {
     } else if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("$HOME/")) {
         home.join(rest)
     } else {
-        PathBuf::from(path)
+        PathBuf::from(windows_form(path))
     };
     if path.is_relative() { cwd.join(path) } else { path }
+}
+
+/// Windows: a path as Git's shell writes it (`/c/Users/sam/x`, which is what Claude Code's Bash
+/// tool runs in) is the path `C:/Users/sam/x`. Elsewhere, and for every other path, as given.
+fn windows_form(path: &str) -> String {
+    if cfg!(windows) {
+        let mut letters = path.chars();
+        if let (Some('/'), Some(drive), Some('/') | None) = (letters.next(), letters.next(), letters.next())
+            && drive.is_ascii_alphabetic()
+        {
+            return format!("{}:/{}", drive.to_ascii_uppercase(), path.get(3..).unwrap_or_default());
+        }
+    }
+    path.to_string()
+}
+
+/// Whether a word of a command names a path: with a slash of either kind, from the home or the
+/// folder, or (Windows) from a drive.
+fn looks_like_path(word: &str) -> bool {
+    let drive = word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && word.as_bytes().get(1) == Some(&b':');
+    word.starts_with("~/") || word.starts_with("$HOME") || word.contains('/') || word.contains('\\') || (cfg!(windows) && drive)
 }
 
 /// A path a tool or a command touches: refused when sessions may not read it (or not write it).
@@ -674,8 +708,11 @@ fn commands(command: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The program of a command, without its folder and (Windows) without `.exe` or `.cmd`:
+/// `C:/tools/claude.exe` is `claude`.
 fn program(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    if cfg!(windows) { name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(name) } else { name }
 }
 
 fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
@@ -716,8 +753,7 @@ fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
             _ => {}
         }
         for word in &rest {
-            let looks_like_path = word.starts_with('/') || word.starts_with("~/") || word.starts_with("$HOME") || word.starts_with("./") || word.starts_with("../") || word.contains('/');
-            if looks_like_path && !word.starts_with('-') {
+            if looks_like_path(word) && !word.starts_with('-') {
                 gate_path(ctx, &expand(word, &ctx.worktree), false)?;
             }
         }
@@ -781,7 +817,7 @@ pub fn permission_answer(tool: &str, input: &Value, file: &PermissionFile) -> Pe
 
 /// What the app's own git calls on worktrees pass with the v2 engine (trust-m7): no hooks, no
 /// fsmonitor, plain ssh, whatever the worktree's configuration (which a session can write) says.
-pub const GIT_OVERRIDES: [&str; 6] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-c", "core.sshCommand=ssh"];
+pub const GIT_OVERRIDES: [&str; 6] = ["-c", crate::sys::NO_HOOKS, "-c", "core.fsmonitor=", "-c", "core.sshCommand=ssh"];
 
 // ----- Claude's auto-memory (D19) ---------------------------------------------------------------
 

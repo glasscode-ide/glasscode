@@ -197,14 +197,19 @@ pub fn checkbox(id: impl Into<ElementId>, checked: bool) -> Stateful<Div> {
         .when(checked, |d| d.child("✓"))
 }
 
-/// An on/off switch, as in Settings.
+/// An on/off switch, as in Settings. The knob slides when the switch changes: a spring that
+/// starts at its end when the switch first shows, so a page of switches stands still as it opens.
 pub fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
+    use gpui::AnimationExt as _;
+    // From the left end to the right one: the track without its padding, its edges and the knob.
+    let travel = theme::sz(36. - 2. * 2. - 14.) - px(2.);
+    let knob = div().flex_none().size(theme::sz(14.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() });
+    let spring = gpui::SpringAnimation::new(gpui::SpringConfig::new(600., 42., 1.)).to(if on { 1.0_f32 } else { 0. });
     div()
         .id(id)
         .flex()
         .flex_none()
         .items_center()
-        .when(on, |d| d.justify_end())
         .w(theme::sz(36.))
         .h(theme::sz(20.))
         .p(theme::sz(2.))
@@ -213,7 +218,7 @@ pub fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
         .border_1()
         .border_color(if on { theme::accent() } else { theme::border_strong() })
         .cursor_pointer()
-        .child(div().size(theme::sz(14.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() }))
+        .child(knob.with_spring("knob", spring, move |knob, at: f32| knob.ml(travel * at.clamp(0., 1.))))
 }
 
 pub fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
@@ -324,6 +329,33 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
         RowState::NeedsYou => dot.bg(theme::attention()).into_any_element(),
         RowState::Working => dot.bg(theme::added()).into_any_element(),
         RowState::Idle => dot.bg(theme::border_strong()).into_any_element(),
+    }
+}
+
+// ----- tooltip -----------------------------------------------------------------------------
+
+/// The words that show when the pointer rests on a control: `.tooltip(ui::tip("Board"))`. For a
+/// control that shows an icon without its word, so that the word is one rest of the pointer away.
+pub fn tip(words: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let words: SharedString = words.into();
+    move |_, cx| cx.new(|_| Tip(words.clone())).into()
+}
+
+struct Tip(SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(theme::sz(8.))
+            .py(theme::sz(4.))
+            .rounded(theme::sz(6.))
+            .border_1()
+            .border_color(theme::border_strong())
+            .bg(theme::raised())
+            .shadow_md()
+            .text_size(theme::sz(12.))
+            .text_color(theme::text())
+            .child(self.0.clone())
     }
 }
 

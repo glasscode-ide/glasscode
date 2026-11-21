@@ -10,7 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BUNDLE_ID="${BUNDLE_ID:-dev.glasscode}"
-VERSION="$(grep -m1 '^version' crates/glasscode/Cargo.toml | cut -d'"' -f2)"
+# The version of the workspace ([workspace.package] in Cargo.toml).
+VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 # A release build's number (GLASSCODE_BUILD), else the commit count.
 BUILD="${GLASSCODE_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 
@@ -49,6 +50,19 @@ if ls target/glasscoded/glasscoded-linux-* >/dev/null 2>&1; then
   cp target/glasscoded/glasscoded-linux-* "$APP/Contents/Resources/glasscoded/"
 else
   echo "warning: no glasscoded Linux builds (run script/build-glasscoded.sh); the app cannot install the server daemon" >&2
+fi
+# The licence texts go with the app (Apache-2.0, section 4; the fonts' OFL). The licences of the
+# Rust packages are THIRD-PARTY-NOTICES.html, when cargo-about is installed.
+mkdir -p "$APP/Contents/Resources/licenses/fonts"
+cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
+cp NOTICE "$APP/Contents/Resources/NOTICE.txt"
+cp crates/glasscode/assets/fonts/*.txt "$APP/Contents/Resources/licenses/fonts/"
+cp vendor/LICENSE-APACHE "$APP/Contents/Resources/licenses/GPUI-LICENSE-APACHE.txt"
+if cargo about --version >/dev/null 2>&1; then
+  # What the app has: the Mac app, and the server daemon for Linux.
+  cargo about generate --locked --fail --workspace --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu -o "$APP/Contents/Resources/THIRD-PARTY-NOTICES.html" about.hbs
+else
+  echo "warning: cargo-about is not installed; the app has no THIRD-PARTY-NOTICES.html (cargo install --locked cargo-about --features cli)" >&2
 fi
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

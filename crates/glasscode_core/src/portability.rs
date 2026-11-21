@@ -361,7 +361,13 @@ fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn run_tar(args: &[&str]) -> anyhow::Result<()> {
-    let output = crate::sys::command("tar").args(args).output().context("could not run tar")?;
+    // Windows: its own tar.exe, by its place. Another `tar` first on the PATH (the one of Git's
+    // shell) reads `C:` in a path as the name of a computer.
+    #[cfg(windows)]
+    let tar = std::env::var_os("SystemRoot").map(|root| std::path::PathBuf::from(root).join("System32").join("tar.exe")).filter(|tar| tar.is_file()).unwrap_or_else(|| "tar".into());
+    #[cfg(not(windows))]
+    let tar = "tar";
+    let output = crate::sys::command(tar).args(args).output().context("could not run tar")?;
     if !output.status.success() {
         bail!("tar: {}", String::from_utf8_lossy(&output.stderr).trim());
     }

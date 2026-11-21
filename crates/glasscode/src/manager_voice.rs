@@ -131,7 +131,7 @@ fn missing(settings: &Settings) -> Option<String> {
 
 /// The `manager-voice` helper: an explicit override, then inside the app bundle
 /// (Contents/Resources), then this repository's own builds.
-fn helper_path() -> Option<PathBuf> {
+pub(crate) fn helper_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("GLASSCODE_MANAGER_VOICE") {
         let path = PathBuf::from(path);
         if path.exists() {

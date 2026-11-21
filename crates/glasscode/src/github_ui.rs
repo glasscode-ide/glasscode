@@ -120,24 +120,64 @@ fn initials(login: &str) -> String {
     }
 }
 
-fn pill(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> gpui::Div {
-    div().flex_none().px_2().py_0p5().rounded_full().bg(bg).text_color(fg).text_size(theme::sz(12.)).font_weight(FontWeight::SEMIBOLD).child(text.into())
+/// The pull request's state beside its number: a small dot in the state's colour and the word,
+/// in a thin outline. No filled colour (the owner, 2026-11-21: colour only where it says
+/// something, and then as little of it as says it).
+fn state_badge(text: &'static str, color: Hsla) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(theme::sz(6.))
+        .h(theme::sz(22.))
+        .px(theme::sz(8.))
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border_strong())
+        .text_size(theme::sz(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::text_soft())
+        .child(ui::dot(color))
+        .child(text)
 }
 
-fn red_bg() -> Hsla {
-    theme::error_bg()
+/// One answer on the pull request's card ("4 checks passed", "Review needed"): a dot in the
+/// state's colour and plain words on the card's own surface. It reaches a little past the card's
+/// text on both sides, so that a row that can be clicked has room for its hover.
+fn status_row(color: Hsla, text: String) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(theme::sz(10.))
+        .h(theme::sz(30.))
+        .mx(theme::sz(-STATUS_INSET))
+        .px(theme::sz(STATUS_INSET))
+        .rounded(theme::sz(8.))
+        .text_size(theme::sz(13.))
+        .text_color(theme::text())
+        .child(ui::dot(color))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
 }
-fn green_bg() -> Hsla {
-    theme::success_bg()
+
+/// How far a status row reaches past the card's text.
+const STATUS_INSET: f32 = 8.;
+
+/// The inside edge of the pull request's card, which the rows under it keep to.
+const CARD_PAD: f32 = 14.;
+
+/// The small arrow of a row that folds: to the right when closed, down when open.
+fn fold_arrow(open: bool) -> impl IntoElement {
+    crate::icons::icon(crate::icons::CHEVRON, theme::sz(10.), theme::sz(10.), theme::faint())
+        .with_transformation(gpui::Transformation::rotate(gpui::percentage(if open { 0.25 } else { 0. })))
 }
-fn amber_bg() -> Hsla {
-    theme::warn_bg()
+
+/// "4 checks", "1 check".
+fn checks_word(n: usize) -> String {
+    format!("{n} check{}", if n == 1 { "" } else { "s" })
 }
+
 fn blue() -> Hsla {
     theme::codex()
-}
-fn blue_bg() -> Hsla {
-    theme::info_bg()
 }
 
 /// How many checks failed, are running, passed and were skipped.
@@ -210,10 +250,11 @@ impl Workspace {
     pub fn gh_tick(&mut self, cx: &mut Context<Self>) {
         // Debug builds: GLASSCODE_DEBUG_RIGHT_TAB=files|changes|checks|pr opens that tab once;
         // files:changed shows only changed files, files:<path> reveals that file; checks:sample
-        // and pr:sample give the active session a made-up pull request.
+        // and pr:sample give the active session a made-up pull request (a check failed, one
+        // runs), checks:passed and pr:passed one whose checks passed and that waits for a review.
         if cfg!(debug_assertions) {
             static DONE: std::sync::Once = std::sync::Once::new();
-            static SAMPLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static SAMPLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
             let mut wanted = None;
             DONE.call_once(|| wanted = std::env::var("GLASSCODE_DEBUG_RIGHT_TAB").ok());
             if let Some(wanted) = wanted {
@@ -228,7 +269,7 @@ impl Workspace {
                     }
                     _ => {
                         let (tab, sample) = wanted.split_once(':').unwrap_or((wanted.as_str(), ""));
-                        SAMPLE.store(sample == "sample", std::sync::atomic::Ordering::Relaxed);
+                        SAMPLE.store(match sample { "sample" => 1, "passed" => 2, _ => 0 }, std::sync::atomic::Ordering::Relaxed);
                         self.right_tab = match tab {
                             "changes" => RightTab::Changes,
                             "files" => RightTab::Files,
@@ -239,8 +280,9 @@ impl Workspace {
                     }
                 }
             }
-            if SAMPLE.load(std::sync::atomic::Ordering::Relaxed) {
-                self.debug_sample_pr();
+            match SAMPLE.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => {}
+                sample => self.debug_sample_pr(sample == 2),
             }
         }
         self.files_tick(cx);
@@ -273,8 +315,9 @@ impl Workspace {
     /// Debug builds: a made-up pull request (acme/app#42) for the active session, with a check
     /// that failed, one that runs and three that passed, to look at the Checks and Pull request
     /// tabs without GitHub. Put back on each tick, as the poll of pull requests replaces it; it
-    /// counts as just read, so nothing asks GitHub for it.
-    fn debug_sample_pr(&mut self) {
+    /// counts as just read, so nothing asks GitHub for it. With `passed`, its four checks passed,
+    /// it waits for a review, and it has a review thread and two comments.
+    fn debug_sample_pr(&mut self, passed: bool) {
         let Some(session) = self.active_session().cloned() else { return };
         let repo = "acme/app".to_string();
         let pr = serde_json::json!({ "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "headRefName": session.branch, "baseRefName": "main", "state": "OPEN" });
@@ -292,15 +335,38 @@ impl Workspace {
             "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "state": "OPEN", "is_draft": false,
             "head": session.branch, "base": "main", "author": "alex", "updated_at": "", "mergeable": "MERGEABLE", "merge_state": "UNSTABLE",
             "review_decision": "REVIEW_REQUIRED", "labels": [],
-            "checks": [
-                check("test (windows)", "COMPLETED", "FAILURE", "2026-11-17T10:03:41Z"),
-                check("build (macos)", "IN_PROGRESS", "", ""),
-                check("build (windows)", "COMPLETED", "SUCCESS", "2026-11-17T10:02:14Z"),
-                check("clippy", "COMPLETED", "SUCCESS", "2026-11-17T10:00:48Z"),
-                check("fmt", "COMPLETED", "SUCCESS", "2026-11-17T10:00:21Z"),
-            ],
-            "reviewers": [{ "login": "sam-lee", "state": "REQUESTED", "submitted_at": "", "is_bot": false }],
-            "comments": [], "threads": [],
+            "checks": if passed {
+                serde_json::json!([
+                    check("test (windows)", "COMPLETED", "SUCCESS", "2026-11-17T10:03:41Z"),
+                    check("build (windows)", "COMPLETED", "SUCCESS", "2026-11-17T10:02:14Z"),
+                    check("clippy", "COMPLETED", "SUCCESS", "2026-11-17T10:00:48Z"),
+                    check("fmt", "COMPLETED", "SUCCESS", "2026-11-17T10:00:21Z"),
+                ])
+            } else {
+                serde_json::json!([
+                    check("test (windows)", "COMPLETED", "FAILURE", "2026-11-17T10:03:41Z"),
+                    check("build (macos)", "IN_PROGRESS", "", ""),
+                    check("build (windows)", "COMPLETED", "SUCCESS", "2026-11-17T10:02:14Z"),
+                    check("clippy", "COMPLETED", "SUCCESS", "2026-11-17T10:00:48Z"),
+                    check("fmt", "COMPLETED", "SUCCESS", "2026-11-17T10:00:21Z"),
+                ])
+            },
+            "reviewers": [{ "login": "sam-example", "state": "REQUESTED", "submitted_at": "", "is_bot": false }],
+            "comments": if passed {
+                serde_json::json!([
+                    { "author": "sam-example", "body": "Looks close. Can the tab keep its place when the checks reload?", "created_at": "2026-11-17T11:10:00Z", "url": "https://github.com/acme/app/pull/42#issuecomment-1", "is_bot": false },
+                    { "author": "acme-bot", "body": "Preview is not set up for this repository.", "created_at": "2026-11-17T10:05:00Z", "url": "https://github.com/acme/app/pull/42#issuecomment-2", "is_bot": true },
+                ])
+            } else {
+                serde_json::json!([])
+            },
+            "threads": if passed {
+                serde_json::json!([{ "id": "T1", "path": "src/checks.rs", "line": 48, "resolved": false, "outdated": false, "comments": [
+                    { "author": "sam-example", "body": "This reads the whole log each time. Keep the last offset?", "created_at": "2026-11-17T11:02:00Z", "url": "", "diff_hunk": "" },
+                ] }])
+            } else {
+                serde_json::json!([])
+            },
             "preview": { "available": false, "labeled": false, "state": null, "url": null, "sha": null, "updated_at": null, "links": [] },
         });
         if let Ok(details) = serde_json::from_value::<PrDetails>(details) {
@@ -505,48 +571,46 @@ impl Workspace {
         };
 
         // --- the card: which PR, its state, and four answers at a glance ---
-        let (state_label, state_fg, state_bg) = match (d.state.as_str(), d.is_draft) {
-            ("MERGED", _) => ("Merged", theme::violet(), theme::violet_bg()),
-            ("CLOSED", _) => ("Closed", theme::removed(), red_bg()),
-            (_, true) => ("Draft", theme::muted(), theme::selected()),
-            _ => ("Open", theme::added(), green_bg()),
+        let (state_label, state_color) = match (d.state.as_str(), d.is_draft) {
+            ("MERGED", _) => ("Merged", theme::violet()),
+            ("CLOSED", _) => ("Closed", theme::removed()),
+            (_, true) => ("Draft", theme::faint()),
+            _ => ("Open", theme::added()),
         };
         let CheckCounts { failed, running, passed, skipped } = check_counts(&d.checks);
         let unresolved: Vec<&ReviewThread> = d.threads.iter().filter(|t| !t.resolved).collect();
         let approvals = d.reviewers.iter().filter(|r| r.state == "APPROVED").count();
         let ci = if failed > 0 {
-            (format!("CI: {failed} failing"), theme::removed(), red_bg())
+            (format!("{} failing", checks_word(failed)), theme::removed())
         } else if running > 0 {
-            (format!("CI: {running} running"), blue(), blue_bg())
+            (format!("{} running", checks_word(running)), blue())
         } else if passed > 0 {
-            (format!("CI: {passed} passed"), theme::added(), green_bg())
+            (format!("{} passed", checks_word(passed)), theme::added())
         } else if d.merge_state == "DIRTY" {
             // GitHub runs no pull_request workflows while the branch conflicts with its base.
-            ("CI: blocked by conflicts".to_string(), theme::modified(), amber_bg())
+            ("Checks blocked by conflicts".to_string(), theme::modified())
         } else if skipped > 0 {
-            (format!("CI: {skipped} skipped"), theme::muted(), theme::selected())
+            (format!("{} skipped", checks_word(skipped)), theme::faint())
         } else {
-            ("CI: no checks".to_string(), theme::muted(), theme::selected())
+            ("No checks".to_string(), theme::faint())
         };
         let review = match d.review_decision.as_deref() {
-            Some("APPROVED") => (format!("Approved ({approvals})"), theme::added(), green_bg()),
-            Some("CHANGES_REQUESTED") => ("Changes requested".to_string(), theme::removed(), red_bg()),
-            _ => ("Review needed".to_string(), theme::modified(), amber_bg()),
+            Some("APPROVED") => (format!("Approved ({approvals})"), theme::added()),
+            Some("CHANGES_REQUESTED") => ("Changes requested".to_string(), theme::removed()),
+            _ => ("Review needed".to_string(), theme::modified()),
         };
         let preview = match (d.preview.labeled, d.preview.state.as_deref()) {
             _ if !d.preview.available => None,
-            (false, _) => Some(("No preview".to_string(), theme::muted(), theme::selected())),
-            (true, Some("success")) => Some(("Preview ready".to_string(), theme::added(), green_bg())),
-            (true, Some("failure" | "error")) => Some(("Preview failed".to_string(), theme::removed(), red_bg())),
-            (true, _) => Some(("Preview deploying".to_string(), blue(), blue_bg())),
+            (false, _) => Some(("No preview".to_string(), theme::faint())),
+            (true, Some("success")) => Some(("Preview ready".to_string(), theme::added())),
+            (true, Some("failure" | "error")) => Some(("Preview failed".to_string(), theme::removed())),
+            (true, _) => Some(("Preview deploying".to_string(), blue())),
         };
         // A review bot's verdict, if one keeps a managed review comment on the PR.
         let verdict = d.verdict.as_ref().map(|v| {
-            let (fg, bg) = if v.approved { (theme::added(), green_bg()) } else { (theme::removed(), red_bg()) };
             let label = if v.version > 0 { format!("Review: {} v{}", v.verdict, v.version) } else { format!("Review: {}", v.verdict) };
-            (label, fg, bg)
+            (label, if v.approved { theme::added() } else { theme::removed() })
         });
-        let chip = |(text, fg, bg): (String, Hsla, Hsla)| div().flex().items_center().px_2p5().py_2().rounded_lg().bg(bg).text_color(fg).text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text);
         let url = d.url.clone();
         let mut meta: Vec<AnyElement> = vec![div().child(format!("{} → {}", d.head, d.base)).into_any_element()];
         match d.merge_state.as_str() {
@@ -559,7 +623,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .p_3p5()
+                .p(theme::sz(CARD_PAD))
                 .rounded(theme::sz(14.))
                 .border_1()
                 .border_color(theme::border())
@@ -574,7 +638,7 @@ impl Workspace {
                         .gap_x_2()
                         .gap_y_1()
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("#{}", d.number)))
-                        .child(pill(state_label, state_fg, state_bg))
+                        .child(state_badge(state_label, state_color))
                         .child(div().flex_1())
                         .child(refresh)
                         .child(
@@ -595,50 +659,45 @@ impl Workspace {
                 .child(div().text_size(theme::sz(15.)).line_height(theme::sz(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(d.title.clone()))
                 .child(div().flex().flex_wrap().gap_x_2().text_size(theme::sz(12.5)).text_color(theme::muted()).children(meta))
                 .child({
-                    // Two answers per row: CI and reviews, then the review verdict and the preview.
-                    // The CI answer opens the Checks tab, which has each check.
-                    let ci_chip = div()
+                    // One answer a row, under a hairline: the checks (which open the Checks tab,
+                    // where each one is), the reviews, then the review verdict and the preview.
+                    let ci_row = status_row(ci.1, ci.0)
                         .id("gh-ci")
-                        .flex_1()
-                        .min_w_0()
                         .cursor_pointer()
-                        .hover(|s| s.opacity(0.85))
+                        .hover(|s| s.bg(theme::hover()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.right_tab = RightTab::Checks;
                             cx.notify();
                         }))
-                        .child(chip(ci).w_full());
-                    let rest: Vec<(String, Hsla, Hsla)> = [verdict, preview].into_iter().flatten().collect();
-                    let mut rows: Vec<AnyElement> = vec![div().flex().gap_1p5().child(ci_chip).child(chip(review).flex_1().min_w_0()).into_any_element()];
-                    rows.extend(rest.chunks(2).map(|pair| {
-                        div()
-                            .flex()
-                            .gap_1p5()
-                            .children(pair.iter().cloned().map(|c| chip(c).flex_1().min_w_0().into_any_element()))
-                            .when(pair.len() == 1, |d| d.child(div().flex_1()))
-                            .into_any_element()
-                    }));
-                    div().flex().flex_col().gap_1p5().children(rows)
+                        .child(crate::icons::icon(crate::icons::CHEVRON, theme::sz(10.), theme::sz(10.), theme::faint()));
+                    let rest = [Some(review), verdict, preview].into_iter().flatten().map(|(text, color)| status_row(color, text));
+                    div().flex().flex_col().mt_1().pt_1p5().border_t_1().border_color(theme::border()).child(ci_row).children(rest)
                 }),
         );
 
         // --- sections: open by themselves only when they need you ---
-        let section = |id: &'static str, open: bool, title: &'static str, summary: String, color: Hsla| {
+        // A row that folds, in line with the card's text: its name, what it holds in a few
+        // words, and the arrow. `mark` is a dot before the words, when they say something waits
+        // for the person or went wrong.
+        let section = |id: &'static str, open: bool, title: &'static str, summary: String, mark: Option<Hsla>| {
             let heading = div()
                 .id(SharedString::from(format!("gh-section-{id}")))
                 .flex()
-                .items_baseline()
+                .items_center()
                 .gap_2()
-                .pt_3()
-                .pb_1()
+                .h(theme::sz(34.))
+                .px(theme::sz(CARD_PAD))
+                .rounded(theme::sz(8.))
                 .cursor_pointer()
-                .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).text_color(color).child(summary))
-                .child(div().text_size(theme::sz(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }));
+                .hover(|s| s.bg(theme::hover()))
+                .child(div().flex_none().text_size(theme::sz(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
+                .when_some(mark, |d, color| d.child(ui::dot(color).ml_1()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.5)).text_color(theme::muted()).child(summary))
+                .child(fold_arrow(open));
             // Marked while the manager points at this section.
             self.manager_mark(id, heading)
         };
-        let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
+        let row = || div().flex().items_center().gap_2p5().px(theme::sz(CARD_PAD)).py_2().rounded(theme::sz(10.)).border_1().border_color(theme::border()).bg(theme::raised());
 
         let conflicting = d.mergeable == "CONFLICTING";
         // Conflicts: Glasscode asks the agent to resolve them by itself too (crate::ci_fix).
@@ -682,15 +741,15 @@ impl Workspace {
             (true, _) => "deploying".into(),
             (false, _) => "none".into(),
         };
-        let preview_color = match (d.preview.labeled, preview_state.as_str()) {
-            (true, "success") => theme::added(),
-            (true, "failure" | "error") => theme::removed(),
-            (true, _) => blue(),
-            _ => theme::muted(),
+        let preview_mark = match (d.preview.labeled, preview_state.as_str()) {
+            (true, "success") => Some(theme::added()),
+            (true, "failure" | "error") => Some(theme::removed()),
+            (true, _) => Some(blue()),
+            _ => None,
         };
         let k = key.clone();
         if d.preview.available {
-            body = body.child(section("preview", preview_open, "Preview", preview_summary, preview_color).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "preview", preview_open, cx))));
+            body = body.child(section("preview", preview_open, "Preview", preview_summary, preview_mark).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "preview", preview_open, cx))));
         }
         if d.preview.available && preview_open {
             let cfg = PreviewConfig::load(&session.worktree);
@@ -792,7 +851,7 @@ impl Workspace {
             _ => format!("review needed · {approvals} approval{}", if approvals == 1 { "" } else { "s" }),
         };
         let k = key.clone();
-        body = body.child(section("reviews", reviews_open, "Reviews", reviews_summary, if changes_requested { theme::removed() } else { theme::muted() }).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "reviews", reviews_open, cx))));
+        body = body.child(section("reviews", reviews_open, "Reviews", reviews_summary, changes_requested.then(theme::removed)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "reviews", reviews_open, cx))));
         if reviews_open {
             let rows: Vec<AnyElement> = if d.reviewers.is_empty() {
                 vec![div().text_size(theme::sz(12.)).text_color(theme::muted()).child("No reviews or review requests yet.").into_any_element()]
@@ -801,15 +860,15 @@ impl Workspace {
                     .iter()
                     .map(|r| {
                         let (text, color) = match r.state.as_str() {
-                            "APPROVED" => (format!("approved {}", ago(&r.submitted_at)), theme::added()),
-                            "CHANGES_REQUESTED" => (format!("requested changes {}", ago(&r.submitted_at)), theme::removed()),
-                            "COMMENTED" => (format!("commented {}", ago(&r.submitted_at)), theme::muted()),
-                            "DISMISSED" => ("review dismissed".to_string(), theme::faint()),
-                            _ => ("review requested".to_string(), theme::modified()),
+                            "APPROVED" => (format!("approved {}", ago(&r.submitted_at)), Some(theme::added())),
+                            "CHANGES_REQUESTED" => (format!("requested changes {}", ago(&r.submitted_at)), Some(theme::removed())),
+                            "COMMENTED" => (format!("commented {}", ago(&r.submitted_at)), None),
+                            "DISMISSED" => ("review dismissed".to_string(), None),
+                            _ => ("review requested".to_string(), Some(theme::modified())),
                         };
                         row()
                             .child(div().size(theme::sz(24.)).flex_none().flex().items_center().justify_center().rounded_full().bg(theme::selected()).text_size(theme::sz(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(initials(&r.login)))
-                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_color(theme::text_strong()).child(r.login.clone())).child(div().text_size(theme::sz(11.5)).text_color(color).child(text)))
+                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_color(theme::text_strong()).child(r.login.clone())).child(div().flex().items_center().gap(theme::sz(6.)).text_size(theme::sz(11.5)).text_color(theme::muted()).when_some(color, |d, color| d.child(ui::dot(color))).child(text)))
                             .into_any_element()
                     })
                     .collect()
@@ -829,7 +888,7 @@ impl Workspace {
             format!("{} unresolved · {total} in all", unresolved.len())
         };
         let k = key.clone();
-        body = body.child(section("comments", comments_open, "Comments", comments_summary, if unresolved.is_empty() { theme::muted() } else { theme::modified() }).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "comments", comments_open, cx))));
+        body = body.child(section("comments", comments_open, "Comments", comments_summary, (!unresolved.is_empty()).then(theme::modified)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "comments", comments_open, cx))));
         if comments_open {
             let mut items: Vec<AnyElement> = Vec::new();
             let all = self.gh.show_all_comments;
@@ -900,18 +959,30 @@ impl Workspace {
         let counts = check_counts(&d.checks);
         let (running, passed) = (counts.running, counts.passed);
         let failed: Vec<&github::CheckRun> = d.checks.iter().filter(|c| c.state() == CheckState::Failed).collect();
-        let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
+        let row = || div().flex().items_center().gap_2p5().px(theme::sz(CARD_PAD)).py_2().rounded(theme::sz(10.)).border_1().border_color(theme::border()).bg(theme::raised());
+        // What the checks say as one dot: red when one failed, blue while one runs, else green.
+        let state = if !failed.is_empty() {
+            Some(theme::removed())
+        } else if running > 0 {
+            Some(blue())
+        } else if passed > 0 {
+            Some(theme::added())
+        } else {
+            None
+        };
         // In a narrow panel the refresh link goes under the summary.
         body = body.child(
             div()
                 .flex()
                 .flex_wrap()
-                .items_baseline()
+                .items_center()
                 .gap_x_2()
                 .gap_y_1()
+                .px(theme::sz(CARD_PAD))
                 .pb_1()
                 .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("#{}", d.number)))
-                .child(div().flex_1().min_w(theme::sz(140.)).text_size(theme::sz(13.)).text_color(if failed.is_empty() { theme::muted() } else { theme::removed() }).child(checks_summary(counts, &d.merge_state, &d.base)))
+                .when_some(state, |d, color| d.child(ui::dot(color)))
+                .child(div().flex_1().min_w(theme::sz(140.)).text_size(theme::sz(13.)).text_color(theme::text_soft()).child(checks_summary(counts, &d.merge_state, &d.base)))
                 .child(refresh),
         );
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -942,19 +1013,18 @@ impl Workspace {
                     .id("gh-passed")
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme::border())
+                    .gap_2p5()
+                    .h(theme::sz(34.))
+                    .px(theme::sz(CARD_PAD))
+                    .rounded(theme::sz(8.))
                     .cursor_pointer()
-                    .text_size(theme::sz(12.))
-                    .text_color(theme::muted())
+                    .hover(|s| s.bg(theme::hover()))
+                    .text_size(theme::sz(13.))
+                    .text_color(theme::text_soft())
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "passed", passed_open, cx)))
                     .child(div().w(theme::sz(14.)).text_color(theme::added()).child("✓"))
                     .child(div().flex_1().child(format!("{passed} passed")))
-                    .child(if passed_open { "Hide" } else { "Show" })
+                    .child(fold_arrow(passed_open))
                     .into_any_element(),
             );
         }
@@ -964,7 +1034,8 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .pl(theme::sz(34.))
+                    .pl(theme::sz(CARD_PAD + 24.))
+                    .pr(theme::sz(CARD_PAD))
                     .text_size(theme::sz(12.))
                     .text_color(theme::muted())
                     .children(d.checks.iter().filter(|c| c.state() == CheckState::Passed).take(60).map(|c| {
@@ -1097,7 +1168,7 @@ impl Workspace {
                 }
                 cx.notify();
             }))
-            .child(div().w(theme::sz(10.)).text_size(theme::sz(10.)).text_color(theme::faint()).mt(theme::sz(2.)).child(if open { "▾" } else { "▸" }))
+            .child(div().flex_none().mt(theme::sz(4.)).child(fold_arrow(open)))
             .child(
                 div()
                     .flex()
@@ -1195,7 +1266,7 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
-                    .child(div().w(theme::sz(10.)).text_size(theme::sz(10.)).text_color(theme::faint()).mt(theme::sz(2.)).child(if open { "▾" } else { "▸" }))
+                    .child(div().flex_none().mt(theme::sz(4.)).child(fold_arrow(open)))
                     .child(
                         div()
                             .flex()

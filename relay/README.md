@@ -10,7 +10,7 @@ instead: it needs no server you operate. Run the relay only when you can't use
 Tailscale (a locked-down network, a device you don't control).
 
 Nothing in Glasscode depends on any hosted service. This relay is yours to run, and
-it is licensed GPL-3.0 like the rest of Glasscode.
+it is licensed Apache-2.0 like the rest of Glasscode.
 
 ---
 
