@@ -3675,7 +3675,7 @@ mod tests {
     #[test]
     fn every_plan_site_has_an_op() {
         // The plans whose kind is not their op's: a dry run only reads.
-        const OTHER_KINDS: &[(&str, &str)] = &[("worktree.clean", "Read")];
+        const OTHER_KINDS: &[(&str, &str)] = &[("worktree.clean", "Read"), ("data.import", "Read")];
         let mut sites = 0;
         for (op, body) in bodies() {
             let spec = ops::find(op).unwrap();
