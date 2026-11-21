@@ -28,7 +28,11 @@ cleanup() {
     # The worker and the processes it started for its jobs.
     pkill -9 -f "$HERE/harness_worker.py" 2>/dev/null || true
   fi
-  [[ -n "${LK_PID:-}" ]] && kill "$LK_PID" 2>/dev/null || true
+  if [[ -n "${LK_PID:-}" ]]; then
+    kill "$LK_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$LK_PID" 2>/dev/null || break; sleep 0.5; done
+    kill -9 "$LK_PID" 2>/dev/null || true
+  fi
   [[ -z "${LIVEKIT_BIN:-}" ]] && docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -45,10 +49,14 @@ say -o "$MV_WORK/u2.aiff" "And what about the reviews from yesterday?"
 say -o "$MV_WORK/u3.aiff" "Mira, please stop talking now."
 for clip in u1 u2 u3; do afconvert -f WAVE -d LEI16@48000 -c 1 "$MV_WORK/$clip.aiff" "$MV_WORK/$clip.wav"; done
 
-# The room server.
-LK_CONFIG="$(printf 'port: 17880\nrtc:\n  tcp_port: 17881\n  udp_port: 17882\n  use_external_ip: false\n  node_ip: 127.0.0.1\nroom:\n  empty_timeout: 30\n  departure_timeout: 5\n')"
+# The room server. MV_NODE_IP (LIVEKIT_BIN only): the address the media goes to, and one more it
+# listens on; this Mac's tailnet address tests the phone's way in (with MV_URL=ws://<it>:17880).
+NODE_IP="${MV_NODE_IP:-127.0.0.1}"
+LK_CONFIG="$(printf 'port: 17880\nrtc:\n  tcp_port: 17881\n  udp_port: 17882\n  use_external_ip: false\n  node_ip: %s\nroom:\n  empty_timeout: 30\n  departure_timeout: 5\n' "$NODE_IP")"
 if [[ -n "${LIVEKIT_BIN:-}" ]]; then
-  printf '%s\nbind_addresses: [127.0.0.1]\nkeys:\n  %s: %s\n' "$LK_CONFIG" "$KEY" "$SECRET" > "$MV_WORK/livekit.yaml"
+  BINDS="127.0.0.1"
+  [[ "$NODE_IP" != "127.0.0.1" ]] && BINDS="127.0.0.1, $NODE_IP"
+  printf '%s\nbind_addresses: [%s]\nkeys:\n  %s: %s\n' "$LK_CONFIG" "$BINDS" "$KEY" "$SECRET" > "$MV_WORK/livekit.yaml"
   "$LIVEKIT_BIN" --config "$MV_WORK/livekit.yaml" > "$MV_WORK/livekit.log" 2>&1 &
   LK_PID=$!
 else

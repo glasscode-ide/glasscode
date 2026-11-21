@@ -312,6 +312,7 @@ pub const PHONE_ALLOWED: &[&str] = &[
     "manager.ask",
     "manager.conversation",
     "manager.stop",
+    "manager.voice",
     "device.presence",
 ];
 

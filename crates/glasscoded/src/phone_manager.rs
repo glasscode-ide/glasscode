@@ -10,6 +10,8 @@
 //! - `manager.conversation`: the conversation, and the answer being written now.
 //! - `manager.stop`: stop the answer this phone asked for.
 //! - `device.presence`: what the glasses do, passed to the Mac with the next sync.
+//! - `manager.voice`: a pass to the manager's voice room on this server (LiveKit and the voice
+//!   worker of `voice/manager`), when `~/.glasscode/voice/server.env` says where it is.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -141,6 +143,7 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
             seen
         }),
         "manager.stop" => stop(caller),
+        "manager.voice" => voice_pass(caller),
         "device.presence" => device_of(caller).map(|device| {
             let mut said = params.clone();
             said["at_ms"] = json!(glasscode_core::clock::now_ms());
@@ -150,6 +153,38 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
         _ => return None,
     };
     Some(answer)
+}
+
+/// What `~/.glasscode/voice/server.env` says (`NAME=value` lines, as `voice/manager/.env`): the
+/// room's address as a phone reaches it (`VOICE_URL`, `wss://…` or `ws://<tailnet address>:7880`)
+/// and LiveKit's key and secret (`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`).
+fn voice_setup(text: &str) -> Option<(String, String, String)> {
+    let mut found: HashMap<&str, String> = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((name, value)) = line.split_once('=') {
+            found.insert(name.trim(), value.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    let take = |name: &str| found.get(name).filter(|v| !v.is_empty()).cloned();
+    Some((take("VOICE_URL")?, take("LIVEKIT_API_KEY")?, take("LIVEKIT_API_SECRET")?))
+}
+
+/// `manager.voice`: a pass to the voice room on this server, for an hour.
+fn voice_pass(caller: &Caller) -> anyhow::Result<Value> {
+    let device = device_of(caller)?;
+    let file = glasscode_core::paths::root().join("voice").join("server.env");
+    let text = std::fs::read_to_string(&file).map_err(|_| anyhow!("The manager's voice is not set up on the server (no ~/.glasscode/voice/server.env)."))?;
+    let (url, key, secret) = voice_setup(&text).ok_or_else(|| anyhow!("~/.glasscode/voice/server.env needs VOICE_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET."))?;
+    let short: String = device.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    let identity = format!("phone-{short}");
+    let room = "manager".to_string();
+    let token = glasscode_core::manager::voice::token(&key, &secret, &identity, &room, 60 * 60)?;
+    let name = crate::brain::from_mac().unwrap_or_default().name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Manager".to_string());
+    Ok(json!({ "url": url, "token": token, "room": room, "identity": identity, "name": name, "talker": true }))
 }
 
 /// `manager.home`.
@@ -262,6 +297,9 @@ mod tests {
         crate::home::mac_is_home_for_test();
         let phone = Caller::Phone { device: "phone-1a2b".into() };
         let answer = dispatch(&phone, "manager.ask", &json!({ "text": "what needs me?" })).unwrap().unwrap();
+        // No voice set up here: a sentence that says where it is set up.
+        let voice = dispatch(&phone, "manager.voice", &json!({})).unwrap();
+        assert!(voice.is_err_and(|e| e.to_string().contains("server.env")));
         assert_eq!(answer["elsewhere"], "mac");
         let home = dispatch(&phone, "manager.home", &json!({})).unwrap().unwrap();
         assert_eq!((home["home"].as_str(), home["here"].as_bool()), (Some("mac"), Some(false)));
@@ -309,5 +347,12 @@ mod tests {
         assert!(stop.load(Ordering::SeqCst));
         answered(&question);
         assert!(conversation(&json!({}))["writing"].is_null());
+    }
+
+    #[test]
+    fn the_voice_setup_is_read_from_its_lines() {
+        let text = "# the room\nVOICE_URL=wss://voice.example.test\nLIVEKIT_API_KEY=APIabc\nLIVEKIT_API_SECRET=\"s3cret\"\n";
+        assert_eq!(voice_setup(text), Some(("wss://voice.example.test".into(), "APIabc".into(), "s3cret".into())));
+        assert_eq!(voice_setup("VOICE_URL=wss://x\nLIVEKIT_API_KEY=k\n"), None);
     }
 }
