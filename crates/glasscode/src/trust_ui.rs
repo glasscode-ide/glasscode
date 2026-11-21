@@ -138,6 +138,9 @@ impl Workspace {
             Change::Level { project, level } => Some((project.clone(), *level)),
             _ => None,
         };
+        // What was typed into a row's field counts once this is confirmed: the field then
+        // closes, empty for the next one.
+        let typed = matches!(&pending.change, Change::AddCondition { .. } | Change::AddDelegation { .. } | Change::AddBrowserSite { .. });
         let task = cx.background_spawn(async move { (trust::apply(&pending, true), gate::load()) });
         cx.spawn(async move |this, cx| {
             let (done, authority) = task.await;
@@ -145,6 +148,12 @@ impl Workspace {
                 match done {
                     Ok(text) => {
                         this.show_toast(text, cx);
+                        if typed {
+                            this.trust.open = None;
+                            for input in [this.trust.condition.get(), this.trust.delegation.get(), this.trust.site.get()].into_iter().flatten().cloned().collect::<Vec<_>>() {
+                                input.update(cx, |input, cx| input.set_text("", cx));
+                            }
+                        }
                         if let Some((project, level)) = level {
                             this.move_in_level_confirmed(project, level, cx);
                         }
@@ -370,10 +379,12 @@ impl Workspace {
                     let on = playbook.enabled;
                     let controls = div()
                         .flex()
-                        .gap_2()
-                        .child(crate::ui::switch(gpui::SharedString::from(format!("trust-pb-{}", playbook.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Playbook { id: id_on.clone(), on: !on }, cx))))
-                        .when(!playbook.approved(), |d| d.child(crate::ui::button(format!("trust-pb-approve-{}", playbook.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApprovePlaybook { id: id_approve.clone() }, cx)))))
-                        .child(crate::ui::button(format!("trust-pb-try-{}", playbook.id), "Try on the last 7 days").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.trust_try(id_try.clone(), window, cx))));
+                        .flex_wrap()
+                        .items_center()
+                        .gap(theme::sz(10.))
+                        .child(ui::button(format!("trust-pb-try-{}", playbook.id), "Try on the last 7 days").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.trust_try(id_try.clone(), window, cx))))
+                        .when(!playbook.approved(), |d| d.child(ui::button(format!("trust-pb-approve-{}", playbook.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApprovePlaybook { id: id_approve.clone() }, cx)))))
+                        .child(ui::switch(SharedString::from(format!("trust-pb-{}", playbook.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Playbook { id: id_on.clone(), on: !on }, cx))));
                     books.push(row(trust::playbook_sentence(playbook), state, Some(controls.into_any_element())));
                 }
             }
@@ -391,9 +402,11 @@ impl Workspace {
                     let approved = self.trust.book.is_some() && schedule.proposed_by.is_none();
                     let controls = div()
                         .flex()
-                        .gap_2()
-                        .child(crate::ui::switch(gpui::SharedString::from(format!("trust-sc-{}", schedule.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Schedule { id: id_on.clone(), on: !on }, cx))))
-                        .when(!approved, |d| d.child(crate::ui::button(format!("trust-sc-approve-{}", schedule.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApproveSchedule { id: id_approve.clone() }, cx)))));
+                        .flex_wrap()
+                        .items_center()
+                        .gap(theme::sz(10.))
+                        .when(!approved, |d| d.child(ui::button(format!("trust-sc-approve-{}", schedule.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApproveSchedule { id: id_approve.clone() }, cx)))))
+                        .child(ui::switch(SharedString::from(format!("trust-sc-{}", schedule.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Schedule { id: id_on.clone(), on: !on }, cx))));
                     let state = match &schedule.proposed_by {
                         Some(by) => format!("Proposed by {by}"),
                         None => if on { "On".into() } else { "Off".into() },

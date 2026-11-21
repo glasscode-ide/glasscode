@@ -1786,29 +1786,35 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
             rows.push(row_with(title, format!("{used_text} · {}", crate::settings_ui::tilde(&folder)), Some(buttons)));
         }
         if form.adding == Some(agent) {
+            // The new account's fields as a row of the card: its words, then the two fields of
+            // one width and the buttons under them.
             rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(form.label.clone())
-                    .child(form.plan.clone())
-                    .child(
+                crate::settings_ui::card(format!("A new {} account", agent.name()), "Its name in Glasscode, and its plan if you want it shown. Signing in runs in a terminal here.")
+                    .body(
                         div()
                             .flex()
-                            .gap_2()
-                            .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
-                            ))
-                            .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                if let Some(form) = this.settings.form.as_mut() {
-                                    form.adding = None;
-                                }
-                                cx.notify();
-                            }))),
-                    ),
+                            .flex_wrap()
+                            .items_center()
+                            .gap(theme::sz(8.))
+                            .child(crate::settings_ui::field(&form.label))
+                            .child(crate::settings_ui::field(&form.plan))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(theme::sz(8.))
+                                    .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
+                                        cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
+                                    ))
+                                    .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if let Some(form) = this.settings.form.as_mut() {
+                                            form.adding = None;
+                                        }
+                                        cx.notify();
+                                    }))),
+                            ),
+                    )
+                    .into_row(),
             );
         } else {
             rows.push(row(

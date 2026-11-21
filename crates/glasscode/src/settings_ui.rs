@@ -1885,10 +1885,9 @@ impl Workspace {
                         } else {
                             ""
                         },
-                        Some(mono(match folder {
-                            Some(template) => format!("~/.glasscode/worktrees/{template}"),
-                            None => format!("~/.glasscode/worktrees/{}", project.name),
-                        })),
+                        // The folder as it is on this computer (its place and its separators),
+                        // not as the Mac writes it.
+                        Some(mono(tilde(&glasscode_core::paths::worktrees_dir().join(folder.as_deref().unwrap_or(&project.name))))),
                     ));
                     let id = project.id.clone();
                     rows.push(row(
