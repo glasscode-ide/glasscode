@@ -357,6 +357,8 @@ const LAYOUT: &[LayoutRow] = &[
     row(G, "machine-id", Authority),
     row(G, "board.json", Authority),
     row(G, "activity.json", Authority),
+    // Counts of the days the person's own Claude and Codex conversations began (`agent_history.rs`).
+    row(G, "agent-history.json", Authority),
     row(G, "words", Words),
     row(G, "journal", Ledger),
     row(G, "effects", Ledger),
