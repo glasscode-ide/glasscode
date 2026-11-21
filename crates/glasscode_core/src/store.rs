@@ -1028,6 +1028,15 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "cli-versions.json", module: "versions", writer: "the person, and the app when it sets up a server", ..TODAY },
     DataRow { path: "clis.json", module: "versions", ..TODAY },
     DataRow { path: "control.key", module: "glasscoded today", writer: "glasscoded", format: "the key glasscoded signs its sessions' requests with", ..TODAY },
+    DataRow {
+        path: "voice",
+        module: "the voice on this Mac (glasscode voice_server.rs); on a server, glasscoded's voice pass",
+        writer: "the app (and uv, for the worker's Python); on a server, the person",
+        format: "a Python environment, LiveKit's config (no keys), logs and pids; on a server server.env (LiveKit's key and secret)",
+        retention: "made again when the worker's requirements change; logs are of the last run",
+        sync: "none: this machine's own",
+        ..TODAY
+    },
     DataRow { path: "push.json", module: "glasscoded push", writer: "not Glasscode: glasscoded only reads it", ..TODAY },
     DataRow { path: "push-devices.json", module: "glasscoded push", writer: "glasscoded", format: "JSON", ..TODAY },
     DataRow { path: "relay.json", module: "glasscoded relay_link", writer: "glasscoded", format: "JSON", ..TODAY },
