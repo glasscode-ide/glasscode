@@ -187,7 +187,27 @@ pub(crate) fn first_line(text: &str) -> String {
 // ----- Claude ----------------------------------------------------------------------------------
 
 /// What a person typed, without Claude Code's wrappers; `None` for lines that are not theirs.
+/// A message without the marks Claude Code puts around text that was pasted into its box
+/// (`<pasted_content id="ed38">` … `</pasted_content id="ed38">`): the words are the person's, the
+/// marks are not. Glasscode's chat sends each message as a paste, so its own messages come back
+/// with them.
+pub(crate) fn unwrap_pasted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let at = [rest.find("<pasted_content"), rest.find("</pasted_content")].into_iter().flatten().min();
+        // A mark ends at its ">" on the same line; anything else is the person's own text.
+        let Some((at, end)) = at.and_then(|at| rest[at..].find('>').filter(|end| !rest[at..at + end].contains('\n')).map(|end| (at, at + end + 1))) else {
+            out.push_str(rest);
+            return out.trim().to_string();
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[end..];
+    }
+}
+
 pub(crate) fn claude_user_text(text: &str) -> Option<String> {
+    let text = unwrap_pasted(text);
     let t = text.trim();
     if t.is_empty() || t.starts_with("<local-command-") || t.starts_with("<system-reminder>") || t.starts_with("Caveat: ") || t.starts_with("<bash-") {
         return None;

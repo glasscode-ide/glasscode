@@ -298,13 +298,14 @@ impl ChatLog {
         if kind == "queue-operation" {
             match str_of(value, "operation") {
                 "enqueue" => {
-                    if let Some(text) = value["content"].as_str().filter(|t| !t.trim_start().starts_with('<')) {
-                        self.queued.push(text.to_string());
+                    // A pasted message has Claude's marks around it; the queue keeps the words.
+                    if let Some(text) = value["content"].as_str().map(crate::transcript::unwrap_pasted).filter(|t| !t.starts_with('<')) {
+                        self.queued.push(text);
                     }
                 }
                 "remove" => {
-                    let text = str_of(value, "content");
-                    if let Some(i) = self.queued.iter().position(|q| q == text) {
+                    let text = crate::transcript::unwrap_pasted(str_of(value, "content"));
+                    if let Some(i) = self.queued.iter().position(|q| *q == text) {
                         self.queued.remove(i);
                     }
                 }
@@ -1109,6 +1110,32 @@ mod tests {
         assert!(log.queued.is_empty());
         assert!(matches!(&log.entries[1], Entry::User { text, .. } if text == "also check for a fix branch"));
         assert_eq!(log.entries[2], Entry::Notice("Agent \"Audit\" finished".into()));
+    }
+
+    /// Claude Code records a pasted message between its own marks. Glasscode's chat pastes each
+    /// message, so the marks must go: with them the message showed twice (once with the marks,
+    /// once as the grey copy that waits for the record) and its record was never recognised.
+    #[test]
+    fn a_pasted_message_is_the_words_without_claudes_marks() {
+        let pasted = "<pasted_content id=\"ed38\">\n1. the tool\n2. 16:9\n</pasted_content id=\"ed38\">";
+        let f = file(&[
+            json!({"type": "user", "message": {"role": "user", "content": pasted}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": format!("look at this: {pasted} thanks")}]}}),
+            json!({"type": "queue-operation", "operation": "enqueue", "content": pasted}),
+        ]);
+        let mut log = ChatLog::open(AgentKind::Claude, f.path());
+        assert!(matches!(&log.entries[0], Entry::User { text, .. } if text == "1. the tool\n2. 16:9"));
+        assert!(matches!(&log.entries[1], Entry::User { text, .. } if text == "look at this: \n1. the tool\n2. 16:9\n thanks"));
+        assert_eq!(log.queued, vec!["1. the tool\n2. 16:9".to_string()]);
+        append(&f, &[
+            json!({"type": "queue-operation", "operation": "remove", "content": pasted}),
+            json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": pasted}}),
+        ]);
+        log.poll();
+        assert!(log.queued.is_empty());
+        assert!(matches!(&log.entries[2], Entry::User { text, .. } if text == "1. the tool\n2. 16:9"));
+        // A "<" of the person's own stays.
+        assert_eq!(crate::transcript::unwrap_pasted("is a < b, or <pasted_content\nnot a mark"), "is a < b, or <pasted_content\nnot a mark");
     }
 
     #[test]
