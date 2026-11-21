@@ -193,6 +193,10 @@ pub struct Workspace {
     pub window_active: bool,
     /// Notifications on screen, by session.
     pub popups: Vec<(String, gpui::AnyWindowHandle)>,
+    /// Notifications that wait their turn: one goes on the screen at a time (`notify_ui.rs`).
+    pub(crate) popup_queue: std::collections::VecDeque<crate::notify_ui::Popup>,
+    /// When a notification last went on the screen.
+    pub(crate) popup_shown: Option<std::time::Instant>,
     pub main_window: Option<gpui::AnyWindowHandle>,
     /// A sidebar edge being dragged: which, where the mouse started, its width then.
     pub(crate) resizing: Option<(Side, f32, f32)>,
@@ -334,6 +338,8 @@ impl Workspace {
             rename_skip: HashSet::new(),
             window_active: window.is_window_active(),
             popups: Vec::new(),
+            popup_queue: Default::default(),
+            popup_shown: None,
             main_window: Some(window.window_handle()),
             resizing: None,
             pairing: None,

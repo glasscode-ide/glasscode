@@ -399,8 +399,33 @@ impl Workspace {
         }
     }
 
-    /// Put a notification on the screen, in the first place; the ones shown move on a place.
+    /// Show a notification. One goes on the screen at a time: a second one in the same moment
+    /// (several review requests found in one pass) waits for the next tick. Opening and moving
+    /// several popup windows in one pass left windows behind on Windows, some of them empty.
     fn show_popup(&mut self, popup: Popup, cx: &mut Context<Self>) {
+        let just_shown = self.popup_shown.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if just_shown || !self.popup_queue.is_empty() {
+            // The newest word for a session is the one that waits.
+            self.popup_queue.retain(|waiting| waiting.session_id != popup.session_id);
+            self.popup_queue.push_back(popup);
+            return;
+        }
+        self.place_popup(popup, cx);
+    }
+
+    /// The next notification that waits, if the last one has had its moment.
+    fn show_waiting_popup(&mut self, cx: &mut Context<Self>) {
+        if self.popup_shown.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400)) {
+            return;
+        }
+        if let Some(popup) = self.popup_queue.pop_front() {
+            self.place_popup(popup, cx);
+        }
+    }
+
+    /// Put a notification on the screen, in the first place; the ones shown move on a place.
+    fn place_popup(&mut self, popup: Popup, cx: &mut Context<Self>) {
+        self.popup_shown = Some(std::time::Instant::now());
         let session_id = popup.session_id.clone();
         let session_id = session_id.as_str();
         // Forget the ones already gone; keep at most a few on screen.
@@ -490,6 +515,7 @@ impl Workspace {
     pub fn notify_digest_tick(&mut self, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         self.debug_sample_popups(cx);
+        self.show_waiting_popup(cx);
         // Also with the quiet hours switched off: what they held still comes.
         let rules = glasscode_core::delivery::Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
         let now = glasscode_core::clock::now_ms();
