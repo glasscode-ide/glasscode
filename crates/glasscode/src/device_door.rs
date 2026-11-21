@@ -369,7 +369,13 @@ impl Workspace {
                 self.door.loading = true;
                 let (launch, mac) = (self.control.launch.clone(), crate::platform::this_computer().to_string());
                 let task = cx.background_spawn(async move {
-                    let key = DoorKey::this_mac().map_err(|e| format!("{e:#}"))?;
+                    // A debug build's journeys use a key of their own, never the Keychain of the
+                    // person running them (script/journeys.sh, journey 9).
+                    let debug_key = std::env::var("GLASSCODE_DEBUG_DOOR_KEY").ok().filter(|_| cfg!(debug_assertions)).and_then(|hex| DoorKey::from_hex(&hex));
+                    let key = match debug_key {
+                        Some(key) => key,
+                        None => DoorKey::this_mac().map_err(|e| format!("{e:#}"))?,
+                    };
                     let mac_id = glasscode_core::paths::MachineId::this().map(|id| id.as_str().to_string()).unwrap_or_default();
                     let name = glasscode_core::mirror::identity().1;
                     Ok::<DoorInfo, String>(DoorInfo { key, mac: if name.is_empty() { mac } else { name }, mac_id, launch })

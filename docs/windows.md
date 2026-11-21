@@ -289,7 +289,7 @@ Backspace, Delete, the arrows, Shift with an arrow, Enter and Escape are the sam
   `TerminateProcess`, the programs under it first; on the Mac `SIGKILL`. A program of another user
   or an elevated one was not tried.
 - **Voice.** There is no voice helper on Windows, so there are no microphone buttons in Today's
-  start box and the status bar, and no Glasscode tab in the right panel. The voice screen opens
+  start box and the status bar. The voice screen opens
   only through its debug hook (`GLASSCODE_DEBUG_OPEN=voice`, a debug build).
 - **Notifications** stand at the bottom right, above the taskbar. They open without the keyboard
   focus, and a click on one is meant not to take the keyboard from the program in front
@@ -325,7 +325,7 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
   `glasscoded` folder (`%LOCALAPPDATA%\Programs\Glasscode\glasscoded`), the installer that CI builds
   has no daemon builds (they need Docker), and two errors in `crates/glasscode_core/src/sync.rs`
   still say "this Mac".
-- **Voice** (the Glasscode tab, its settings card, the voice helper, and the two microphone
+- **Voice** (its settings card, the voice helper, and the two microphone
   buttons of the redesign that open the voice screen) is hidden on Windows
   (`glasscode_ui::VOICE` is false): the helper is a macOS program. A Windows helper needs its own
   plan (decision P4 of the UI redesign, open). The microphone button of the Chat view stays: it is

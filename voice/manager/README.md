@@ -6,8 +6,7 @@ when you only type to the manager.
 
 Two programs run here:
 
-- **LiveKit server**: a "room" that your Mac, your phone or your glasses join with the
-  microphone.
+- **LiveKit server**: a "room" that your Mac joins with its microphone.
 - **The worker**: it sits in that room, turns what you say into text and turns the manager's
   answers into speech. That is all it does.
 
@@ -109,8 +108,10 @@ stores the same Keychain item. It asks for the value: the key, a colon, the secr
 Then open the manager's page and tap the orb. Say its name, then what you want:
 "AI Mira, what needs me?". After it answered you have 20 seconds to reply without the name.
 
-The glasses app (`glasses/GlasscodeGlasses`) joins the same room when you pick the manager or
-Talk on the lens. It needs nothing set up here: it asks the Mac for a pass to the room.
+The glasses app (`glasses/GlasscodeGlasses`) does not join the room: it turns what you say into
+text on the iPhone, asks the manager over the device link, and speaks the answer with the phone's
+voices ([`docs/architecture.md`](../../docs/architecture.md#the-glasses-app)). It needs nothing set
+up here.
 
 ## Test it from the command line
 

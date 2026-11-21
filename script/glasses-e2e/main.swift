@@ -20,6 +20,36 @@ func out(_ object: [String: Any]) {
     fflush(stdout)
 }
 
+// MODE=whoami: this stand-in's key and the device id the Mac gives it (to pin it in a scratch home).
+if env["MODE"] == "whoami", let key = try? DeviceKey(raw: raw) {
+    out(["key": key.openSSH, "device": key.macDeviceID])
+    exit(0)
+}
+
+// MODE=live: against a real Glasscode (journey 9): the phone's reads and a question to the manager.
+if env["MODE"] == "live" {
+    let finished = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let key = try DeviceKey(raw: raw)
+            let link = try await DoorLink.connect(Paired.Mac(name: "Mac", id: "", key: pinned, addresses: [address]), key: key, phoneName: "Journey phone")
+            out(["connected": true])
+            out(["home": try await link.call("manager.home", [:], timeout: 20)])
+            out(["state": try await link.call("state", [:], timeout: 30)])
+            out(["today": try await link.call("today.get", [:], timeout: 20)])
+            out(["presence": try await link.call("device.presence", ["glasses": true, "worn": true, "lens": true, "voice": "idle"], timeout: 10)])
+            out(["ask": try await link.call("manager.ask", ["text": "what needs me?", "voice": true, "focus": ["view": "glance"], "client_id": "journey-1"], timeout: 90)])
+            do { _ = try await link.call("sessions.create", [:], timeout: 10); out(["refused": false]) } catch { out(["refused": true]) }
+            link.close()
+        } catch {
+            out(["error": error.localizedDescription])
+        }
+        finished.signal()
+    }
+    finished.wait()
+    exit(0)
+}
+
 let done = DispatchSemaphore(value: 0)
 Task {
     do {
