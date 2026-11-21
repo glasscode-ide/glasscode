@@ -77,22 +77,27 @@ pub fn parse_line(line: &str, said: &mut String) -> Vec<Update> {
     }
 }
 
-/// What Settings › Manager says of Codex as the manager's brain, and why choosing it is refused,
-/// when this Codex shows the brain tools Glasscode cannot switch off.
-pub const BRAIN_BLOCKED: &str = "Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off).";
+/// What Settings › Manager says when Codex cannot be the manager's brain with the model it has:
+/// one known to bring tools Glasscode cannot switch off, or one whose tool check refused them.
+pub const BRAIN_BLOCKED: &str = "Codex can't be the manager's brain with this model (it brings tools Glasscode can't switch off). Leave Model empty for gpt-5.6-sol, or pick another.";
 
-/// The Codex versions whose brain keeps tools that no flag turns off. Codex 0.167.0 keeps its five
-/// `multi_agent_v1__*` sub-agent tools under `--disable multi_agent`, `-c features.multi_agent=false`,
-/// `--disable multi_agent_v2`, `--disable collaboration_modes` and `--disable
-/// deferred_tool_world_state` (`--disable multi_agent_v1` is no feature): the live checks of
-/// 2026-11-20 and 21, `ALL_TOOLS` read in a live run.
-const BLOCKED_VERSIONS: &[&str] = &["0.167.0"];
+/// The Codex brain's model when the manager's settings name none. OpenAI's model catalog (the
+/// account's `models_cache.json`, which Codex fetches) decides which tools a model brings, not the
+/// Codex version: in the live checks of 2026-11-21, on Codex 0.167.0 and 0.171.0 alike,
+/// `gpt-5.6-sol` and `gpt-5.6-terra` showed only the code-mode tools.
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
-/// Whether this Codex (its version as `codex --version` says it, "codex-cli 0.167.0" or "0.167.0")
-/// is known to keep tools the brain's check refuses: it fails closed at its first question, so
-/// Settings says so before the person picks it.
-pub fn brain_blocked(version: Option<&str>) -> bool {
-    version.and_then(|v| v.split_whitespace().last()).is_some_and(|v| BLOCKED_VERSIONS.contains(&v))
+/// The Codex models known to bring tools no flag turns off: the catalog gives `gpt-5.6-luna`
+/// `multi_agent_version: v1`, and its five `multi_agent_v1__*` sub-agent tools stay under
+/// `--disable multi_agent` and every other switch (0.167.0 and 0.171.0). Others are checked at
+/// their first question ([`check_all_tools`]): the gpt-6 models list `clock` among their
+/// `experimental_supported_tools`, a `clock__curr_time` tool the check refuses as well.
+const AGENT_TOOL_MODELS: &[&str] = &["gpt-5.6-luna"];
+
+/// Whether this model (as Settings › Manager names it) is known to bring tools the brain's check
+/// refuses: it would fail closed at its first question, so Settings says so before.
+pub fn model_blocked(model: &str) -> bool {
+    AGENT_TOOL_MODELS.contains(&model.trim())
 }
 
 /// The tools Codex's code mode shows the model besides Glasscode's: `exec` (a JavaScript isolate
@@ -347,9 +352,25 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_known_to_keep_agent_tools_cannot_be_the_brain() {
-        assert!(brain_blocked(Some("0.167.0")) && brain_blocked(Some("codex-cli 0.167.0")));
-        assert!(!brain_blocked(Some("0.171.0")) && !brain_blocked(None), "a version not known to keep them is checked at its first question");
+    fn a_codex_model_known_to_keep_agent_tools_cannot_be_the_brain() {
+        assert!(model_blocked("gpt-5.6-luna") && model_blocked(" gpt-5.6-luna "));
+        assert!(!model_blocked(DEFAULT_MODEL) && !model_blocked("gpt-5.6-terra"), "these show only the code-mode tools");
+    }
+
+    /// The tool lists the live checks of 2026-11-21 read (`ALL_TOOLS`, the brain's flags, Codex
+    /// 0.167.0 and 0.171.0 alike), with Glasscode's tools added: the default model's passes, the
+    /// sub-agent tools of `gpt-5.6-luna` and the clock of the gpt-6 models do not.
+    #[test]
+    fn the_default_models_tools_pass_the_check() {
+        let glasscode: Vec<String> = ["ui_state", "session_list"].map(String::from).to_vec();
+        let ours = ["mcp__glasscode__ui_state", "mcp__glasscode__session_list"];
+        let read = |names: &[&str]| -> Vec<String> { names.iter().chain(ours.iter()).map(|n| n.to_string()).collect() };
+        let sol = read(&["apply_patch", "list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource", "view_image"]);
+        assert_eq!(check_all_tools(&sol, &glasscode), Ok(()));
+        let luna = read(&["apply_patch", "multi_agent_v1__spawn_agent", "view_image"]);
+        assert_eq!(check_all_tools(&luna, &glasscode), Err((vec!["multi_agent_v1__spawn_agent".into()], vec![])));
+        let gpt6 = read(&["apply_patch", "clock__curr_time", "view_image"]);
+        assert_eq!(check_all_tools(&gpt6, &glasscode), Err((vec!["clock__curr_time".into()], vec![])));
     }
 
     #[test]
