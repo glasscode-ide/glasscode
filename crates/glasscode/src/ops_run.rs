@@ -3111,10 +3111,10 @@ fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::
 fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
     // A token lets a device listen and speak in the manager's room as the person: for the person
-    // and their own devices (the voice server asks for the glasses and the phone), never for an
-    // agent in a session or the manager's own.
-    if caller.is_agent() {
-        return Err(denied("A voice token is for the person's own devices, not for an agent."));
+    // in the app and a device they paired, never for an agent, a session's program, a command or
+    // a program outside Glasscode, which any session can pass for.
+    if !glasscode_core::caller::may_have_voice_token(&caller.channel) {
+        return Err(denied("A voice token is for you, in Glasscode, or a device you paired; not for an agent, a command or a program."));
     }
     let url = settings.voice.livekit_url.trim().to_string();
     if url.is_empty() {
