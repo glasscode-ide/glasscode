@@ -233,7 +233,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 | `server.json`, `glasscoded.json`, `glasscoded.sock`, `cli-versions.json`, `clis.json`, `control.key` (glasscoded's session-signing key), `push.json`, `push-devices.json`, `relay.json`, `auto-review.json`, `ci-fix.json`, `tmux.conf`, `review-prompt.md`, `device/`, `machine-id`, `board.json`, `activity.json` | Authority | deny | deny | the app and glasscoded (`review-prompt.md` and `push.json`: the person) |
 | `words/<machine>/` | Words | deny | deny | the app and glasscoded |
 | `effects/`, `journal/`, `agent-log.jsonl`, `glasscoded.log`, `manager/` (all but `manager/work/`) | Ledger | deny | deny | the app and glasscoded |
-| `memory/` (git) | Trusted memory | read: per proof P07 (owner); write: deny | deny | `glasscode memory …` only |
+| `memory/` (git) | Trusted memory | person profile: read (P07); automation and quarantine profiles: deny (lead decision, 2026-11-21: the files hold every project's and employer's memory, and those sessions read their own project's through `glasscode memory`); write: deny | person profile: read (P07); automation and quarantine profiles: deny (the same decision) | `glasscode memory …` only |
 | `agent-notes/<key>/<agent>/` | Agent notes | read and write for that project's sessions | read and write for that project's sessions | sessions, and Claude's redirected auto-memory |
 | `handoff/` | Handoff | person profile: read, as today; automation and quarantine profiles: deny (a note can hold another project's diff) | same | the app, one note per handoff |
 | `worktrees/<project>/<branch>/` | Worktree | the session's own one read and write; others denied for automation and quarantine sessions | same | sessions |
