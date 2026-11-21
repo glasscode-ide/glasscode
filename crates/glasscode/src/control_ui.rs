@@ -55,12 +55,13 @@ impl Sink {
 }
 
 /// How a request reached the app, for deciding who is asking.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Source {
     /// A socket connection, and the process on the other end.
     Socket(Option<u32>),
-    /// A request file dropped in a worktree (anyone may drop one, so never the person).
-    File,
+    /// A request file dropped in this worktree (anyone may drop one, so never the person; and
+    /// whatever it says, the request of a session in that worktree, when there is one).
+    File(PathBuf),
 }
 
 /// Who asks, as the app shows and the gate decides: who it is by the channel it came in on (the
@@ -622,7 +623,7 @@ fn scan_drop_dir(worktree: &std::path::Path, tx: &async_channel::Sender<(Request
                 let _ = std::fs::remove_file(&out);
                 match serde_json::from_str::<Request>(text.trim()) {
                     Ok(request) => {
-                        let _ = tx.try_send((request, Source::File, Sink::File(out)));
+                        let _ = tx.try_send((request, Source::File(worktree.to_path_buf()), Sink::File(out)));
                     }
                     Err(e) => Sink::File(out).send(&Reply::fail(code::USAGE, format!("Glasscode could not read the request: {e}"))),
                 }
@@ -695,7 +696,7 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
             let Some((agent, title)) = session else {
                 let pid = match source {
                     Source::Socket(pid) => pid,
-                    Source::File => None,
+                    Source::File(_) => None,
                 };
                 return outside("A program outside Glasscode", caller::Caller::Terminal { pid });
             };
@@ -714,6 +715,13 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
         // terminal is anyone who says so: at most "outside".
         _ => outside(if interactive { "A terminal outside Glasscode" } else { "A program outside Glasscode" }, found.clone()),
     }
+}
+
+/// The heading of a card that waits for the person: who asks ("A program outside Glasscode asks
+/// you"), or, for what the person asked themselves (a `glasscode` line in a shell tab), a check of
+/// their own request, never "You asks you".
+pub(crate) fn card_title(caller: &Caller) -> String {
+    if caller.is_person() { "Confirm your request".to_string() } else { format!("{} asks you", caller.who) }
 }
 
 fn shell_line(args: &[String]) -> String {
@@ -898,18 +906,32 @@ impl Workspace {
     /// M56 row 7).
     pub fn control_caller(&self, request: &Request, source: Source) -> Caller {
         let cwd = request.cwd.as_ref().map(PathBuf::from);
-        let channel = match source {
-            Source::Socket(pid) => Channel::Socket { pid },
-            Source::File => Channel::RequestFile,
+        let (channel, proven) = match &source {
+            Source::Socket(pid) => (Channel::Socket { pid: *pid }, Vec::new()),
+            // A request file is the request of a session in the worktree it was found in.
+            Source::File(worktree) => (Channel::RequestFile, self.control_sessions_in(worktree)),
         };
         let signed = |id: &str, sig: &str| (sig == self.control.signature(id)).then(|| self.state.session(id)).flatten().map(|session| Signed { shell: session.agent == AgentKind::Shell });
         // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
-        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, caller::typed_command_recently));
+        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel_proven(request, &channel, signed, caller::typed_command_recently, &proven));
         let session = match &found {
             caller::Caller::Session { id, .. } | caller::Caller::ShellTab { session: id, .. } => self.state.session(id).map(|s| (s.agent, self.session_title(s))),
             _ => None,
         };
         caller_of(found, source, session, (&self.state.manager.name, self.state.manager.brain), request.interactive, cwd)
+    }
+
+    /// The sessions of a worktree, the strictest origin first (quarantine, then automation, then
+    /// the person's): whose request a file found there is (`caller::by_channel_proven`).
+    pub(crate) fn control_sessions_in(&self, worktree: &std::path::Path) -> Vec<String> {
+        let rank = |id: &str| match self.control.authority.origin(id) {
+            gate::SessionOrigin::Quarantine => 0,
+            gate::SessionOrigin::Automation => 1,
+            gate::SessionOrigin::Person => 2,
+        };
+        let mut ids: Vec<String> = self.state.sessions.iter().filter(|s| s.worktree == worktree).map(|s| s.id.clone()).collect();
+        ids.sort_by_key(|id| rank(id));
+        ids
     }
 
     /// The first prompt of `session`, as the agent is started with it: the person's, when they
@@ -1778,7 +1800,7 @@ impl Workspace {
             sink.send(&Reply::Waiting { approval: id, summary: summary.clone() });
         }
         let agent = approval.caller.agent.unwrap_or(AgentKind::Claude);
-        let title = format!("{} asks you", approval.caller.who);
+        let title = card_title(&approval.caller);
         let body = match &approval.why {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
@@ -2219,6 +2241,15 @@ mod tests {
 
     /// A card the server asked says it is the server's: its words (who, what, why) are the
     /// server's to write, so the person knows whose they read. One asked here is as it says.
+    /// The person's own request (a `glasscode` line in a shell tab) is never "You asks you"; a
+    /// program's says who asks.
+    #[test]
+    fn a_card_of_the_persons_own_request_is_worded_for_them() {
+        assert_eq!(card_title(&Caller::you()), "Confirm your request");
+        let program = Caller { who: "A program outside Glasscode".into(), channel: caller::Caller::Terminal { pid: Some(1) }, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None };
+        assert_eq!(card_title(&program), "A program outside Glasscode asks you");
+    }
+
     #[test]
     fn a_server_card_says_it_is_from_the_server() {
         assert_eq!(card_who("The manager on the server", Some("devbox")), "The manager on the server, from devbox");
@@ -2251,7 +2282,7 @@ mod tests {
         let terminal = caller_of(caller::Caller::Terminal { pid: Some(7) }, Source::Socket(Some(7)), None, manager, true, None);
         assert!(!terminal.is_person() && !terminal.is_agent(), "typed at a terminal is nobody's word");
         assert_eq!((terminal.who.as_str(), terminal.journal_word()), ("A terminal outside Glasscode", "outside"));
-        let file = caller_of(caller::Caller::Terminal { pid: None }, Source::File, None, manager, false, None);
+        let file = caller_of(caller::Caller::Terminal { pid: None }, Source::File(PathBuf::new()), None, manager, false, None);
         assert_eq!(file.who, "A program outside Glasscode");
     }
 

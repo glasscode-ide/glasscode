@@ -524,7 +524,8 @@ impl Workspace {
                     form.note = Some("Reading the export…".into());
                 });
                 cx.notify();
-                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                let shown = path.clone();
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path, &[]) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |ws, cx| {
@@ -534,8 +535,12 @@ impl Workspace {
                                 Ok(done) => {
                                     form.error = None;
                                     form.note = Some(format!(
-                                        "Moved in from the export: {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.",
-                                        done.memory_files, done.project_keys, done.words_records, done.set_aside
+                                        "Moved in from the export: {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}",
+                                        done.memory_files,
+                                        done.project_keys,
+                                        done.words_records,
+                                        done.set_aside,
+                                        crate::ops_run::import_held(&done.held, &shown)
                                     ));
                                 }
                                 Err(err) => {

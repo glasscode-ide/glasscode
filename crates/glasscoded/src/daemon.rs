@@ -386,6 +386,8 @@ impl Daemon {
             .sessions
             .iter()
             .map(|s| reconcile::SessionNow {
+                // The server's agents run on in tmux: none is restored by a start of its own.
+                starting: false,
                 id: s.id.clone(),
                 project: self.journal.keys.get(&s.project_id).cloned(),
                 running: self.runtime.running.contains(&s.id),

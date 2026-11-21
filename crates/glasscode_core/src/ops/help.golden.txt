@@ -139,7 +139,7 @@ Your data
   data export [--to <file.tar>] [--include <project>]… export memory and the stores to one tar file (projects that stay on this Mac are left out unless named)
   data schedule [day | week | <days> | off] [--to <folder>] [--keep <n>] export by itself every day or week to a folder, keeping the newest few (off: none); with nothing, say what is set
   data move-out [--dry-run]             give each Claude account its notes back: the agent notes go to that project's Claude memory folder, writing over nothing
-  data import <file.tar>                import an export: memory merged entry by entry, project keys, cited words; policies set aside to approve again
+  data import <file.tar>                import an export: memory merged entry by entry, new project keys, cited words; policies set aside to approve again
   data forget --person "<name>" | --project <name> | --employer <name> forget a person, a project or an employer everywhere Glasscode keeps it, memory's history included
   data uninstall [--dry-run]            list everything Glasscode made (--dry-run), or remove it after you confirm in the app
 
