@@ -70,9 +70,10 @@ fn automation_denies_authority_and_credentials() {
     }
     // No `Write(...)` rule: Claude says each one never matches (Edit covers it) at every start.
     assert!(!rules.iter().any(|r| r.starts_with("Write(")), "{rules:?}");
-    // The trusted memory reads, never writes; the worktree's .env at launch is denied.
+    // The trusted memory neither reads nor writes (lead decision, 2026-11-21: through
+    // `glasscode memory` only); the worktree's .env at launch is denied.
     let memory = paths::memory_dir();
-    assert!(has("Edit", &memory) && !has("Read", &memory));
+    assert!(has("Edit", &memory) && has("Read", &memory));
     assert!(has("Read", &facts(Path::new("/x")).env_files[0]));
     // The other worktree too, for automation only; and the sandbox denies the same for the shell.
     let other = facts(Path::new("/x")).other_worktrees[0].clone();
@@ -87,7 +88,39 @@ fn automation_denies_authority_and_credentials() {
     // Codex: the same classes denied by path in its permission profile.
     let codex = session_profile(SessionOrigin::Automation, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
     assert!(codex.contains(&format!("{}=\"deny\"", json!(paths::authority_dir().to_string_lossy()))), "{codex}");
-    assert!(codex.contains(&format!("{}=\"read\"", json!(memory.to_string_lossy()))), "{codex}");
+    assert!(codex.contains(&format!("{}=\"deny\"", json!(memory.to_string_lossy()))), "{codex}");
+}
+
+/// Lead decision (2026-11-21): ~/.glasscode/memory/ holds every project's and employer's memory,
+/// so the automation and quarantine profiles deny it in both columns, for Claude and Codex: the
+/// sandbox's denyRead and the file tools' Read rule (which Claude applies to Grep and Glob too),
+/// and the gate hook for Read, Grep and the shell. Such a session reads its own project's memory
+/// through `glasscode memory`, which keeps it to that project. A person's session keeps reading
+/// it: it is the person's own data.
+#[test]
+fn memory_is_denied_to_sessions_the_person_does_not_drive() {
+    let memory = paths::memory_dir();
+    let text = memory.to_string_lossy().into_owned();
+    for (origin, denied) in [(SessionOrigin::Automation, true), (SessionOrigin::Quarantine, true), (SessionOrigin::Person, false)] {
+        let p = profile(origin, &ProjectPolicy::default());
+        let deny_read: Vec<&str> = p.claude_settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(deny_read.contains(&text.as_str()), denied, "{origin:?}: the sandbox's denyRead");
+        let read_rule = deny(&p).iter().any(|r| r.starts_with("Read(//") && r.contains(text.trim_start_matches('/')));
+        assert_eq!(read_rule, denied, "{origin:?}: the Read rule");
+        // Nobody writes it directly.
+        assert!(deny(&p).iter().any(|r| r.starts_with("Edit(//") && r.contains(text.trim_start_matches('/'))), "{origin:?}");
+        let codex = session_profile(origin, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
+        if origin != SessionOrigin::Person {
+            assert!(codex.contains(&format!("{}=\"deny\"", json!(text))) && !codex.contains(&format!("{}=\"read\"", json!(text))), "{origin:?}: {codex}");
+        }
+    }
+    let ctx = GateCtx { origin: Some(SessionOrigin::Automation), worktree: paths::root().join("worktrees").join("app").join("feat-a"), ..GateCtx::default() };
+    let file = memory.join("projects").join("other-3f9a1c").join("decisions.md");
+    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": file })).is_err());
+    assert!(gate_tool(&ctx, "Grep", &json!({ "pattern": "x", "path": memory })).is_err());
+    assert!(gate_tool(&ctx, "Bash", &json!({ "command": format!("cat {}", file.display()) })).is_err());
+    let person = GateCtx { origin: Some(SessionOrigin::Person), ..ctx };
+    assert!(gate_tool(&person, "Read", &json!({ "file_path": file })).is_ok());
 }
 
 /// P07: every absolute rule starts with `//` (one `/` is relative to the settings file).
@@ -296,7 +329,7 @@ fn the_gate_refuses_what_a_session_never_does() {
     assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::home().join(".ssh").join("id_rsa") })).is_err());
     assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::authority_dir().join("policy.json") })).is_err());
     assert!(gate_tool(&ctx, "Edit", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_err());
-    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_ok());
+    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_err());
     assert!(gate_tool(&ctx, "Edit", &json!({ "file_path": ctx.worktree.join("src").join("main.rs") })).is_ok());
     for tool in ["SendMessage", "ListAgents", "WebFetch", "mcp__glasscode-browser__open"] {
         assert!(gate_tool(&ctx, tool, &json!({})).is_err(), "{tool}");
@@ -539,6 +572,7 @@ fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
             assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
         }
         assert!(has(&["-c", r#"web_search="disabled""#]), "{kind:?}: web search stays on in {args:?}");
+        assert!(has(&["-c", "check_for_update_on_startup=false"]), "{kind:?}: Codex checks for updates in {args:?}");
         for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
             assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
         }

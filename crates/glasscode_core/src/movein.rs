@@ -998,6 +998,17 @@ pub enum Step {
 /// work (a CLI logged out, an answer that cannot be read) pauses too, and after
 /// [`MOST_ATTEMPTS`] the project is left out. It reads the disk and runs a model through `run`:
 /// never on the main thread.
+/// D17: a project the study's account may not read (one bound to another account) is not studied:
+/// each one still waiting is marked failed, with why, before a step runs. Gives how many.
+pub fn skip_unreadable(progress: &mut Progress, may_read: impl Fn(&ProjectKey) -> bool) -> usize {
+    let mut skipped = 0;
+    for project in progress.projects.iter_mut().filter(|p| p.state == StudyState::Waiting && !may_read(&p.key)) {
+        project.state = StudyState::Failed("only the account chosen for this project may read it, and the study runs on another".into());
+        skipped += 1;
+    }
+    skipped
+}
+
 pub fn study_next(progress: &mut Progress, projects: &[ProjectIn], ledger: &mut Ledger, now_ms: u64, memory: &Memory, run: &mut dyn FnMut(&ProjectIn, &str) -> Result<String, String>) -> Step {
     let Some(at) = progress.projects.iter().position(|p| p.state == StudyState::Waiting) else {
         progress.paused = None;
@@ -1395,6 +1406,31 @@ mod tests {
         ledger.daily_cap = 1_000_000;
         assert!(matches!(study_next(&mut again, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Studied { .. }));
         assert_eq!(study_next(&mut again, &projects, &mut ledger, tomorrow, &memory, &mut run), Step::Done);
+    }
+
+    /// D17: the study's headless run reads no project bound to another account than the one it
+    /// runs on: such a project is marked failed and never given to the model; the others are.
+    #[test]
+    fn the_study_reads_no_project_of_another_account() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let projects = vec![studied_project(&scratch, "app"), studied_project(&scratch, "work")];
+        let bound = projects[1].key.clone();
+        let mut set = crate::gate::PolicySet::default();
+        set.policy.projects.insert(bound.clone(), crate::gate::ProjectPolicy { model_account: Some("work-account".into()), ..crate::gate::ProjectPolicy::default() });
+        let mut progress = Progress::start("mi9", &projects);
+        assert_eq!(skip_unreadable(&mut progress, |key| set.account_may_read(key, Some("personal"))), 1);
+        let mut read = Vec::new();
+        let mut run = |project: &ProjectIn, input: &str| {
+            read.push(project.key.clone());
+            stand_in(project, input)
+        };
+        while !matches!(study_next(&mut progress, &projects, &mut Ledger::default(), crate::clock::now_ms(), &memory, &mut run), Step::Done) {}
+        assert_eq!(read, [projects[0].key.clone()], "the bound project went to the model");
+        assert!(matches!(&progress.projects[1].state, StudyState::Failed(why) if why.contains("account")));
+        // On the project's own account it is studied.
+        let mut again = Progress::start("mi10", &projects);
+        assert_eq!(skip_unreadable(&mut again, |key| set.account_may_read(key, Some("work-account"))), 0);
     }
 
     #[test]

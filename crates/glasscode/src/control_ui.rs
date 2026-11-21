@@ -950,6 +950,19 @@ impl Workspace {
         ids
     }
 
+    /// The sessions of a worktree, the strictest origin first (quarantine, then automation, then
+    /// the person's): whose request a file found there is (`caller::by_channel_proven`).
+    pub(crate) fn control_sessions_in(&self, worktree: &std::path::Path) -> Vec<String> {
+        let rank = |id: &str| match self.control.authority.origin(id) {
+            gate::SessionOrigin::Quarantine => 0,
+            gate::SessionOrigin::Automation => 1,
+            gate::SessionOrigin::Person => 2,
+        };
+        let mut ids: Vec<String> = self.state.sessions.iter().filter(|s| s.worktree == worktree).map(|s| s.id.clone()).collect();
+        ids.sort_by_key(|id| rank(id));
+        ids
+    }
+
     /// The first prompt of `session`, as the agent is started with it: the person's, when they
     /// typed it in a composer ([`ControlUi::first_words`]), else what Glasscode made (from a
     /// ticket, a PR, a handoff, `session new --message`).
