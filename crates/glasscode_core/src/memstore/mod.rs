@@ -1175,28 +1175,51 @@ impl Memory {
 
     /// Bring files of another memory in (M25 import): each merged with this memory's copy entry by
     /// entry (stamps, tombstones), in one commit by the person. Caps do not stop a restore; the
-    /// person consolidates afterwards.
-    pub fn import_docs(&self, docs: &[(MemFile, Doc)]) -> Result<Written> {
+    /// person consolidates afterwards. An export is a file anyone could have written, so what it
+    /// brings passes the write-time scan as any write does (mem-1): an entry or a heading this memory
+    /// does not already hold, refused by it, is left out. Gives how many were left out.
+    pub fn import_docs(&self, docs: &[(MemFile, Doc)]) -> Result<(Written, usize)> {
         let _writing = writing()?;
         let head = self.ready()?;
         let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
         let mut edits = Vec::new();
+        let mut refused = 0;
+        let mut env: BTreeMap<Option<ProjectKey>, Vec<String>> = BTreeMap::new();
         for (file, theirs) in docs {
             if !writable(file) || *file == MemFile::Proposals {
                 continue;
             }
             let ours = snap.doc(file)?;
+            let project = file.project().cloned();
+            if !env.contains_key(&project) {
+                env.insert(project.clone(), scan::env_values(&project_folders(project.as_ref())?));
+            }
+            let values = &env[&project];
+            let mut theirs = theirs.clone();
+            theirs.lines.retain(|line| {
+                let text = match line {
+                    entry::Line::Entry(e) if ours.find(&e.header.id) != Some(e) => e.text.as_str(),
+                    entry::Line::Text(text) if text.trim_start().starts_with('#') && !ours.lines.contains(line) => text.as_str(),
+                    _ => return true,
+                };
+                let kept = scan::scan(text, values).is_empty();
+                if !kept {
+                    refused += 1;
+                }
+                kept
+            });
+            let theirs = &theirs;
             let merged = if ours.lines.is_empty() { theirs.clone() } else { entry::merge(&ours, theirs) };
             if merged != ours {
                 edits.push((file.clone(), Some(merged.render())));
             }
         }
         if edits.is_empty() {
-            return Ok(Written::Unchanged);
+            return Ok((Written::Unchanged, refused));
         }
         let written = self.commit(&head, &edits, &Who::You, "Import memory", &[])?;
         search::forget_cache();
-        Ok(written)
+        Ok((written, refused))
     }
 
     // ----- pending edits (D20) -------------------------------------------------------------------

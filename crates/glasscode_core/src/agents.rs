@@ -656,12 +656,13 @@ fn launch_of(
     }
 }
 
-/// Codex's own update check, off in every session (as `DISABLE_AUTOUPDATER` is for Claude):
+/// Codex's own update check, off in every session, the manager's brain, every headless run and
+/// `codex app-server` (as `DISABLE_AUTOUPDATER` is for Claude):
 /// versions are Glasscode's to manage. With it on, Codex 0.167 opens "Update available" at start
 /// with "Update now" (`brew upgrade --cask codex`) chosen, so the first Enter, the person's or a
 /// message Glasscode types in, would upgrade the CLI that every session shares (P06; the live
 /// checks of 2026-11-20 saw it in a Glasscode session).
-const CODEX_NO_UPDATE_CHECK: &str = "check_for_update_on_startup=false";
+pub(crate) const CODEX_NO_UPDATE_CHECK: &str = "check_for_update_on_startup=false";
 
 /// The Codex options for a session's mode. Codex 0.167 removed `--full-auto`, which was a short
 /// form of "the workspace-write sandbox, and the model asks when it needs to" (`--sandbox

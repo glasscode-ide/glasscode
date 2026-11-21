@@ -443,6 +443,8 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Write `agent-notes/proj/claude/MEMORY.md` | allowed | allowed |
   | Write the other worktree | allowed (person) | not tried (as above) |
 
+  **Changed since (lead decision, 2026-11-21):** the automation and quarantine profiles now deny `memory/` to reads too, in the sandbox's `denyRead`, the `Read(...)` rule and Codex's permission profile (`"deny"`, not `"read"`); the person profile keeps the reads measured here. Not run again live.
+
   What it shows:
   - **Pass for both profiles.** Work in the own worktree runs, credentials and authority files are refused for both the shell and the file tools, and hooks arrive inside the sandbox (`PreToolUse` and `PostToolUse` for every tool call). The login works from the account folder (`apiKeySource: none`).
   - **`git commit` in a linked worktree works** in Claude's sandbox. The worktree's gitdir in the main repository was writable without an entry for it.

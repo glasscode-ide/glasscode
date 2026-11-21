@@ -2247,7 +2247,7 @@ impl Workspace {
                     let result = task.await;
                     let _ = this.update(cx, |ws, cx| match result {
                         Ok(done) => ws.show_toast(
-                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.", done.memory_files, done.project_keys, done.words_records, done.set_aside),
+                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}", done.memory_files, done.project_keys, done.words_records, done.set_aside, import_refused(done.refused)),
                             cx,
                         ),
                         Err(err) => ws.show_toast(format!("Could not import: {err:#}"), cx),
@@ -2455,16 +2455,29 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
+/// What an import's reply says of the entries the scan left out.
+fn import_refused(refused: usize) -> String {
+    match refused {
+        0 => String::new(),
+        1 => " 1 entry was left out: memory's scan refused it (an instruction or a secret).".into(),
+        n => format!(" {n} entries were left out: memory's scan refused them (instructions or secrets)."),
+    }
+}
+
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
     let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
     memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
         Ok(done) => Reply::ok(
             format!(
-                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.",
-                done.memory_files, done.project_keys, done.words_records, done.set_aside
+                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.{}",
+                done.memory_files,
+                done.project_keys,
+                done.words_records,
+                done.set_aside,
+                import_refused(done.refused)
             ),
-            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside }),
+            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside, "refused": done.refused }),
         ),
         Err(err) => failed(format!("Could not import: {err:#}")),
     })
