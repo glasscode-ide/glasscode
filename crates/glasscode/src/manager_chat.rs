@@ -536,7 +536,7 @@ impl Workspace {
 
     /// The snapshot of where the person is, as a block for the brain's turn (none when they took
     /// the chip off). From away (a command), "here" is the last session they had open.
-    fn chat_focus(&self, away: bool, now: u64, cx: &Context<Self>) -> Option<String> {
+    pub(crate) fn chat_focus(&self, away: bool, now: u64, cx: &Context<Self>) -> Option<String> {
         if self.mchat.focus_off {
             return None;
         }

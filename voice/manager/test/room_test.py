@@ -255,8 +255,8 @@ async def main():
         await wait_for("idle after the answer", is_state("idle"), 15, mark)
         if tone_frames - before <= 20:
             failures.append("talker audio")
-        # The talker retells it (the stand-in says it as it is): one voice, in the captions too.
-        await wait_for("the answer is retold in the talker's words", lambda e: e[1] == "manager.said" and "Two sessions" in e[2].get("text", ""), 5, mark)
+        # Spoken as the manager wrote it; the clients show it already, so it is no caption again.
+        await expect_none("the manager's answer is not told again as the talker's", lambda e: e[1] == "manager.said" and "Two sessions" in e[2].get("text", ""), 1, mark)
 
         log("--- 11. talked over: the rest of that answer is not spoken")
         await asyncio.sleep(1.0)

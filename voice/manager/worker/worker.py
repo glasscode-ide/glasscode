@@ -349,8 +349,7 @@ class ManagerVoice:
             # The manager works on it: "thinking" until its answer comes on `manager.say`.
             self.thinking_until = time.monotonic() + THINKING_SECS
             self._publish_state()
-        if LOG_HEARD:
-            log.info("tool %s on %s: %r", name, to, text[:200])
+        log.info("tool %s on %s: %s", name, to, text[:200].replace("\n", " / "))
         return text
 
     def _on_result(self, message: dict, sender: str) -> None:
@@ -369,7 +368,8 @@ class ManagerVoice:
             return
         self.last_spoken = (text, time.monotonic())
         self.attention.keep_open(time.monotonic())
-        log.info("said %d words", len(text.split()))
+        # Its own words, not the person's: to check later what it claimed.
+        log.info("said %d words: %s", len(text.split()), text[:400])
         if any(said.startswith(text) for said in self.said_texts):
             # The manager's own answer (cut short, when the person talked over it): the
             # clients show it already.
@@ -531,13 +531,13 @@ class ManagerVoice:
             self._publish_state()
             return
         talking = self._talker_on()
+        if talking:
+            # Spoken as the manager wrote it (it writes for the ear when asked by voice): a
+            # retelling by the talker added guesses of its own. It goes into the talker's
+            # conversation, so "and the second one?" makes sense, but not into the captions again.
+            self.said_texts = (self.said_texts + [text])[-20:]
         try:
-            if talking:
-                # The talker retells it, short and in its own voice: to the person it is one
-                # manager, not a voice that reads out what another one wrote.
-                handle = self.session.generate_reply(instructions=f"{talker.RELAY}\n{text}")
-            else:
-                handle = self.session.say(text, add_to_chat_ctx=False)
+            handle = self.session.say(text, add_to_chat_ctx=talking)
         except RuntimeError as error:
             log.warning("cannot speak: %s", error)
             self._publish_state()

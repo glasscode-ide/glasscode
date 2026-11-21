@@ -442,7 +442,7 @@ impl Workspace {
         }
 
         for text in heard {
-            self.manager_ask(text, true, cx);
+            self.manager_voice_ask(text, cx);
         }
         for text in said {
             // Shown in the bubble; it was spoken already.
@@ -457,6 +457,16 @@ impl Workspace {
         }
     }
 
+    /// Ask the manager something said by voice here: its answer is spoken, so it is asked for a
+    /// short, plain one (`mac_voice_block`), with where the person is in the window as usual.
+    fn manager_voice_ask(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.mchat.turn.is_none() && self.mchat.device_focus.is_none() {
+            let window = self.chat_focus(false, glasscode_core::clock::now_ms(), cx);
+            self.mchat.device_focus = Some(glasscode_core::runtime::chat::mac_voice_block(window.as_deref()));
+        }
+        self.manager_ask(text, true, cx);
+    }
+
     /// One of the talker's tools, run here; what it found, in words for the talker.
     fn manager_voice_tool(&mut self, name: &str, arguments: &serde_json::Value, cx: &mut Context<Self>) -> String {
         let text = |key: &str| arguments.get(key).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
@@ -467,7 +477,7 @@ impl Workspace {
                     return "There was nothing to ask.".into();
                 }
                 let busy = self.mchat.turn.is_some();
-                self.manager_ask(request, true, cx);
+                self.manager_voice_ask(request, cx);
                 if busy { "started: it is answered right after the question the manager is on now".into() } else { "started".into() }
             }
             "manager_progress" => match &self.mchat.turn {

@@ -429,6 +429,17 @@ pub struct DeviceFocus {
 /// The block before a question asked from the glasses: where the person is, how the answer is
 /// heard and shown, what "this" means, and whether the Mac's window may move (O8: only while they
 /// were at the Mac a moment ago, or when they ask to see it there).
+/// The block before a question the person said to the manager by voice at the Mac (the voice on
+/// this Mac): what it answers is spoken aloud, so it is short and plain. `window` is the usual
+/// block of where they are in the window, when there is one.
+pub fn mac_voice_block(window: Option<&str>) -> String {
+    let spoken = "[How the person asks: by voice, at the Mac. What you answer is read aloud to them: one to three short spoken sentences, in the first person, with no lists, tables, headings, Markdown, ids or markers unless they ask for them. Say plainly what you did and what you could not check.]";
+    match window {
+        Some(window) => format!("{spoken}\n{window}"),
+        None => spoken.to_string(),
+    }
+}
+
 pub fn glasses_block(focus: &DeviceFocus, session_title: Option<&str>, window_moves: bool) -> String {
     let mut on_lens = Vec::new();
     if let Some(id) = &focus.session {

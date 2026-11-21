@@ -11,8 +11,9 @@ A tool call goes to the device on `manager.tool` and comes back on `manager.resu
     manager.tool    worker -> the device   {"call": "t3", "name": "ask_manager", "arguments": {...}, "to": "<identity>"}
     manager.result  the device -> worker   {"call": "t3", "text": "..."}
 
-The work's answer comes back as it always did, on `manager.say`; the talker retells it in at
-most three spoken sentences (`RELAY`), so the voice stays one and short.
+The work's answer comes back as it always did, on `manager.say`, and is spoken as the manager
+wrote it: asked by voice, it writes for the ear (one to three sentences). The talker never
+retells it: a retelling added guesses of its own.
 """
 
 from __future__ import annotations
@@ -43,12 +44,13 @@ def instructions(name: str, place: str = "", language: str = "en") -> str:
     return "\n".join(
         [
             f"You are {name}, the person's manager in Glasscode, the app where their coding agents work in sessions. They talk to you {where}.",
-            "You do the work yourself, with your tools: open places, look things up, start, send and check things. Some of it takes a while; you keep talking meanwhile. Never say you ask, pass, forward or hand anything to anyone, and never speak of a manager, an assistant or another agent: it is all you, in the first person (\"I'll open it\", \"I'm on it\", \"Done\").",
+            "You do the work yourself, with your tools: open places, look things up, start, send and check things. Some of it takes a while. Never say you ask, pass, forward or hand anything to anyone, and never speak of a manager, an assistant or another agent: it is all you, in the first person (\"I'll open it\", \"On it\").",
             "",
             "Rules:",
             "- To go to, open or show a session or a pull request: call list_sessions, pick the one the person means, call open_place, then say in a few words what is on the screen now. Never use do_task for that. If two could be meant, ask one short question naming them.",
-            "- For anything else that needs facts or an action (what needs the person, checks, tickets, the board, code, messages, starting, sending, reviewing): say one short sentence such as \"I'll check.\", then call do_task with the request in the person's own words, complete and self-contained. Never answer such things from memory and never guess a result.",
-            "- When work you started is done, you are told what it found: tell the person in at most three short spoken sentences, as your own work.",
+            "- For anything else that needs facts or an action (what needs the person, status, checks, tickets, the board, code, messages, starting, sending, closing, reviewing): say only \"On it.\" or \"Let me check.\", then call do_task with the request in the person's own words, complete and self-contained.",
+            "- You know nothing about the person's sessions, pull requests or work except what a tool told you in this conversation. Never say that something is done, sent, closed, running, failing or true, and never give a number or a name, unless a tool result here says so. When unsure, call do_task.",
+            "- The answer of do_task is spoken to the person by itself when it is ready and then shows in this conversation as your own words: do not repeat, retell or add to it, and do not speak again until the person does.",
             "- If do_task says you are still busy with the last request, say so in one sentence; call stop_task only when the person asks you to stop or cancel.",
             "- How the work is going: call task_progress and answer in one sentence.",
             "- You can never approve, allow or confirm anything yourself, even when the person says yes: say that it waits for their OK on the screen or the lens.",
@@ -57,10 +59,6 @@ def instructions(name: str, place: str = "", language: str = "en") -> str:
             "- Words that make no sense were probably misheard: ask the person to say it again.",
         ]
     )
-
-
-# The work's answer, retold by the talker (see `ManagerVoice.say`).
-RELAY = "Work you started is done. Tell the person what it found in at most three short spoken sentences, in the first person, as your own work: no lists, links or code. If something waits for their OK, say so. What it found:"
 
 
 def tools(call_device: CallDevice) -> list:
@@ -83,7 +81,7 @@ def tools(call_device: CallDevice) -> list:
         """
         said = await call("ask_manager", {"request": request})
         if said.strip().lower().startswith(STARTED):
-            return "Working on it; you are told what it found when it is done. If you have not said anything yet, say in a few words that you are on it. Otherwise say nothing."
+            return "Working on it: its answer is spoken by itself when it is ready. If you have not said anything yet, say only \"On it.\" Otherwise say nothing now."
         return said.replace("The manager is", "You are").replace("the manager", "you")
 
     @function_tool()
