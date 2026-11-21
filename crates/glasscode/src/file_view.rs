@@ -1219,6 +1219,23 @@ impl Workspace {
             _ if editor_shown.is_some() => editor_shown.clone().map(|e| e.into_any_element()).unwrap_or_else(|| div().into_any_element()),
             Content::Reading => sentence("Reading…").into_any_element(),
             Content::Text(lines) if lines.lines.is_empty() => sentence(if show_diff { "git shows no changed lines in this file." } else { "This file is empty." }).into_any_element(),
+            // A Markdown file is read as a page: its headings, lists, tables and code, as a ticket
+            // is. Its source is in Edit, and its changes in Diff.
+            Content::Text(lines) if !show_diff && is_markdown(&path) => {
+                let text = lines.lines.iter().map(|line| line.text.as_ref()).collect::<Vec<&str>>().join("\n");
+                // A byte order mark at the start is not part of the first heading.
+                let page = self.render_markdown(text.trim_start_matches('\u{feff}'), "file-page", 14., cx);
+                div()
+                    // Each file keeps the place it was scrolled to.
+                    .id(SharedString::from(format!("file-page-{path}")))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(theme::sz(24.))
+                    .py(theme::sz(18.))
+                    .child(div().w_full().max_w(theme::sz(820.)).child(page))
+                    .into_any_element()
+            }
             Content::Text(lines) => div().flex().flex_col().flex_1().min_h_0().child(lines_element(if show_diff { "file-diff-lines" } else { "file-lines" }, lines, show_diff, scroll)).into_any_element(),
             Content::Binary(size) => sentence(format!("A binary file ({}): it has no text to show.", size_words(*size))).into_any_element(),
             Content::Missing => sentence(MISSING).into_any_element(),
@@ -1242,6 +1259,12 @@ impl Workspace {
             .child(body)
             .into_any_element()
     }
+}
+
+/// The file is Markdown by its name: Preview shows it as a page.
+pub fn is_markdown(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    [".md", ".markdown", ".mdx"].iter().any(|end| name.ends_with(end))
 }
 
 /// A line under the head: a limit that applied, or the agent's edit (with its dot). It wraps in
@@ -1366,6 +1389,8 @@ mod tests {
         let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(relative(&format!("src{sep}ui{sep}main.rs")), "src/ui/main.rs");
         assert_eq!(relative("./README.md"), "README.md");
+        assert!(is_markdown("README.md") && is_markdown("docs/Guide.MD") && is_markdown("notes.markdown") && is_markdown("page.mdx"));
+        assert!(!is_markdown("src/main.rs") && !is_markdown("md") && !is_markdown("docs.md/readme.txt"));
         assert_eq!(full_path(Path::new("/w/app"), "src/main.rs"), Path::new("/w/app").join("src").join("main.rs"));
     }
 
