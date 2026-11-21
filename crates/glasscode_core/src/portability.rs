@@ -397,19 +397,86 @@ pub struct Imported {
     pub set_aside: usize,
     /// Entries and headings the write-time scan refused (an instruction, a secret): left out.
     pub refused: usize,
+    /// What the export would add to project keys this machine already has, held back: none is
+    /// added without the person's `--confirm <key>`.
+    pub held: Vec<KeyAdditions>,
 }
 
-/// Import an export (`from`, a `.tar` file) into this Glasscode folder.
-pub fn import(from: &Path) -> anyhow::Result<Imported> {
+/// What an import would add to a project key this machine already has: remotes and folders that
+/// tie more checkouts to the key, so a folder there would read that project's memory. Never
+/// added silently: only with the person's `--confirm <key>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KeyAdditions {
+    pub key: ProjectKey,
+    pub remotes: Vec<String>,
+    pub roots: Vec<String>,
+}
+
+impl KeyAdditions {
+    /// `app-3f9a1c: remotes github.com/x/y; folders /src/y`.
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.remotes.is_empty() {
+            parts.push(format!("remotes {}", self.remotes.join(", ")));
+        }
+        if !self.roots.is_empty() {
+            parts.push(format!("folders {}", self.roots.join(", ")));
+        }
+        format!("{}: {}", self.key, parts.join("; "))
+    }
+}
+
+/// What an import would do, read before it changes anything (`data import --dry-run`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preview {
+    pub memory_files: usize,
+    /// Project keys this machine does not have yet: added as the export has them.
+    pub new_keys: Vec<ProjectKey>,
+    /// What it would add to keys this machine has: only with `--confirm <key>`.
+    pub additions: Vec<KeyAdditions>,
+}
+
+/// An export unpacked into a folder of its own, its manifest read.
+fn unpack(from: &Path) -> anyhow::Result<tempfile::TempDir> {
     let stage = tempfile::tempdir().context("no temporary folder for the import")?;
     run_tar(&["-xf", &from.to_string_lossy(), "-C", &stage.path().to_string_lossy()])?;
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(stage.path().join("manifest.json")).context("this is no Glasscode export (no manifest)")?)?;
     if manifest.format > FORMAT {
         bail!("this export was made by a newer Glasscode (format {}); update first", manifest.format);
     }
-    // Memory, merged entry by entry.
+    Ok(stage)
+}
+
+/// The export's project keys (`data/authority/projects.json`), when it has them.
+fn their_keys(stage: &Path) -> Option<Projects> {
+    let text = std::fs::read_to_string(stage.join("data").join("authority").join("projects.json")).ok()?;
+    let envelope = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    serde_json::from_value::<Projects>(envelope["data"].clone()).ok()
+}
+
+/// Of `theirs`, the keys `ours` does not have, and what the rest would add to ours.
+fn key_changes(theirs: &Projects, ours: &Projects) -> (Vec<ProjectKey>, Vec<KeyAdditions>) {
+    let mut new = Vec::new();
+    let mut additions = Vec::new();
+    for (key, entry) in &theirs.keys {
+        match ours.keys.get(key) {
+            None => new.push(key.clone()),
+            Some(mine) => {
+                let remotes: Vec<String> = entry.remotes.iter().filter(|r| !mine.remotes.contains(r)).cloned().collect();
+                let roots: Vec<String> = entry.roots.iter().filter(|r| !mine.roots.contains(r)).cloned().collect();
+                if !remotes.is_empty() || !roots.is_empty() {
+                    additions.push(KeyAdditions { key: key.clone(), remotes, roots });
+                }
+            }
+        }
+    }
+    (new, additions)
+}
+
+/// The memory files of an unpacked export.
+fn their_memory(stage: &Path) -> anyhow::Result<Vec<(MemFile, Doc)>> {
     let mut docs = Vec::new();
-    let memory_dir = stage.path().join("memory");
+    let memory_dir = stage.join("memory");
     let mut stack = vec![memory_dir.clone()];
     while let Some(path) = stack.pop() {
         if path.is_dir() {
@@ -424,27 +491,49 @@ pub fn import(from: &Path) -> anyhow::Result<Imported> {
         }
     }
     docs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(docs)
+}
+
+/// What importing `from` would do, without doing any of it: its memory files, the project keys it
+/// brings, and what it would add to the keys this machine has.
+pub fn preview(from: &Path) -> anyhow::Result<Preview> {
+    let stage = unpack(from)?;
+    let docs = their_memory(stage.path())?;
+    let ours = <Projects as crate::store::Store>::load().map_err(|e| anyhow::anyhow!("the projects' keys could not be read: {e}"))?;
+    let (new_keys, additions) = their_keys(stage.path()).map(|theirs| key_changes(&theirs, &ours)).unwrap_or_default();
+    Ok(Preview { memory_files: docs.len(), new_keys, additions })
+}
+
+/// Import an export (`from`, a `.tar` file) into this Glasscode folder. A project key this machine
+/// already has gains the export's remotes and folders only when the person names it in `confirm`
+/// (`data import … --confirm <key>`); the rest are held back and said ([`Imported::held`]).
+pub fn import(from: &Path, confirm: &[ProjectKey]) -> anyhow::Result<Imported> {
+    let stage = unpack(from)?;
+    // Memory, merged entry by entry.
+    let docs = their_memory(stage.path())?;
     let (_, refused) = Memory::open().import_docs(&docs)?;
-    // The project keys: their remotes and roots, so this machine finds them by its own folders.
+    // The project keys: their remotes and roots, so this machine finds them by its own folders. A
+    // key this machine has changes only when the person confirmed it: an export is a file anyone
+    // could have written, and a folder tied to a key reads that project's memory.
     let data = stage.path().join("data");
     let mut keys = 0;
-    if let Ok(text) = std::fs::read_to_string(data.join("authority").join("projects.json"))
-        && let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&text)
-        && let Ok(theirs) = serde_json::from_value::<Projects>(envelope["data"].clone())
-    {
+    let mut held = Vec::new();
+    if let Some(theirs) = their_keys(stage.path()) {
         Projects::update(|ours| {
-            for (key, entry) in theirs.keys {
-                let mine = ours.keys.entry(key).or_default();
-                for remote in entry.remotes {
-                    if !mine.remotes.contains(&remote) {
-                        mine.remotes.push(remote);
-                    }
+            let (new, additions) = key_changes(&theirs, ours);
+            for key in new {
+                let entry = &theirs.keys[&key];
+                ours.keys.insert(key, crate::identity::Entry { remotes: entry.remotes.clone(), roots: entry.roots.clone(), ..Default::default() });
+                keys += 1;
+            }
+            for add in additions {
+                if !confirm.contains(&add.key) {
+                    held.push(add);
+                    continue;
                 }
-                for root in entry.roots {
-                    if !mine.roots.contains(&root) {
-                        mine.roots.push(root);
-                    }
-                }
+                let mine = ours.keys.get_mut(&add.key).expect("a key this machine has");
+                mine.remotes.extend(add.remotes);
+                mine.roots.extend(add.roots);
                 keys += 1;
             }
         })?;
@@ -484,7 +573,7 @@ pub fn import(from: &Path) -> anyhow::Result<Imported> {
             set_aside += 1;
         }
     }
-    Ok(Imported { memory_files: docs.len(), project_keys: keys, words_records: records, set_aside, refused })
+    Ok(Imported { memory_files: docs.len(), project_keys: keys, words_records: records, set_aside, refused, held })
 }
 
 fn month_of(at_ms: u64) -> String {
@@ -1044,14 +1133,14 @@ mod tests {
         assert!(file.is_file());
         // Into an empty home.
         let _second = Scratch::new();
-        let imported = import(&file).unwrap();
+        let imported = import(&file, &[]).unwrap();
         assert!(imported.memory_files >= 2, "{imported:?}");
         let snap = Memory::open().snapshot().unwrap();
         let all: String = snap.texts(&snap.files().unwrap()).unwrap().into_iter().flatten().collect();
         assert!(all.contains("app releases go out on Tuesdays") && all.contains("useAuthForm"));
         assert!(!all.contains("secret project"), "a project that stays on its Mac is left out");
         // Twice changes nothing.
-        let again = import(&file).unwrap();
+        let again = import(&file, &[]).unwrap();
         assert_eq!(again.words_records, 0);
         assert_eq!(Memory::open().snapshot().unwrap().commit(), snap.commit());
     }
@@ -1116,7 +1205,7 @@ mod tests {
         }
         // It still imports.
         let _second = Scratch::new();
-        let imported = import(&file).unwrap();
+        let imported = import(&file, &[]).unwrap();
         assert!(imported.memory_files >= 2 && imported.project_keys == 1, "{imported:?}");
     }
 
@@ -1162,12 +1251,60 @@ mod tests {
         std::fs::write(stage.join("manifest.json"), serde_json::to_string(&Manifest { format: FORMAT, made_ms: 0, memory_commit: None, left_out: Vec::new(), left_out_count: 0 }).unwrap()).unwrap();
         let tar = scratch.at("planted.tar");
         run_tar(&["-cf", &tar.to_string_lossy(), "-C", &stage.to_string_lossy(), "."]).unwrap();
-        let imported = import(&tar).unwrap();
+        let imported = import(&tar, &[]).unwrap();
         assert_eq!(imported.refused, 2, "{imported:?}");
         let snap = Memory::open().snapshot().unwrap();
         let brief = memstore::brief::build(&snap, &memstore::brief::BriefFor { project: Some(&app), today: "2026-11-21".into(), ..Default::default() }, &|_| true).unwrap().text;
         assert!(brief.contains("Builds with cargo") && brief.contains("Tests run with nextest"), "{brief}");
         assert!(!brief.to_lowercase().contains("ignore previous") && !brief.to_lowercase().contains("admin mode"), "{brief}");
+    }
+
+    /// A hand-made export whose `authority/projects.json` adds a remote and a folder to the key
+    /// `app-3f9a1c`, and brings a new key.
+    fn export_with_keys(scratch: &Scratch) -> PathBuf {
+        let stage = scratch.at("keys-stage");
+        std::fs::create_dir_all(stage.join("data").join("authority")).unwrap();
+        let theirs = serde_json::json!({ "keys": {
+            "app-3f9a1c": { "remotes": ["github.com/someone/elsewhere"], "roots": ["/src/opensource"] },
+            "newkey-123456": { "remotes": ["github.com/me/newkey"], "roots": ["/src/newkey"] },
+        }});
+        std::fs::write(stage.join("data").join("authority").join("projects.json"), serde_json::to_string(&serde_json::json!({ "store": "authority/projects", "version": 1, "data": theirs })).unwrap()).unwrap();
+        std::fs::write(stage.join("manifest.json"), serde_json::to_string(&serde_json::json!({ "format": FORMAT, "made_ms": 0, "memory_commit": null })).unwrap()).unwrap();
+        let tar = scratch.at("keys.tar");
+        run_tar(&["-cf", &tar.to_string_lossy(), "-C", &stage.to_string_lossy(), "."]).unwrap();
+        tar
+    }
+
+    /// An import never changes a project key this machine has by itself: the remotes and folders
+    /// the export would add are held back and listed (in the preview too), and go in only for a
+    /// key the person confirms. A key this machine lacks is added as the export has it.
+    #[test]
+    fn an_import_changes_an_existing_key_only_when_confirmed() {
+        let scratch = Scratch::new();
+        let app = key("app-3f9a1c");
+        Projects::update(|p| {
+            let entry = p.keys.entry(app.clone()).or_default();
+            entry.remotes.push("github.com/me/app".into());
+            entry.roots.push("/src/app".into());
+        })
+        .unwrap();
+        let tar = export_with_keys(&scratch);
+        let wanted = KeyAdditions { key: app.clone(), remotes: vec!["github.com/someone/elsewhere".into()], roots: vec!["/src/opensource".into()] };
+        let seen = preview(&tar).unwrap();
+        assert_eq!((seen.new_keys.clone(), seen.additions.clone()), (vec![key("newkey-123456")], vec![wanted.clone()]));
+        assert!(wanted.line().contains("github.com/someone/elsewhere") && wanted.line().contains("/src/opensource"));
+        let mine = |p: &Projects| (p.keys[&app].remotes.clone(), p.keys[&app].roots.clone());
+        let before = mine(&Projects::load().unwrap());
+        let done = import(&tar, &[]).unwrap();
+        assert_eq!(done.held, [wanted.clone()]);
+        let after = Projects::load().unwrap();
+        assert_eq!(mine(&after), before, "an existing key changed without the person's confirm");
+        assert_eq!(after.keys[&key("newkey-123456")].remotes, ["github.com/me/newkey"], "a new key is added");
+        // Confirmed: it goes in, and nothing is held.
+        let done = import(&tar, std::slice::from_ref(&app)).unwrap();
+        assert!(done.held.is_empty());
+        let after = Projects::load().unwrap();
+        assert!(after.keys[&app].remotes.contains(&"github.com/someone/elsewhere".to_string()) && after.keys[&app].roots.contains(&"/src/opensource".to_string()));
     }
 
     #[test]
@@ -1182,7 +1319,7 @@ mod tests {
         std::fs::remove_dir_all(memory.dir()).unwrap();
         std::fs::remove_file(crate::memstore::MemoryHead::path()).unwrap();
         let _ = std::fs::remove_file(crate::memstore::MemoryHead::path().with_extension("json.prev"));
-        import(&file).unwrap();
+        import(&file, &[]).unwrap();
         let snap = Memory::open().snapshot().unwrap();
         let scope = search::scope_for(&snap, Some(&app), None).unwrap();
         let hits = search::search(&snap, "Which port does the staging database use?", &scope, 5).unwrap();
