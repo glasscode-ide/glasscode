@@ -1,6 +1,7 @@
 //! The manager's chat with the engine at v2 (M52.1; ux-3, ux-4, ux-9, ux-16, ux-18, ux-20): one
 //! conversation, the conversation store's (M43), answered by the chat lane's brain (M51), shown in
-//! one thread component on the Manager page and under the Today box.
+//! one thread component: in the assistant's panel (a tab of Today's right panel, and over the
+//! window on the other pages) and under the Today box.
 //!
 //! - **The data path.** Every way to ask (the typed box, a Try phrase, the voice, `glasscode
 //!   manager ask`) goes through `mtick_ask`, which at v2 comes here. Answers from code come back at
@@ -17,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, SystemTime};
 
-use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Role, SharedString, Window, div, prelude::*, relative};
 use glasscode_core::caller::Lane;
 use glasscode_core::model::AgentKind;
 use glasscode_core::conversation::{Author, Conversation, Draft, Item, Kind, Ref, Stream};
@@ -47,10 +48,10 @@ pub struct ChatUi {
     writer: Option<mpsc::Sender<Write>>,
     /// The chat over the window (ux-3): open, its box, and the newest item seen while it was.
     pub overlay: bool,
-    overlay_input: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) overlay_input: Option<gpui::Entity<crate::text_input::TextInput>>,
     /// The newest item seen (none until the conversation first arrives: then all of it is).
     seen_ms: Option<u64>,
-    /// The topic the Manager page's thread shows (none: all of them).
+    /// The topic the panel's thread on Today shows (none: all of them).
     pub topic: Option<glasscode_core::conversation::TopicId>,
     /// When the person last sent a message (the 30 s in which the chat may move the window).
     pub last_person_ms: Option<u64>,
@@ -91,6 +92,9 @@ pub struct ChatUi {
     pub today_asked: bool,
     /// The start box's placeholder as last set.
     pub placeholder: Option<String>,
+    /// Debug builds, a screen check (`GLASSCODE_DEBUG_TODAY=chat`): a made-up answer comes to
+    /// what is sent, in place of the brain's (`chat_debug_sample`).
+    debug_sample: bool,
 }
 
 /// The answer being written.
@@ -199,7 +203,7 @@ impl Workspace {
                     ws.mchat.conversation = conversation;
                     // What was there when the app started, and what arrives while the chat is
                     // open or its page is shown, is seen.
-                    if ws.mchat.seen_ms.is_none() || ws.mchat.overlay || ws.view == crate::shell::View::Manager {
+                    if ws.mchat.seen_ms.is_none() || ws.assistant_shows() {
                         ws.mchat.seen_ms = Some(newest_ms(&ws.mchat.conversation));
                     }
                     ws.manager.page.chat_scroll.scroll_to_bottom();
@@ -465,6 +469,10 @@ impl Workspace {
         }
         let text = question.composed.clone();
         let caps = Caps::of(agent);
+        // A screen check with a made-up conversation: a made-up answer, and no brain.
+        if cfg!(debug_assertions) && self.mchat.debug_sample {
+            return self.chat_debug_answer(question, agent, caps, cx);
+        }
         let refusal = match self.chat_worker(agent, cx) {
             Ok(worker) => {
                 // The other agent starts a conversation of its own: the store's names the manager's.
@@ -508,7 +516,8 @@ impl Workspace {
         }
         match self.view {
             crate::shell::View::Sessions => self.active_session().map(|s| format!("About: the session “{}”", self.session_title(s))),
-            crate::shell::View::Manager | crate::shell::View::FirstRun => None,
+            // On Today the panel is part of the page: it is about nothing but the day.
+            crate::shell::View::Today | crate::shell::View::FirstRun => None,
             view => Some(format!("About: {}", crate::capabilities::Place::View(view).name())),
         }
     }
@@ -710,10 +719,12 @@ impl Workspace {
                 .aria_label("Suggestions")
                 .flex()
                 .flex_col()
-                .rounded(px(8.))
+                .p(theme::sz(4.))
+                .rounded(theme::sz(10.))
                 .border_1()
-                .border_color(theme::border())
-                .bg(theme::panel())
+                .border_color(theme::border_strong())
+                .bg(theme::dialog())
+                .shadow_md()
                 .overflow_hidden()
                 .children(self.mchat.menu.iter().enumerate().map(|(n, s)| {
                     let on = self.mchat.menu_at == Some(n);
@@ -725,12 +736,13 @@ impl Workspace {
                         .when(on, |d| d.bg(theme::selected()))
                         .flex()
                         .flex_col()
-                        .px_2p5()
-                        .py_1()
+                        .px(theme::sz(10.))
+                        .py(theme::sz(5.))
+                        .rounded(theme::sz(6.))
                         .cursor_pointer()
-                        .hover(|d| d.bg(theme::tint()))
-                        .child(div().text_size(px(12.5)).text_color(theme::text()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.label.clone()))
-                        .child(div().text_size(px(11.)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.detail.clone()))
+                        .hover(|d| d.bg(theme::hover()))
+                        .child(div().text_size(theme::sz(12.5)).text_color(theme::text()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.label.clone()))
+                        .child(div().text_size(theme::sz(11.)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.detail.clone()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_menu_take(n, window, cx)))
                 }))
         });
@@ -738,28 +750,46 @@ impl Workspace {
             div()
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .text_size(px(11.5))
+                .gap(theme::sz(6.))
+                .text_size(theme::sz(11.5))
                 .text_color(theme::text_soft())
-                .child(div().px_1p5().rounded(px(5.)).bg(theme::tint()).child(attached.chip()))
+                .child(div().flex_none().px(theme::sz(6.)).py(theme::sz(1.)).rounded(theme::sz(5.)).bg(theme::hover()).child(attached.chip()))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::muted()).child(format!("from {}", attached.source)))
                 .child(
                     div()
                         .id(SharedString::from(format!("{key}-unattach")))
                         .role(Role::Button)
                         .aria_label(format!("Send without the {}", attached.chip()))
+                        .flex()
                         .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(theme::sz(18.))
+                        .rounded(theme::sz(5.))
                         .cursor_pointer()
-                        .hover(|s| s.text_color(theme::text()))
-                        .child("×")
+                        .hover(|s| s.bg(theme::hover()))
+                        .child(crate::icons::icon(crate::icons::CLOSE, theme::sz(11.), theme::sz(11.), theme::muted()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.mchat.attached = None;
                             cx.notify();
                         })),
                 )
         });
-        let note = editing.then(|| div().text_size(px(11.5)).text_color(theme::muted()).child("Editing a queued message: Enter keeps it in its place, Esc leaves it as it was."));
-        Some(div().flex().flex_col().gap_1p5().px_3().pt_1p5().children(menu).children(chip).children(note).into_any_element())
+        let note = editing.then(|| div().text_size(theme::sz(11.5)).text_color(theme::muted()).child("Editing a queued message: Enter keeps it in its place, Esc leaves it as it was."));
+        Some(div().flex().flex_col().flex_none().gap(theme::sz(6.)).children(menu).children(chip).children(note).into_any_element())
+    }
+
+    /// How many items the panel's thread on Today has to show: the chosen topic's, or all.
+    pub(crate) fn chat_items_shown(&self) -> usize {
+        match &self.mchat.topic {
+            Some(topic) => self.mchat.conversation.topic_items(topic).into_iter().filter(|item| !matches!(item.kind, Kind::Summary { .. } | Kind::Rollover { .. })).count(),
+            None => self.mchat.items.len(),
+        }
+    }
+
+    /// Whether the chat has a failure line to show (its brain cannot think).
+    pub(crate) fn chat_fails(&self) -> bool {
+        self.mchat.failure.is_some() || matches!(self.mchat.ready, Some(Err(_)))
     }
 
     /// The chat's failure line (ux-15), if the brain cannot think.
@@ -780,40 +810,10 @@ impl Workspace {
                 Some(label) => format!("{} (its account {label})", chat::other_label(other)),
                 None => chat::other_label(other),
             };
-            div()
-                .id(SharedString::from(format!("{key}-other")))
-                .role(Role::Button)
-                .aria_label(aria)
-                .flex_none()
-                .px_2p5()
-                .py_0p5()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme::border_strong())
-                .text_size(px(12.))
-                .text_color(theme::text())
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::tint()))
-                .child(chat::other_label(other))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_ask_other(other, cx)))
+            message_button(SharedString::from(format!("{key}-other")), chat::other_label(other), false).role(Role::Button).aria_label(aria).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_ask_other(other, cx)))
         });
         let button = (recovery != chat::Recovery::Wait).then(|| {
-            div()
-                .id(SharedString::from(format!("{key}-recover")))
-                .role(Role::Button)
-                .aria_label(recovery.label())
-                .flex_none()
-                .px_2p5()
-                .py_0p5()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme::border_strong())
-                .text_size(px(12.))
-                .text_color(theme::text())
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::tint()))
-                .child(recovery.label())
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_recover(recovery, window, cx)))
+            message_button(SharedString::from(format!("{key}-recover")), recovery.label(), false).role(Role::Button).aria_label(recovery.label()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_recover(recovery, window, cx)))
         });
         Some(
             div()
@@ -822,17 +822,20 @@ impl Workspace {
                 .aria_label(view.sentence.clone())
                 .flex()
                 .flex_col()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .rounded(px(10.))
+                .flex_none()
+                .gap(theme::sz(4.))
+                .px(theme::sz(12.))
+                .py(theme::sz(10.))
+                .rounded(theme::sz(12.))
                 .border_1()
                 .border_color(theme::attention())
-                .text_size(px(12.5))
+                .bg(theme::warn_bg())
+                .text_size(theme::sz(12.5))
+                .line_height(theme::sz(18.))
                 .text_color(theme::text())
                 .child(view.sentence.clone())
-                .child(div().text_size(px(11.5)).text_color(theme::muted()).child(view.still_works))
-                .when(button.is_some() || other_button.is_some(), |d| d.child(div().flex().gap_2().pt_1().children(button).children(other_button)))
+                .child(div().text_size(theme::sz(11.5)).text_color(theme::text_soft()).child(view.still_works))
+                .when(button.is_some() || other_button.is_some(), |d| d.child(div().flex().flex_wrap().gap(theme::sz(8.)).pt(theme::sz(4.)).children(button).children(other_button)))
                 .into_any_element(),
         )
     }
@@ -1052,14 +1055,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The Today box's Session | Ask control, remembered: the person's `settings.set today.ask`.
-    pub(crate) fn chat_set_today_mode(&mut self, mode: StartMode, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_op_named("settings.set", serde_json::json!({ "key": "today.ask", "value": (mode == StartMode::Ask).to_string() }), window, cx);
-    }
-
-    /// What Enter does in the Today box when the manager is on, as the person chose it.
+    /// What Enter does in the Today box when the manager is on: it asks the manager, unless the
+    /// person chose that it starts a session (`settings.set today.ask false`, or Jump's "Today
+    /// box" command). The box's quiet second action does the other.
     pub(crate) fn chat_today_mode(&self) -> StartMode {
-        if self.state.prefs.today_ask { StartMode::Ask } else { StartMode::Session }
+        if self.state.prefs.today_ask.0 { StartMode::Ask } else { StartMode::Session }
     }
 
     /// Whether the chat can answer now, and why not (for the Today box's control): its agent is
@@ -1212,17 +1212,21 @@ fn newest_ms(conversation: &Conversation) -> u64 {
 }
 
 impl Workspace {
-    /// Open or close the chat over the window: the view under it stays (`ui.state` names it), and
-    /// its box takes the keys.
+    /// Open or close the assistant's panel over the window: the view under it stays (`ui.state`
+    /// names it), and its box takes the keys.
     /// `focus`: the person opened it, so its box takes the keys (a brain's `ui.panel chat` does
-    /// not take them from wherever the person types). On the Manager page the page is the chat.
+    /// not take them from wherever the person types). On Today the panel is a tab of the right
+    /// panel: opening it shows that tab, and nothing floats.
     pub(crate) fn chat_overlay_set(&mut self, open: bool, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_start(cx);
         self.mchat.seen_ms = Some(newest_ms(&self.mchat.conversation));
-        if open && self.view == crate::shell::View::Manager {
+        if self.view == crate::shell::View::Today {
             self.mchat.overlay = false;
-            if focus && let Some(input) = self.manager.input.clone() {
-                crate::text_input::focus(&input, window, cx);
+            if open {
+                self.assistant_dock(cx);
+                if focus && let Some(input) = self.manager.input.clone() {
+                    crate::text_input::focus(&input, window, cx);
+                }
             }
             return cx.notify();
         }
@@ -1247,7 +1251,7 @@ impl Workspace {
     }
 
     /// The chat's own box, made the first time it opens.
-    fn chat_overlay_input(&mut self, cx: &mut Context<Self>) -> gpui::Entity<crate::text_input::TextInput> {
+    pub(crate) fn chat_overlay_input(&mut self, cx: &mut Context<Self>) -> gpui::Entity<crate::text_input::TextInput> {
         if let Some(input) = &self.mchat.overlay_input {
             return input.clone();
         }
@@ -1273,7 +1277,7 @@ impl Workspace {
         input
     }
 
-    fn chat_overlay_send(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn chat_overlay_send(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.mchat.overlay_input.clone() else { return };
         if self.chat_menu_enter(&input, cx) {
             return;
@@ -1453,146 +1457,18 @@ impl Workspace {
         self.control.approvals.iter().any(|a| a.pending.as_ref().is_some_and(|p| p.id == pending))
     }
 
-    /// The chat over the window: its newest exchanges, the answer being written, a box, and the
-    /// way to the full conversation. Anchored above the bubble.
-    pub(crate) fn render_chat_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let name = self.state.manager.name.clone();
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(theme::border())
-            .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(name.clone()))
-            .child(
-                div()
-                    .id("chat-overlay-full")
-                    .role(Role::Link)
-                    .aria_label("Open the full conversation")
-                    .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(theme::text_soft())
-                    .underline()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme::text()))
-                    .child("Open the full conversation")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.mchat.overlay = false;
-                        this.show_manager(window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .id("chat-overlay-close")
-                    .role(Role::Button)
-                    .aria_label("Close the chat")
-                    .flex_none()
-                    .px_1()
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme::text()))
-                    .child("×")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": true }), window, cx))),
-            );
-        let thread = div()
-            .id("chat-overlay-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.manager.page.chat_scroll)
-            .p_3()
-            .child(self.render_chat_thread(ThreadView { id: "overlay-thread", limit: 12, compact: true }, cx));
-        // What the next message is about (ux-5): names only; the person can take it off.
-        let about = self.chat_about().map(|about| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_1p5()
-                .px_3()
-                .pt_1p5()
-                .text_size(px(11.5))
-                .text_color(theme::muted())
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(about.clone()))
-                .child(
-                    div()
-                        .id("chat-overlay-about-off")
-                        .role(Role::Button)
-                        .aria_label(format!("Send without: {about}"))
-                        .flex_none()
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::text()))
-                        .child("×")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.mchat.focus_off = true;
-                            cx.notify();
-                        })),
-                )
-        });
-        let composer = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .p_2()
-            .border_t_1()
-            .border_color(theme::border())
-            .child(div().id("chat-overlay-input").role(Role::TextInput).aria_label(format!("Ask {name}")).flex().flex_1().min_w_0().items_center().h(px(32.)).px_3().rounded_full().border_1().border_color(theme::border_strong()).bg(theme::input()).children(self.mchat.overlay_input.clone()))
-            .child(
-                div()
-                    .id("chat-overlay-send")
-                    .role(Role::Button)
-                    .aria_label(format!("Send to {name}"))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(30.))
-                    .rounded_full()
-                    .bg(theme::accent())
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.88))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_overlay_send(cx)))
-                    .child(crate::icons::icon(crate::icons::SEND, px(14.), px(14.), theme::on_accent())),
-            );
-        let root = div()
-            .id("chat-overlay")
-            .role(Role::Dialog)
-            .aria_label(format!("Chat with {name}"))
-            .occlude()
-            .flex()
-            .flex_col()
-            .w(px(380.))
-            .h(px(480.))
-            .rounded(px(14.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::raised())
-            .shadow_lg()
-            .overflow_hidden()
-            .child(header)
-            .child(thread)
-            .children(self.render_chat_box_extras(self.mchat.overlay_input.as_ref(), "chat-overlay", cx))
-            .children(about)
-            .child(composer);
-        self.chat_menu_keys(root, cx).into_any_element()
-    }
-
-    /// The topics of the Manager page's thread: all of them, or one (M43's topics: a PR's, a
-    /// session's, the general one), newest first.
-    /// The conversation on the Manager page shows `topic` (None: all of them): `ui.topic`, its chips.
+    /// The conversation in the panel on Today shows `topic` (None: all of them): `ui.topic`, its
+    /// chips.
     pub(crate) fn chat_show_topic(&mut self, topic: Option<glasscode_core::conversation::TopicId>, cx: &mut Context<Self>) {
         self.mchat.topic = topic;
+        self.manager.page.earlier = 0;
         self.manager.page.chat_scroll.scroll_to_bottom();
         cx.notify();
     }
 
-    pub(crate) fn render_chat_topics(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The topics of the panel's thread on Today: all of them, or one (M43's topics: a PR's, a
+    /// session's, the general one), newest first. None while there is only one.
+    pub(crate) fn render_chat_topics(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let conversation = &self.mchat.conversation;
         let mut topics: Vec<(glasscode_core::conversation::TopicId, String, u64)> = conversation
             .topics()
@@ -1603,6 +1479,9 @@ impl Workspace {
             })
             .filter(|(_, _, last)| *last > 0)
             .collect();
+        if topics.len() < 2 && self.mchat.topic.is_none() {
+            return None;
+        }
         topics.sort_by(|a, b| b.2.cmp(&a.2));
         let chosen = self.mchat.topic.clone();
         let chip = |id: SharedString, label: String, on: bool, topic: Option<glasscode_core::conversation::TopicId>, cx: &mut Context<Self>| {
@@ -1612,16 +1491,17 @@ impl Workspace {
                 .aria_label(format!("Topic: {label}"))
                 .aria_selected(on)
                 .flex_none()
-                .max_w(px(180.))
+                .max_w(theme::sz(160.))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .px_2()
-                .py_0p5()
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
+                .px(theme::sz(8.))
+                .py(theme::sz(2.))
+                .rounded_full()
+                .border_1()
+                .text_size(theme::sz(11.5))
+                .when(on, |d| d.border_color(theme::text_soft()).text_color(theme::text_strong()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.border_color(theme::border()).text_color(theme::muted()).cursor_pointer().hover(|s| s.text_color(theme::text()).bg(theme::hover())))
                 .child(label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     let topic = topic.as_ref().map_or_else(|| "all".to_string(), |t| t.as_str().to_string());
@@ -1629,13 +1509,11 @@ impl Workspace {
                 }))
         };
         let mut row: Vec<AnyElement> = vec![chip("chat-topic-all".into(), "All".into(), chosen.is_none(), None, cx).into_any_element()];
-        if topics.len() > 1 {
-            for (n, (id, title, _)) in topics.into_iter().take(12).enumerate() {
-                let on = chosen.as_ref() == Some(&id);
-                row.push(chip(SharedString::from(format!("chat-topic-{n}")), title, on, Some(id), cx).into_any_element());
-            }
+        for (n, (id, title, _)) in topics.into_iter().take(12).enumerate() {
+            let on = chosen.as_ref() == Some(&id);
+            row.push(chip(SharedString::from(format!("chat-topic-{n}")), title, on, Some(id), cx).into_any_element());
         }
-        div().id("chat-topics").role(Role::TabList).aria_label("Topics").flex().flex_none().flex_wrap().gap_1().px_4().pt_3().children(row).into_any_element()
+        Some(div().id("chat-topics").role(Role::TabList).aria_label("Topics").flex().flex_none().flex_wrap().gap(theme::sz(5.)).children(row).into_any_element())
     }
 }
 
@@ -1645,17 +1523,69 @@ impl Workspace {
 pub struct ThreadView<'a> {
     pub id: &'a str,
     pub limit: usize,
-    /// Narrow (under the Today box): smaller type.
+    /// A small surface (the panel over the window, under the Today box): smaller type, and long
+    /// answers start folded.
     pub compact: bool,
+    /// It shows the topic chosen in the assistant's panel on Today (the other mounts show all).
+    pub topics: bool,
+}
+
+/// The fill of the person's own messages: the accent, thin, so the words stay the text colour.
+fn you_fill() -> gpui::Hsla {
+    let mut fill = theme::accent();
+    fill.a = if theme::is_light() { 0.12 } else { 0.2 };
+    fill
+}
+
+/// A quiet action under a message: a small icon and its word ("Useful", "Undo").
+pub(crate) fn quiet_action(id: SharedString, glyph: &'static [u8], label: impl Into<SharedString>) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(theme::sz(4.))
+        .h(theme::sz(22.))
+        .px(theme::sz(6.))
+        .rounded(theme::sz(6.))
+        .text_size(theme::sz(11.5))
+        .text_color(theme::muted())
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
+        .child(crate::icons::icon(glyph, theme::sz(12.), theme::sz(12.), theme::muted()))
+        .child(label.into())
+}
+
+/// A small button in a message: the filled one decides, the other declines.
+pub(crate) fn message_button(id: SharedString, label: impl Into<SharedString>, strong: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(theme::sz(26.))
+        .px(theme::sz(10.))
+        .rounded(theme::sz(7.))
+        .text_size(theme::sz(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .map(|d| {
+            if strong {
+                d.bg(theme::accent()).text_color(theme::on_accent()).hover(|s| s.opacity(0.88))
+            } else {
+                d.border_1().border_color(theme::border_strong()).text_color(theme::text()).hover(|s| s.bg(theme::hover()))
+            }
+        })
+        .child(label.into())
 }
 
 impl Workspace {
     /// The conversation's newest items, the answer being written, and the queued messages: one
-    /// component, on the Manager page and under the Today box. A log for screen readers, whose
-    /// finished messages are its children (ux-16).
+    /// component, in the assistant's panel (on Today and over the window) and under the Today
+    /// box. A log for screen readers, whose finished messages are its children (ux-16).
     pub(crate) fn render_chat_thread(&self, view: ThreadView, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
-        // The Manager page shows the topic chosen there; the other mounts show them all.
-        let topic = self.mchat.topic.as_ref().filter(|_| view.id == "manager-thread");
+        let topic = self.mchat.topic.as_ref().filter(|_| view.topics);
         let items: Vec<&Item> = match topic {
             Some(topic) => self.mchat.conversation.topic_items(topic).into_iter().filter(|item| !matches!(item.kind, Kind::Summary { .. } | Kind::Rollover { .. })).collect(),
             None => self.mchat.items.iter().collect(),
@@ -1672,82 +1602,101 @@ impl Workspace {
         // Runs of action lines fold into one row each ("3 actions ▸"), opened by the person.
         let shown = &items[from..];
         let actions: Vec<bool> = shown.iter().map(|item| matches!(item.kind, Kind::Action { .. })).collect();
+        // The manager's name stands over the first of its messages in a row, not over each.
+        let says = |i: usize| matches!(shown[i].kind, Kind::Manager { .. });
+        let mut last_said = false;
         for row in chat::rows(&actions) {
             match row {
-                chat::Row::One(i) => out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx)),
+                chat::Row::One(i) => {
+                    out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, says(i) && !last_said, cx));
+                    last_said = says(i);
+                }
                 chat::Row::Actions(run) => {
                     let first = shown[run.start].id.clone();
                     let open = self.mchat.open_runs.contains(&first);
                     out.push(self.render_chat_run(&shown[run.clone()], first, open, &format!("{}-run-{}", view.id, from + run.start), size, cx));
                     if open {
                         for i in run {
-                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx));
+                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, false, cx));
                         }
                     }
                 }
             }
         }
         if out.is_empty() && self.mchat.turn.is_none() {
-            out.push(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
+            out.push(div().text_size(theme::sz(12.5)).line_height(theme::sz(18.)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
         }
         if let Some(turn) = &self.mchat.turn {
-            out.push(self.render_chat_turn(turn, view.id, size, cx));
+            out.push(self.render_chat_turn(turn, view.id, size, !last_said, cx));
         }
         for queued in self.mchat.queue.items() {
             let id = queued.id;
             out.push(
                 div()
-                    .id(SharedString::from(format!("{}-queued-{id}", view.id)))
-                    .role(Role::ListItem)
-                    .aria_label(format!("Queued: {}", queued.text))
                     .flex()
-                    .self_end()
-                    .items_center()
-                    .gap_2()
-                    .max_w(relative(0.92))
-                    .px_3()
-                    .py_1p5()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme::border_strong())
-                    .text_size(px(size))
-                    .text_color(theme::text_soft())
-                    .child(div().flex_none().text_size(px(11.)).text_color(theme::muted()).child("Queued"))
-                    .child(div().flex_1().min_w_0().child(queued.text.clone()))
+                    .flex_none()
+                    .justify_end()
                     .child(
                         div()
-                            .id(SharedString::from(format!("{}-edit-{id}", view.id)))
-                            .role(Role::Button)
-                            .aria_label("Edit this queued message")
-                            .flex_none()
-                            .text_size(px(11.5))
-                            .underline()
-                            .cursor_pointer()
-                            .text_color(theme::muted())
-                            .hover(|s| s.text_color(theme::text()))
-                            .child(if self.mchat.editing == Some(id) { "Editing" } else { "Edit" })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_edit_queued(id, window, cx))),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{}-unqueue-{id}", view.id)))
-                            .role(Role::Button)
-                            .aria_label("Remove this queued message")
-                            .flex_none()
-                            .cursor_pointer()
-                            .text_color(theme::muted())
-                            .hover(|s| s.text_color(theme::text()))
-                            .child("×")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.mchat.queue.remove(id);
-                                cx.notify();
-                            })),
+                            .id(SharedString::from(format!("{}-queued-{id}", view.id)))
+                            .role(Role::ListItem)
+                            .aria_label(format!("Queued: {}", queued.text))
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(4.))
+                            .max_w(relative(0.88))
+                            .px(theme::sz(12.))
+                            .py(theme::sz(8.))
+                            .rounded(theme::sz(14.))
+                            .rounded_br(theme::sz(4.))
+                            .border_1()
+                            .border_dashed()
+                            .border_color(theme::border_strong())
+                            .text_size(theme::sz(size))
+                            .line_height(theme::sz(size * 1.5))
+                            .text_color(theme::text_soft())
+                            .child(queued.text.clone())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme::sz(2.))
+                                    .child(div().flex_1().text_size(theme::sz(11.)).text_color(theme::muted()).child("Queued"))
+                                    .child(
+                                        quiet_action(SharedString::from(format!("{}-edit-{id}", view.id)), crate::icons::FILE, if self.mchat.editing == Some(id) { "Editing" } else { "Edit" })
+                                            .role(Role::Button)
+                                            .aria_label("Edit this queued message")
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_edit_queued(id, window, cx))),
+                                    )
+                                    .child(
+                                        quiet_action(SharedString::from(format!("{}-unqueue-{id}", view.id)), crate::icons::CLOSE, "Remove")
+                                            .role(Role::Button)
+                                            .aria_label("Remove this queued message")
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                this.mchat.queue.remove(id);
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
                     )
                     .into_any_element(),
             );
         }
-        div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(px(10.)).children(out)
+        div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(theme::sz(14.)).children(out)
+    }
+
+    /// The manager's mark and name over what it says.
+    fn chat_name_line(&self) -> Div {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(6.))
+            .text_size(theme::sz(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::text_soft())
+            .child(crate::icons::icon(crate::icons::ASSISTANT, theme::sz(13.), theme::sz(13.), theme::accent()))
+            .child(self.state.manager.name.clone())
     }
 
     /// A run of action lines as one row: how many, and the newest while it is closed; a click
@@ -1762,14 +1711,17 @@ impl Workspace {
             .aria_expanded(open)
             .flex()
             .flex_none()
-            .self_stretch()
             .items_center()
-            .gap_2()
-            .text_size(px(size - 1.5))
+            .gap(theme::sz(8.))
+            .h(theme::sz(26.))
+            .px(theme::sz(8.))
+            .rounded(theme::sz(8.))
+            .bg(theme::hover())
+            .text_size(theme::sz(size - 1.5))
             .text_color(theme::muted())
             .cursor_pointer()
             .hover(|s| s.text_color(theme::text()))
-            .child(div().flex_none().text_color(theme::text_soft()).child(label))
+            .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme::text_soft()).child(label))
             .when(!open, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(newest)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_toggle_run(&first, cx)))
             .into_any_element()
@@ -1783,10 +1735,19 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        let bubble = div().flex().flex_col().flex_none().gap(px(6.)).px_3().py_2().rounded(px(12.)).text_size(px(size)).line_height(px(size * 1.45));
+    /// One item of the conversation. `named`: the manager's name stands over it.
+    fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, named: bool, cx: &mut Context<Self>) -> AnyElement {
+        let words = || div().text_size(theme::sz(size)).line_height(theme::sz(size * 1.5));
+        // A note in the thread: what waits, what was decided, an error. As wide as the thread.
+        let note = || words().flex().flex_col().flex_none().gap(theme::sz(8.)).px(theme::sz(12.)).py(theme::sz(10.)).rounded(theme::sz(12.));
+        let small = |text: &'static str, color: gpui::Hsla| div().text_size(theme::sz(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(text);
         match &item.kind {
-            Kind::You { .. } | Kind::V1 { who: glasscode_core::manager::Who::You } => bubble.self_end().max_w(relative(0.92)).bg(theme::selected()).text_color(theme::text_strong()).child(item.text.clone()).into_any_element(),
+            Kind::You { .. } | Kind::V1 { who: glasscode_core::manager::Who::You } => div()
+                .flex()
+                .flex_none()
+                .justify_end()
+                .child(words().max_w(relative(0.88)).px(theme::sz(12.)).py(theme::sz(8.)).rounded(theme::sz(14.)).rounded_br(theme::sz(4.)).bg(you_fill()).text_color(theme::text_strong()).child(item.text.clone()))
+                .into_any_element(),
             Kind::Manager { state } => {
                 let mut sel = crate::chat_select::Selection::default();
                 // A long answer in a small surface: its start, and "Read more" (ux-20).
@@ -1796,104 +1757,74 @@ impl Workspace {
                     (Some(start), false) => start.clone(),
                     _ => item.text.clone(),
                 };
-                let reply = crate::chat_ui::render_reply(&shown, key, &mut sel, cx.entity().downgrade());
+                let reply = crate::chat_ui::render_reply_at(&shown, key, &mut sel, cx.entity().downgrade(), size * theme::scale());
                 let more = clipped.map(|_| {
                     let id = item.id.clone();
-                    div()
-                        .id(SharedString::from(format!("{key}-more")))
-                        .role(Role::Button)
-                        .aria_label(if open { "Show less" } else { "Read more" })
-                        .aria_expanded(open)
-                        .text_size(px(11.5))
-                        .underline()
-                        .text_color(theme::text_soft())
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::text()))
-                        .child(if open { "Show less" } else { "Read more" })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if !this.mchat.expanded.remove(&id) {
-                                this.mchat.expanded.insert(id.clone());
-                            }
-                            cx.notify();
-                        }))
+                    div().flex().ml(theme::sz(-6.)).child(
+                        quiet_action(SharedString::from(format!("{key}-more")), crate::icons::CHEVRON_DOWN, if open { "Show less" } else { "Read more" })
+                            .role(Role::Button)
+                            .aria_label(if open { "Show less" } else { "Read more" })
+                            .aria_expanded(open)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if !this.mchat.expanded.remove(&id) {
+                                    this.mchat.expanded.insert(id.clone());
+                                }
+                                cx.notify();
+                            })),
+                    )
                 });
-                bubble
-                    .self_start()
-                    .max_w(relative(0.92))
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::panel())
-                    .text_color(theme::text())
-                    .child(reply)
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .min_w_0()
+                    .gap(theme::sz(6.))
+                    .when(named, |d| d.child(self.chat_name_line()))
+                    .child(words().min_w_0().text_color(theme::text()).child(reply))
                     .children(more)
-                    .when(*state == Stream::Stopped, |d| d.child(div().text_size(px(11.)).text_color(theme::muted()).child("Stopped")))
-                    .child(self.render_chips(&item.text, key, cx))
+                    .when(*state == Stream::Stopped, |d| d.child(small("Stopped", theme::muted())))
+                    .children(self.render_chips(&item.text, key, cx))
                     .into_any_element()
             }
-            Kind::Error => bubble.self_stretch().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(size - 1.)).child(item.text.clone()).into_any_element(),
+            Kind::Error => note().bg(theme::error_bg()).text_color(theme::error_text()).text_size(theme::sz(size - 1.)).child(item.text.clone()).into_any_element(),
             // An approval card, inline (M21.2): Allow and Deny while it waits (ux-14, M52.2).
             Kind::Card { pending } if self.chat_card_waits(pending) => {
                 let number = self.control.approvals.iter().find(|a| a.pending.as_ref().is_some_and(|p| &p.id == pending)).map(|a| a.id).unwrap_or_default();
                 let decide = |answer: &'static str, label: &'static str, cx: &mut Context<Self>| {
-                    div()
-                        .id(SharedString::from(format!("{key}-{answer}")))
+                    message_button(SharedString::from(format!("{key}-{answer}")), label, answer == "allow")
                         .role(Role::Button)
                         .aria_label(format!("{label}: {}", item.text))
-                        .px_2p5()
-                        .py_0p5()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(theme::border_strong())
-                        .text_size(px(12.))
-                        .when(answer == "allow", |d| d.bg(theme::accent()).text_color(theme::on_accent()).border_color(theme::accent()))
-                        .when(answer != "allow", |d| d.text_color(theme::text_soft()))
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.88))
-                        .child(label)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_op_named("approvals.decide", serde_json::json!({ "id": number.to_string(), "answer": answer }), window, cx)))
                 };
-                bubble
-                    .self_stretch()
+                note()
                     .border_1()
                     .border_color(theme::attention())
+                    .bg(theme::raised())
                     .text_color(theme::text())
-                    .child(div().text_size(px(11.)).text_color(theme::attention()).child("Waiting for you"))
+                    .child(div().flex().items_center().gap(theme::sz(6.)).child(crate::ui::dot(theme::attention())).child(small("Waiting for you", theme::text_soft())))
                     .child(item.text.clone())
-                    .child(div().flex().gap_2().child(decide("allow", "Allow", cx)).child(decide("deny", "Deny", cx)))
+                    .child(div().flex().gap(theme::sz(8.)).child(decide("allow", "Allow", cx)).child(decide("deny", "Deny", cx)))
                     .into_any_element()
             }
-            Kind::Card { .. } => bubble.self_stretch().border_1().border_color(theme::border()).text_color(theme::text_soft()).child(div().text_size(px(11.)).text_color(theme::muted()).child("Decided")).child(item.text.clone()).into_any_element(),
+            Kind::Card { .. } => note().border_1().border_color(theme::border()).text_color(theme::text_soft()).child(small("Decided", theme::muted())).child(item.text.clone()).into_any_element(),
             // What the manager would have shown: the person's to take (ux-5).
             Kind::Nudge { matter } if matter.starts_with(chat::SHOW_ME) && !item.closed => {
                 let (matter, id) = (matter.clone(), item.id.clone());
-                bubble
-                    .self_start()
+                note()
+                    .bg(theme::hover())
                     .text_color(theme::text_soft())
                     .child(item.text.clone())
                     .child(
                         div().flex().child(
-                            div()
-                                .id(SharedString::from(format!("{key}-show")))
-                                .role(Role::Button)
-                                .aria_label(item.text.clone())
-                                .px_2p5()
-                                .py_0p5()
-                                .rounded(px(6.))
-                                .bg(theme::tint())
-                                .text_size(px(12.))
-                                .text_color(theme::text())
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(0.88))
-                                .child("Show me")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    if let Some(op) = chat::show_me_op(&matter) {
-                                        this.run_op_named(op.name(), serde_json::to_value(&op).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default(), window, cx);
-                                    }
-                                    let id = id.clone();
-                                    this.chat_write(Box::new(move |conversation| {
-                                        let _ = conversation.close(&id);
-                                    }));
-                                })),
+                            message_button(SharedString::from(format!("{key}-show")), "Show me", false).role(Role::Button).aria_label(item.text.clone()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if let Some(op) = chat::show_me_op(&matter) {
+                                    this.run_op_named(op.name(), serde_json::to_value(&op).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default(), window, cx);
+                                }
+                                let id = id.clone();
+                                this.chat_write(Box::new(move |conversation| {
+                                    let _ = conversation.close(&id);
+                                }));
+                            })),
                         ),
                     )
                     .into_any_element()
@@ -1904,34 +1835,35 @@ impl Workspace {
                     glasscode_core::conversation::Ref::Project(key) => Some(key.as_str().to_string()),
                     _ => None,
                 });
-                let say = |answer: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                let say = |answer: &'static str, glyph: &'static [u8], label: &'static str, cx: &mut Context<Self>| {
                     let (matter, project) = (matter.clone(), project.clone());
-                    div()
-                        .id(SharedString::from(format!("{key}-{answer}")))
-                        .role(Role::Button)
-                        .aria_label(format!("{label}: {}", item.text))
-                        .text_size(px(11.))
-                        .underline()
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::text()))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            let mut args = serde_json::json!({ "matter": matter, "answer": answer });
-                            if let Some(project) = &project {
-                                args["project"] = serde_json::json!(project);
-                            }
-                            this.run_op_named("manager.feedback", args, window, cx);
-                        }))
+                    quiet_action(SharedString::from(format!("{key}-{answer}")), glyph, label).role(Role::Button).aria_label(format!("{label}: {}", item.text)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        let mut args = serde_json::json!({ "matter": matter, "answer": answer });
+                        if let Some(project) = &project {
+                            args["project"] = serde_json::json!(project);
+                        }
+                        this.run_op_named("manager.feedback", args, window, cx);
+                    }))
                 };
-                bubble
-                    .self_start()
-                    .text_color(theme::text_soft())
-                    .child(format!("• {}", item.text))
-                    .child(div().flex().gap_3().child(say("useful", "Useful", cx)).child(say("not-useful", "Not useful", cx)).child(say("fewer", "Fewer like this", cx)))
+                note()
+                    .gap(theme::sz(4.))
+                    .bg(theme::hover())
+                    .text_color(theme::text())
+                    .child(item.text.clone())
+                    // The links start where the words do: their own padding is taken back.
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x(theme::sz(4.))
+                            .ml(theme::sz(-6.))
+                            .child(say("useful", crate::icons::THUMB_UP, "Useful", cx))
+                            .child(say("not-useful", crate::icons::THUMB_DOWN, "Not useful", cx))
+                            .child(say("fewer", crate::icons::MOON, "Fewer like this", cx)),
+                    )
                     .into_any_element()
             }
-            Kind::Nudge { .. } => bubble.self_start().text_color(theme::muted()).child(format!("• {}", item.text)).into_any_element(),
+            Kind::Nudge { .. } => note().bg(theme::hover()).text_color(theme::muted()).child(item.text.clone()).into_any_element(),
             // What the manager did, with Undo while its inverse holds (ux-14).
             Kind::Action { effect, .. } => {
                 let undo = self.mchat.undos.get(effect).filter(|entry| entry.holds(glasscode_core::clock::now_ms())).map(|entry| entry.op.clone());
@@ -1939,45 +1871,44 @@ impl Workspace {
                 div()
                     .flex()
                     .flex_none()
-                    .self_stretch()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(size - 1.5))
+                    .items_start()
+                    .gap(theme::sz(8.))
+                    .text_size(theme::sz(size - 1.5))
+                    .line_height(theme::sz((size - 1.5) * 1.5))
                     .text_color(theme::muted())
+                    .child(div().flex_none().pt(theme::sz(3.)).child(crate::icons::icon(crate::icons::CHECK, theme::sz(12.), theme::sz(12.), theme::muted())))
                     .child(div().flex_1().min_w_0().child(item.text.clone()))
                     .when_some(undo, |d, undo| {
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("{key}-undo")))
-                                .role(Role::Button)
-                                .aria_label(format!("Undo: {}", item.text))
-                                .flex_none()
-                                .underline()
-                                .text_color(theme::text_soft())
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme::text()))
-                                .child("Undo")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.mchat.undos.remove(&effect);
-                                    let args = serde_json::to_value(&undo).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default();
-                                    this.run_op_named(undo.name(), args, window, cx);
-                                })),
-                        )
+                        d.child(quiet_action(SharedString::from(format!("{key}-undo")), crate::icons::BACK, "Undo").role(Role::Button).aria_label(format!("Undo: {}", item.text)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.mchat.undos.remove(&effect);
+                            let args = serde_json::to_value(&undo).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default();
+                            this.run_op_named(undo.name(), args, window, cx);
+                        })))
                     })
                     .into_any_element()
             }
-            _ => div().flex_none().self_stretch().text_size(px(size - 1.5)).text_color(theme::muted()).child(item.text.clone()).into_any_element(),
+            // Glasscode's own line: who asked, what changed.
+            _ => div().flex_none().text_size(theme::sz(size - 1.5)).line_height(theme::sz((size - 1.5) * 1.5)).text_color(theme::muted()).child(item.text.clone()).into_any_element(),
         }
     }
 
     /// The answer being written: its text so far, what it is doing, and Stop.
-    fn render_chat_turn(&self, turn: &Turn, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_turn(&self, turn: &Turn, key: &str, size: f32, named: bool, cx: &mut Context<Self>) -> AnyElement {
         let name = self.state.manager.name.clone();
         let mut sel = crate::chat_select::Selection::default();
-        let body: AnyElement = if turn.text.trim().is_empty() {
-            div().text_color(theme::muted()).child(if turn.stopping { "Stopping…".to_string() } else { format!("{name} is thinking…") }).into_any_element()
+        let waits = turn.text.trim().is_empty();
+        let body: AnyElement = if waits {
+            // It waits for the first words: the one place the panel shows motion, and only then.
+            div()
+                .flex()
+                .items_center()
+                .gap(theme::sz(8.))
+                .text_color(theme::muted())
+                .child(crate::motion::spinner(SharedString::from(format!("{key}-thinking")), 13., theme::accent()))
+                .child(if turn.stopping { "Stopping…".to_string() } else { turn.activity.clone().unwrap_or_else(|| "Thinking…".to_string()) })
+                .into_any_element()
         } else {
-            crate::chat_ui::render_reply(&turn.text, &format!("{key}-turn"), &mut sel, cx.entity().downgrade())
+            crate::chat_ui::render_reply_at(&turn.text, &format!("{key}-turn"), &mut sel, cx.entity().downgrade(), size * theme::scale())
         };
         let waiting_whole = !turn.caps.streams_text && turn.text.is_empty();
         div()
@@ -1989,76 +1920,67 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_none()
-            .self_start()
-            .max_w(relative(0.92))
-            .gap(px(6.))
-            .px_3()
-            .py_2()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::panel())
-            .text_size(px(size))
-            .line_height(px(size * 1.45))
+            .min_w_0()
+            .gap(theme::sz(6.))
+            .text_size(theme::sz(size))
+            .line_height(theme::sz(size * 1.5))
             .text_color(theme::text())
+            .when(named, |d| d.child(self.chat_name_line()))
             .child(body)
-            .when_some(turn.activity.clone(), |d, activity| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child(activity)))
-            .when(waiting_whole, |d| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child("Its answer comes all at once when it is done.")))
+            .when_some(turn.activity.clone().filter(|_| !waits), |d, activity| d.child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(activity)))
+            .when(waiting_whole, |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child("Its answer comes all at once when it is done.")))
             .child(
-                div().flex().child(
-                    div()
-                        .id(SharedString::from(format!("{key}-stop")))
-                        .role(Role::Button)
-                        .aria_label("Stop the answer")
-                        .flex_none()
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(theme::border_strong())
-                        .text_size(px(11.5))
-                        .text_color(theme::text_soft())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
-                        .child(turn.caps.stop_words())
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_stop(cx))),
+                div().flex().ml(theme::sz(-6.)).child(
+                    quiet_action(SharedString::from(format!("{key}-stop")), crate::icons::STOP, turn.caps.stop_words()).role(Role::Button).aria_label("Stop the answer").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_stop(cx))),
                 ),
             )
             .into_any_element()
     }
 
-    /// The references of a message as chips that open their place (ux-20).
-    fn render_chips(&self, text: &str, key: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// The references of a message as chips that open their place (ux-20); none: nothing.
+    fn render_chips(&self, text: &str, key: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (sessions, repos) = self.chat_known();
         let chips = chat::chips_from_references(text, &sessions, &repos);
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_1p5()
-            .children(chips.into_iter().enumerate().map(|(n, chip)| {
-                let target = chip.target.clone();
-                let label = match &chip.target {
-                    ChipTarget::Session(_) => format!("Session: {}", chip.label),
-                    ChipTarget::Pr { .. } => chip.label.clone(),
-                };
-                div()
-                    .id(SharedString::from(format!("{key}-chip-{n}")))
-                    .role(Role::Link)
-                    .aria_label(format!("Open {label}"))
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(6.))
-                    .bg(theme::tint())
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::text_soft())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme::text()))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_open(&target, window, cx)))
-            }))
-            .into_any_element()
+        if chips.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(theme::sz(6.))
+                .children(chips.into_iter().enumerate().map(|(n, chip)| {
+                    let target = chip.target.clone();
+                    let glyph = match &chip.target {
+                        ChipTarget::Session(_) => crate::icons::SESSIONS,
+                        ChipTarget::Pr { .. } => crate::icons::PULL_REQUEST,
+                    };
+                    let label = chip.label.clone();
+                    div()
+                        .id(SharedString::from(format!("{key}-chip-{n}")))
+                        .role(Role::Link)
+                        .aria_label(format!("Open {label}"))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(theme::sz(5.))
+                        .max_w_full()
+                        .h(theme::sz(24.))
+                        .px(theme::sz(8.))
+                        .rounded(theme::sz(7.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_size(theme::sz(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::text_soft())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
+                        .child(crate::icons::icon(glyph, theme::sz(12.), theme::sz(12.), theme::muted()))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_open(&target, window, cx)))
+                }))
+                .into_any_element(),
+        )
     }
 
     /// A chip's place: the session, or the session on the pull request, else the PR on the forge.
@@ -2073,6 +1995,83 @@ impl Workspace {
                 }
             }
         }
+    }
+}
+
+// ----- a made-up conversation, for screen checks ---------------------------------------------------
+
+impl Workspace {
+    /// Debug builds, a screen check (`GLASSCODE_DEBUG_TODAY=chat` or `thinking`): a made-up
+    /// conversation with the manager, kept in the conversation store of a scratch Glasscode
+    /// folder (never the person's own: `GLASSCODE_HOME` must name one) when that store is empty,
+    /// and a made-up answer to each message sent after it. `thinking`: an answer that is being
+    /// written, and stays so. No name, repository or number here is a real one.
+    pub(crate) fn chat_debug_sample(&mut self, thinking: bool, cx: &mut Context<Self>) {
+        if !cfg!(debug_assertions) || !self.state.manager.enabled || std::env::var("GLASSCODE_HOME").map_or(true, |home| home.is_empty()) {
+            return;
+        }
+        self.chat_start(cx);
+        self.mchat.debug_sample = true;
+        let name = self.state.manager.name.clone();
+        let you = |text: &str| Draft { author: Author::Person, kind: Kind::You { words: glasscode_core::words::record(glasscode_core::words::Origin::Pasted, text, None, None), reply_to: None }, text: text.to_string(), refs: Vec::new(), topic: None };
+        let says = |text: &str| Draft { author: Author::Chat, kind: Kind::Manager { state: Stream::Done }, text: text.to_string(), refs: Vec::new(), topic: None };
+        let did = |n: u8, text: &str| Draft { author: Author::Chat, kind: Kind::Action { effect: format!("{n:02x}").repeat(32), event: None }, text: text.to_string(), refs: Vec::new(), topic: None };
+        let drafts = vec![
+            you("What needs me today?"),
+            says("Three things, most pressing first:
+
+- **Port the settings page** (acme/app#48): two checks fail on the same test. The session is asked to fix it.
+- **Speed up the build cache** stopped on a question: keep the old cache key for one release, or drop it now?
+- Sam Example asked for your review of `acme/tools#31`.
+
+Nothing else waits. Two sessions are moving without you."),
+            did(1, &format!("{name} asked “Port the settings page” to fix the failing checks")),
+            did(2, &format!("{name} moved “Write the release notes” to Waiting on others")),
+            did(3, &format!("{name} kept a follow-up on acme/tools#31 for Sam Example")),
+            Draft { author: Author::Wake("sample".into()), kind: Kind::Nudge { matter: "sample:flaky-test".into() }, text: "The import test failed twice this week on Windows and passed on a second run both times. It may be flaky rather than broken.".into(), refs: Vec::new(), topic: None },
+            you("Keep the old cache key for one release. And start a session on the flaky import test."),
+            says("Done: I told the session to keep the old key for one release, and it went on.
+
+For the import test I would start in a new worktree of `acme/app`, with the two failed runs as its first message. Say “go” and I start it."),
+            Draft { author: Author::App, kind: Kind::Card { pending: "sample-decided".into() }, text: format!("{name} asked to send “The fix is pushed, please look again” to Sam Example."), refs: Vec::new(), topic: None },
+        ];
+        self.chat_write(Box::new(move |conversation| {
+            if !conversation.items().is_empty() {
+                return;
+            }
+            for draft in drafts {
+                if let Err(err) = conversation.post(draft) {
+                    log::warn!("the made-up conversation could not be kept: {err}");
+                }
+            }
+        }));
+        if thinking {
+            let agent = self.state.manager.brain;
+            let question = Asked { text: String::new(), words: None, composed: String::new() };
+            self.manager.thinking = true;
+            self.mchat.turn = Some(Turn { text: String::new(), activity: Some("Reading the checks of acme/app#48…".into()), caps: Caps::of(agent), stop: None, stopping: false, on_answer: None, voice: false, for_person: true, sent: std::time::Instant::now(), first_text_ms: None, agent, question });
+        }
+        cx.notify();
+    }
+
+    /// The made-up answer of a screen check: it thinks for a moment, then says so.
+    fn chat_debug_answer(&mut self, question: Asked, agent: AgentKind, caps: Caps, cx: &mut Context<Self>) {
+        let asked = short_line(&question.text);
+        self.manager.thinking = true;
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer: None, voice: false, for_person: true, sent: std::time::Instant::now(), first_text_ms: None, agent, question });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |ws, cx| {
+                let stopped = ws.mchat.turn.as_ref().is_some_and(|turn| turn.stopping);
+                let end = if stopped { TurnEnd::Stopped } else { TurnEnd::Answered(format!("This is a screen check, so no agent thinks here. You asked: “{asked}”.
+
+In the app I would answer from your sessions, reviews and follow-ups.")) };
+                ws.chat_done(Ok(Outcome { end, usage: Default::default(), health: None, checked: true, tools_called: Vec::new() }), None, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 

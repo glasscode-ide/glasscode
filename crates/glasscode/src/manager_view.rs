@@ -1,10 +1,12 @@
-//! The manager on screen: what its page, its bubble and its commands share (`ManagerUi`), and how
+//! The manager on screen: what its panel, its bubble and its commands share (`ManagerUi`), and how
 //! it shows itself to the person. It says things (a line in the conversation, the caption, its
 //! voice), points at places in the app, walks through them and plays pictures, and reads the pull
 //! requests of managed sessions in full for what it sees. Its thinking is the chat and wake
 //! lanes' (`manager_chat.rs`, `manager_lanes.rs`), its round `manager_round.rs`'s.
 //!
-//! SHARED FILE. `ManagerUi` is used by `manager_ui.rs` (the page and the bubble), the round, the
+//! It has no page of its own: Today is the one home (`manager_ui.rs` says where each part is).
+//!
+//! SHARED FILE. `ManagerUi` is used by `manager_ui.rs` (the panel and the bubble), the round, the
 //! chat, `manager_settings.rs` and the ops. Add fields at the end of the struct (with a value in
 //! `new`).
 
@@ -25,7 +27,7 @@ use crate::shell::View;
 use crate::workspace::{RightTab, Workspace};
 
 
-/// How the person talks to it on its page.
+/// How the person talks to it in its panel on Today.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -33,16 +35,14 @@ pub enum Mode {
     Chat,
 }
 
-/// What the right side of its page shows.
+/// What its panel on Today shows: the conversation, or one of the things it holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Stage {
     #[default]
-    Overview,
+    Chat,
     FollowUps,
     Messages,
     Memory,
-    /// A picture it is explaining (`ManagerUi::scene`).
-    Scene,
 }
 
 /// A walk through the app in progress.
@@ -71,7 +71,7 @@ pub struct ScenePlay {
 pub struct ManagerUi {
     pub mode: Mode,
     pub stage: Stage,
-    /// The box to type to it in (made the first time its page opens).
+    /// The box to type to it in, in its panel on Today (made the first time that opens).
     pub input: Option<Entity<crate::text_input::TextInput>>,
     /// It listens (voice).
     pub live: bool,
@@ -92,7 +92,7 @@ pub struct ManagerUi {
     pub test: Option<Vec<TestLine>>,
     /// Its voice: the helper in its LiveKit room (`manager_voice.rs`).
     pub voice: crate::manager_voice::VoiceState,
-    /// What its page and Settings › Manager keep between frames (`manager_ui.rs`).
+    /// What its panel and Settings › Manager keep between frames (`manager_ui.rs`).
     pub page: crate::manager_ui::PageUi,
     /// When the pull requests of managed sessions are read in full next, whether a read runs, and
     /// where the next starts (they take turns, a few at a time).
@@ -103,12 +103,14 @@ pub struct ManagerUi {
     pub shown: (bool, bool),
     /// A walk was started while it was still speaking: its first stop comes when that is over.
     pub tour_waits: bool,
+    /// The picture it explains shows on Today (the person can put it away and bring it back).
+    pub scene_open: bool,
 }
 
 impl ManagerUi {
     pub fn new() -> Self {
         ManagerUi {
-            // Without a voice helper (Windows) the page opens where typing works: Chat.
+            // Without a voice helper (Windows) the panel is where typing works: Chat.
             mode: if crate::glasscode_ui::VOICE { Mode::default() } else { Mode::Chat },
             stage: Stage::default(),
             input: None,
@@ -130,6 +132,7 @@ impl ManagerUi {
             prs_from: 0,
             shown: (false, false),
             tour_waits: false,
+            scene_open: false,
         }
     }
 }
@@ -150,7 +153,7 @@ const VOICE_WAIT: Duration = Duration::from_secs(20);
 impl Workspace {
     /// From the workspace tick (about every 700 ms), while the manager is on: a walk, a highlight
     /// and a picture move on, the caption ends, and the pull requests of managed sessions are read
-    /// in full now and then (their reviewers and threads, for the review feed and the page).
+    /// in full now and then (their reviewers and threads, for the review feed).
     pub fn manager_view_tick(&mut self, cx: &mut Context<Self>) {
         if !self.state.manager.enabled {
             return;
@@ -307,7 +310,7 @@ impl Workspace {
         }
     }
 
-    /// Show a picture on its page and say its first step.
+    /// Show a picture on Today and say its first step.
     pub(crate) fn manager_play(&mut self, scene: Scene, cx: &mut Context<Self>) {
         // A picture that cannot be drawn (a step names something that is not there) is not shown.
         if let Err(why) = scene::check(&scene) {
@@ -319,8 +322,10 @@ impl Workspace {
         let Some(first) = scene.steps.first().map(|s| s.say.clone()) else { return };
         let more = scene.steps.len() > 1;
         self.manager.scene = Some(ScenePlay { scene, step: 0, next_at: None });
-        self.manager.stage = Stage::Scene;
-        self.show_view(View::Manager, cx);
+        self.manager.scene_open = true;
+        // The picture is a card of Today's centre; its sentences are in the panel beside it.
+        self.manager.stage = Stage::Chat;
+        self.assistant_dock(cx);
         let spoken = self.mtick_say(&first, None, cx);
         if let Some(play) = self.manager.scene.as_mut() {
             play.next_at = more.then(|| Instant::now() + stop_time(&first, spoken));
@@ -340,8 +345,10 @@ impl Workspace {
             manager.tour_waits = false;
             manager.highlight = None;
             manager.scene = None;
-            if manager.stage == Stage::Scene {
-                manager.stage = Stage::Overview;
+            manager.scene_open = false;
+            // Memory is v2's own: its part of the panel stays with the manager off.
+            if manager.stage != Stage::Memory {
+                manager.stage = Stage::Chat;
             }
             manager.thinking = false;
             manager.caption.clear();
@@ -361,7 +368,8 @@ impl Workspace {
             return;
         }
         match show.view.as_deref().map(|v| v.trim().to_lowercase()).as_deref() {
-            Some("manager") => self.show_manager(window, cx),
+            // Its own place is its panel on Today; the keyboard stays where the person has it.
+            Some("manager") => self.assistant_dock(cx),
             Some("sessions" | "session") => self.show_view(View::Sessions, cx),
             Some("today" | "board") => self.show_today(cx),
             Some("tickets") => self.show_tickets(cx),
@@ -370,10 +378,10 @@ impl Workspace {
             Some("settings") => self.open_settings(self.settings.section, window, cx),
             _ => {}
         }
-        // On its own page a section is one of the things it holds, not a part of a panel.
+        // In its own panel a section is one of the things it holds, not a part of a session's.
         if show.session.is_none() && show.view.as_deref().is_some_and(|v| v.trim().eq_ignore_ascii_case("manager")) {
             if let Some(stage) = show.section.as_deref().and_then(stage_of) {
-                self.manager.stage = stage;
+                self.manager_set_stage(stage, cx);
             }
             self.manager.highlight = None;
             cx.notify();
@@ -558,10 +566,10 @@ fn section_key(word: &str) -> String {
     .to_string()
 }
 
-/// What the right side of its own page shows for a section named in a `Show`.
+/// What its panel on Today shows for a section named in a `Show`.
 fn stage_of(section: &str) -> Option<Stage> {
     match section.trim().to_lowercase().as_str() {
-        "overview" | "home" => Some(Stage::Overview),
+        "overview" | "home" | "chat" | "conversation" => Some(Stage::Chat),
         "followups" | "follow-ups" | "follow_ups" | "followup" | "follow-up" => Some(Stage::FollowUps),
         "messages" | "message" | "outbox" => Some(Stage::Messages),
         "memory" | "notes" => Some(Stage::Memory),
@@ -693,6 +701,7 @@ mod tests {
         assert_eq!(tab_of_section("files"), Some(PanelTab::Files));
         assert_eq!(tab_of_section("reply"), None);
         assert_eq!(stage_of("followups"), Some(Stage::FollowUps));
+        assert_eq!(stage_of("overview"), Some(Stage::Chat));
         assert_eq!(stage_of("Messages"), Some(Stage::Messages));
         assert_eq!(stage_of("memory"), Some(Stage::Memory));
         assert_eq!(stage_of("checks"), None);
