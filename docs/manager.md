@@ -93,11 +93,20 @@ it is made.
 - It cannot send anything of a project marked "stays on this Mac" to the server: not its memory,
   sessions, words, journal or cards.
 - It cannot run past its budget: at most six routine wakes an hour, a daily token cap, and
-  nothing on paid overage unless you allow it. With no budget left, or signed out, it answers
-  from what it knows and says why. When its plan's limit is used up, it holds your question and
-  answers when the limit resets, or you ask the other agent (Claude or Codex) instead.
+  nothing on paid overage unless you allow it. The daily cap starts at 1,500,000 tokens a UTC
+  day, the chat and its wakes together; raise it or turn it off in Settings › Manager › Daily
+  tokens, or with `glasscode manager budget 6m` (or `off`). Off, the hour's wakes and your plan's
+  own limits still hold, and learning still keeps to a fifth of the default. With no budget
+  left, or signed out, it answers from what it knows and says why. When its plan's limit is
+  used up, it holds your question and answers when the limit resets, or you ask the other agent
+  (Claude or Codex) instead.
 - It cannot start on a Claude Code older than 2.1.322 or a Codex older than 0.167.0. It says
   which version it needs.
+- It cannot think with a Codex model that brings tools Glasscode can't switch off. Which tools a
+  model brings is set by OpenAI's model catalog, not the Codex version: `gpt-5.6-luna` brings
+  sub-agent tools and the gpt-6 models a clock tool, so its first question would fail closed.
+  Codex thinks with `gpt-5.6-sol` unless you name another model in Settings › Manager, which
+  says when the one named can't be its brain.
 - It cannot do the same thing twice. Each effect (a message, a report, a push) is done once,
   under its key, also after a crash or a restart.
 - In its first round after you switch it on it says nothing about what was already there.

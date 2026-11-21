@@ -734,7 +734,7 @@ pub fn run(state: &mut LearningState, memory: &Memory, ledger: &mut Ledger, inpu
     let allowed = |ledger: &Ledger| {
         ledger.allow(Turn::Study, now).map_err(|b| b.sentence())?;
         let used = ledger.today(now).get("learning").copied().unwrap_or(0);
-        if used >= ledger.daily_cap / SHARE_OF_CAP {
+        if used >= ledger.background_cap() / SHARE_OF_CAP {
             return Err(format!("learning used its share of today's tokens ({used}); it goes on tomorrow (UTC)"));
         }
         Ok(())

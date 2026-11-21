@@ -171,6 +171,20 @@ pub(super) const OPS: &[OpSpec] = &[
         examples: &["manager voice-token [--identity <id>]"],
         ..OpSpec::READ
     },
+    // The manager's daily token cap (D6): the person's alone, as Settings › Manager has it.
+    OpSpec {
+        name: "manager.budget",
+        cli: &["manager", "budget"],
+        group: OpGroup::Settings,
+        effect: EffectClass::LocalWrite,
+        retry: Retry::Idempotent,
+        kind_v1: Kind::Settings,
+        human_only: true,
+        summary: "the manager's daily token cap and what today used; with a cap (3m, 500k) or off, change it",
+        args: &[ArgSpec { name: "cap", kind: ArgKind::Word, help: "tokens a day (3m, 1.5m, 500k, 2000000), default, or off", at: At::Rest(0), ..ArgSpec::OPTION }],
+        examples: &["manager budget [<tokens a day> | default | off]"],
+        ..OpSpec::READ
+    },
     // ----- follow-ups -------------------------------------------------------------------------
     OpSpec {
         name: "manager.follow_up.add",

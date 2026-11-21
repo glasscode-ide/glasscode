@@ -20,6 +20,65 @@ pub const KEEP_DAYS: usize = 30;
 pub const DAILY_TOKENS: u64 = 1_500_000;
 pub const WAKES_PER_HOUR: u32 = 6;
 
+/// A daily cap of "off": no token count of the day stops a turn (the hour's wakes and the
+/// vendor's windows still do).
+pub const NO_CAP: u64 = u64::MAX;
+
+/// The lowest daily cap a person can set: below it the manager could not answer a question.
+pub const MIN_CAP: u64 = 100_000;
+
+/// The daily caps Settings › Manager offers, and their words.
+pub const CAP_CHOICES: &[(u64, &str)] = &[(DAILY_TOKENS, "1.5M"), (3_000_000, "3M"), (6_000_000, "6M"), (10_000_000, "10M"), (NO_CAP, "Off")];
+
+/// A daily cap as typed (`manager budget`): "off", "default", or tokens a day, with `k` or `m`
+/// after it if wanted ("3m", "1.5M", "500k", "2000000").
+pub fn parse_cap(word: &str) -> Result<u64, String> {
+    let word = word.trim().to_lowercase().replace(['_', ','], "");
+    match word.as_str() {
+        "off" | "none" | "no" | "unlimited" => return Ok(NO_CAP),
+        "default" => return Ok(DAILY_TOKENS),
+        _ => {}
+    }
+    let (number, times) = match word.strip_suffix('m') {
+        Some(n) => (n, 1_000_000.0),
+        None => match word.strip_suffix('k') {
+            Some(n) => (n, 1_000.0),
+            None => (word.as_str(), 1.0),
+        },
+    };
+    let tokens = number.trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).map(|n| (n * times).round()).ok_or_else(|| format!("“{word}” is no daily cap: say a number of tokens (3m, 500k, 2000000) or off."))?;
+    if tokens < MIN_CAP as f64 {
+        return Err(format!("A daily cap under {} tokens would stop the manager answering: say more, or off.", thousands(MIN_CAP)));
+    }
+    if tokens >= NO_CAP as f64 { Ok(NO_CAP) } else { Ok(tokens as u64) }
+}
+
+/// A daily cap in words: "off", or "1,500,000 tokens a day".
+pub fn cap_words(cap: u64) -> String {
+    if cap == NO_CAP { "off".to_string() } else { format!("{} tokens a day", thousands(cap)) }
+}
+
+/// 1500000 as "1,500,000".
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Keep a new daily cap in the ledger, its counts as they are; the ledger as it is then.
+pub fn set_daily_cap(cap: u64) -> Result<Ledger, crate::store::StoreError> {
+    crate::store::update::<Ledger, _>(|ledger| {
+        ledger.daily_cap = cap;
+        ledger.clone()
+    })
+}
+
 /// A vendor reading older than this is none.
 pub const FRESH: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
@@ -82,7 +141,7 @@ pub enum Blocked {
 impl Blocked {
     pub fn sentence(&self) -> String {
         match self {
-            Blocked::DailyCap { cap, used } => format!("The manager used {used} of its {cap} tokens for today; it thinks again tomorrow (UTC), or when you raise the cap."),
+            Blocked::DailyCap { cap, used } => format!("The manager used {} of its {} tokens for today; it thinks again tomorrow (UTC), or when you raise its daily cap in Settings › Manager (or `glasscode manager budget off`).", thousands(*used), thousands(*cap)),
             Blocked::WakesPerHour { cap } => format!("The manager woke {cap} times this hour; the next wake waits for the hour to pass."),
             Blocked::Vendor { window, until: Some(at) } => format!("The plan's {window} window is used up until {}; background work waits.", crate::day::clock(*at)),
             Blocked::Vendor { window, until: None } => format!("The plan's {window} window is used up; background work waits."),
@@ -219,6 +278,13 @@ impl Ledger {
         self.days.get(&day_of(now_ms)).cloned().unwrap_or_default()
     }
 
+    /// The cap a background share of the day is taken from: the daily cap, but never more than
+    /// the default when the person raised it or turned it off, so that lifting the cap for the
+    /// chat does not let learning run all day on the person's plan.
+    pub fn background_cap(&self) -> u64 {
+        self.daily_cap.min(DAILY_TOKENS)
+    }
+
     /// What today's cap leaves (moving in's estimate, M35).
     pub fn left_today(&self, now_ms: u64) -> u64 {
         self.daily_cap.saturating_sub(self.today(now_ms).values().sum())
@@ -229,7 +295,7 @@ impl Ledger {
     /// used up unless the person allowed it).
     pub fn allow(&self, turn: Turn, now_ms: u64) -> Result<(), Blocked> {
         let used: u64 = self.today(now_ms).values().sum();
-        if used >= self.daily_cap {
+        if self.daily_cap != NO_CAP && used >= self.daily_cap {
             return Err(Blocked::DailyCap { cap: self.daily_cap, used });
         }
         if turn == Turn::Chat {
@@ -273,6 +339,38 @@ mod tests {
         // An answer from code never asks the ledger; tomorrow (UTC) counts from nothing.
         assert_eq!(ledger.allow(Turn::Wake, NOON + 86_400_000), Ok(()));
         assert_eq!(ledger.today(NOON)["chat"], 19_500);
+    }
+
+    /// The person can raise the daily cap or turn it off (`manager budget`, Settings › Manager);
+    /// off, no count of the day stops a turn, but the hour's wakes and the vendor's windows do.
+    #[test]
+    fn a_daily_cap_turned_off_stops_no_turn_but_the_other_walls_hold() {
+        let mut ledger = Ledger { daily_cap: parse_cap("off").unwrap(), wakes_per_hour: 1, ..Ledger::default() };
+        ledger.record(Lane::Chat, Usage { input: 50_000_000, ..Usage::default() }, NOON);
+        assert_eq!(ledger.allow(Turn::Chat, NOON), Ok(()));
+        ledger.record_window_at(&json!({ "rate_limit_info": { "status": "allowed", "rateLimitType": "seven_day" } }), NOON);
+        ledger.record_wake(NOON);
+        assert_eq!(ledger.allow(Turn::Wake, NOON + 1), Err(Blocked::WakesPerHour { cap: 1 }));
+        ledger.wakes.clear();
+        ledger.record_window_at(&json!({ "rate_limit_info": { "status": "rejected", "rateLimitType": "seven_day" } }), NOON);
+        assert!(matches!(ledger.allow(Turn::Wake, NOON + 1), Err(Blocked::Vendor { .. })));
+        assert_eq!(ledger.background_cap(), DAILY_TOKENS, "learning's share stays the default's");
+        assert_eq!(cap_words(ledger.daily_cap), "off");
+    }
+
+    #[test]
+    fn a_daily_cap_is_read_as_typed() {
+        assert_eq!(parse_cap("3m"), Ok(3_000_000));
+        assert_eq!(parse_cap("1.5M"), Ok(1_500_000));
+        assert_eq!(parse_cap("500k"), Ok(500_000));
+        assert_eq!(parse_cap("2,000,000"), Ok(2_000_000));
+        assert_eq!(parse_cap(" Off "), Ok(NO_CAP));
+        assert_eq!(parse_cap("default"), Ok(DAILY_TOKENS));
+        assert!(parse_cap("10k").unwrap_err().contains("100,000"));
+        assert!(parse_cap("lots").is_err() && parse_cap("-3m").is_err() && parse_cap("0").is_err());
+        assert_eq!(cap_words(1_500_000), "1,500,000 tokens a day");
+        assert!(Blocked::DailyCap { cap: 1_500_000, used: 1_502_870 }.sentence().contains("Settings › Manager"));
+        assert!(CAP_CHOICES.iter().all(|(cap, _)| *cap == NO_CAP || *cap >= MIN_CAP));
     }
 
     #[test]

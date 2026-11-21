@@ -495,7 +495,8 @@ impl Workspace {
     fn move_in_estimate(&mut self, projects: Vec<ProjectIn>, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             let estimates: Vec<(glasscode_core::paths::ProjectKey, movein::Estimate)> = projects.iter().map(|p| (p.key.clone(), movein::estimate(p))).collect();
-            let left = glasscode_core::runtime::budget::Ledger::load().ok().map(|l| l.left_today(glasscode_core::clock::now_ms()));
+            // With the daily cap off, no budget is said beside it.
+            let left = glasscode_core::runtime::budget::Ledger::load().ok().filter(|l| l.daily_cap != glasscode_core::runtime::budget::NO_CAP).map(|l| l.left_today(glasscode_core::clock::now_ms()));
             let line = movein::estimate_line(&estimates, left);
             (estimates, line)
         });

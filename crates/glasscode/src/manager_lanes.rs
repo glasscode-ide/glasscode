@@ -45,9 +45,9 @@ impl Lanes {
 
 /// The model of a lane's brain when the manager's settings name none (brain-5: always one, never
 /// the person's own default).
-fn default_model(agent: AgentKind) -> &'static str {
+pub(crate) fn default_model(agent: AgentKind) -> &'static str {
     match agent {
-        AgentKind::Codex => "gpt-5.6-luna",
+        AgentKind::Codex => glasscode_core::runtime::codex::DEFAULT_MODEL,
         _ => "sonnet",
     }
 }

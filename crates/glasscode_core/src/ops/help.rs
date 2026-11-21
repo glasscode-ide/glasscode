@@ -251,6 +251,7 @@ pub(super) const SECTIONS: &[Section] = &[
             Line::Op { op: "manager.scene", example: 0, col: 34 },
             Line::Bare { op: "manager.check.add", example: 0 },
             Line::Op { op: "manager.voice_token", example: 0, col: 42 },
+            Line::Bare { op: "manager.budget", example: 0 },
         ],
     },
     Section {

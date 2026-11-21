@@ -528,6 +528,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Glasses", "the paired phones and glasses", "door_devices", "device.list"),
     local("Title bar", "glasses icon: open Settings › Glasses", "render_glasses_icon"),
     op("Glasses", "show a place on the lens", "door_open", "device.open"),
+    op("Manager", "Daily tokens: the manager's daily cap, or off", "manager_budget_set", "manager.budget"),
+    op("Command", "glasscode manager budget", "control_handle_as", "manager.budget"),
     // ----- what the manager reads and shows (the v2 engine's ops, M33.2)
     op("Session view", "the side panel's tab", "ui_seen", "ui.state"),
     op("Manager", "point at a session or a screen", "manager_show", "ui.point"),
