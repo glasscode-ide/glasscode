@@ -3,7 +3,10 @@
 //!
 //! - `Ui`: the app's own window, in-process only. Nothing that arrives on the control socket, in a
 //!   request file or from the server is `Ui`: [`by_channel`] cannot return it.
-//! - `Session`: a session Glasscode started, proven by the signature the app gave it.
+//! - `Session`: a session Glasscode started, proven by the signature the app gave it, or by the
+//!   channel whatever the request says ([`by_channel_proven`]): a request file found in its
+//!   worktree, a socket peer that runs under its program ([`sessions_over`]). Leaving the
+//!   signature out does not make a session's command a terminal's.
 //! - `ShellTab`: the person, typing a `glasscode` command in a Glasscode shell tab. The app's own
 //!   terminal view saw the Enter key on that line ([`note_typed_command`]); the request's words do
 //!   not count. This is attribution, not a wall: a program the person started in that tab within
@@ -15,7 +18,8 @@
 //!   assigns both per connection (M13.2); the app never derives them.
 //! - `Terminal`: everything else, the person at a terminal outside Glasscode included, as any
 //!   program can say it is that terminal. It may read; anything else waits on a card in the app
-//!   (owner decision O13).
+//!   (owner decision O13). A socket peer whose programs cannot be read is not one: the app refuses
+//!   it unless its signature or token says who it is.
 //!
 //! The request's `interactive` flag ([`crate::control::Request`]) is still sent, for older apps; no
 //! caller is decided by it here.
@@ -159,6 +163,14 @@ pub fn by_channel_proven(request: &Request, channel: &Channel, signed: impl Fn(&
         Channel::Socket { pid } => Caller::Terminal { pid: *pid },
         _ => Caller::Terminal { pid: None },
     }
+}
+
+/// The sessions a socket's peer runs under: those whose program (`session_pids`, each session's
+/// terminal process) is in the peer's `lineage` (the peer and the programs above it,
+/// `sys::lineage`). Such a peer is that session's ([`by_channel_proven`]), signed or not; one under
+/// none of them may be a program outside Glasscode.
+pub fn sessions_over(lineage: &[u32], session_pids: &[(String, u32)]) -> Vec<String> {
+    session_pids.iter().filter(|(_, pid)| lineage.contains(pid)).map(|(id, _)| id.clone()).collect()
 }
 
 // ----- what each caller may do by Settings › Permissions -----------------------------------------
@@ -359,6 +371,24 @@ mod tests {
             _ => None,
         };
         by_channel(request, channel, signed, |id| typed && id == "s-shell")
+    }
+
+    /// A socket's peer under a session's program is that session's: the command an agent runs
+    /// (agent, then a shell, then `glasscode`), with its signature left out, is never a program
+    /// outside Glasscode; a terminal outside every session is.
+    #[test]
+    fn a_peer_under_a_sessions_program_is_that_session() {
+        let pids = [("s-agent".to_string(), 500), ("s-shell".to_string(), 600)];
+        // glasscode (900) ← sh (800) ← the agent (500) ← the app (100) ← launchd (1).
+        let under_agent = sessions_over(&[900, 800, 500, 100, 1], &pids);
+        assert_eq!(under_agent, ["s-agent"]);
+        let unsigned = request(None, false);
+        let caller = by_channel_proven(&unsigned, &Channel::Socket { pid: Some(900) }, |_, _| None, |_| false, &under_agent);
+        assert_eq!(caller, Caller::Session { id: "s-agent".into(), project: None });
+        // A terminal of the person's, outside every session.
+        let outside = sessions_over(&[910, 810, 300, 1], &pids);
+        assert!(outside.is_empty());
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(910) }, |_, _| None, |_| false, &outside), Caller::Terminal { pid: Some(910) });
     }
 
     /// (a): a request file the app found in a session's worktree is that session's, signed or not,
