@@ -447,6 +447,7 @@ mod tests {
         "manager.message.reject",
         "manager.check.add",
         "manager.check.remove",
+        "manager.budget",
     ];
 
     #[test]
@@ -600,6 +601,7 @@ mod tests {
         manager.show Navigate Navigate Idempotent Window show - -
         manager.scene Navigate Navigate Idempotent Window show - -
         manager.voice_token Read Read Idempotent Window read - -
+        manager.budget Settings LocalWrite Idempotent Core settings - person
         manager.follow_up.add Manager LocalWrite AtMostOnce Core board manager.follow_up.drop -
         manager.follow_up.done Manager LocalWrite Idempotent Core board - -
         manager.follow_up.drop Manager LocalWrite Idempotent Core board - -

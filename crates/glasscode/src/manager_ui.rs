@@ -28,6 +28,9 @@ pub struct PageUi {
     pub chat_scroll: gpui::ScrollHandle,
     /// The text fields of Settings › Manager, made the first time that section is drawn.
     pub form: std::cell::OnceCell<crate::manager_settings::ManagerForm>,
+    /// The manager's daily token cap and what today used, read when Settings › Manager opens and
+    /// after the cap changes (never while drawing).
+    pub budget: Option<(u64, u64)>,
 }
 
 /// Things to say to it, one click each.
