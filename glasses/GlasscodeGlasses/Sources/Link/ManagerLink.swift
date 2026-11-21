@@ -250,6 +250,24 @@ final class ManagerLink: ObservableObject {
         _ = try? await homeCarrier?.call("manager.stop", [:], timeout: 5)
     }
 
+    /// A pass to the manager's voice room: from the end the manager is home at (the Mac's voice,
+    /// Settings › Manager › Voice › On this Mac; or the server's), else the other. Throws with
+    /// their own words when neither has one (the voice is off, not running, not set up).
+    func voicePass() async throws -> VoicePass {
+        guard let first = homeCarrier else { throw LinkError(text: "Not connected to your Mac or your server.") }
+        var why = "No voice pass."
+        for carrier in [first, other(than: first)].compactMap({ $0 }) {
+            do {
+                let reply = try await carrier.call("manager.voice", [:], timeout: 10)
+                if let json = reply as? JSON, let pass = VoicePass(json) { return pass }
+                why = "\(carrier.name) gave no voice pass."
+            } catch {
+                why = (error as? LinkError)?.text ?? error.localizedDescription
+            }
+        }
+        throw LinkError(text: why)
+    }
+
     func conversation(limit: Int = 30) async -> [JSON] {
         guard let carrier = homeCarrier, let json = try? await carrier.call("manager.conversation", ["limit": limit], timeout: 10) as? JSON else { return [] }
         return json.array("items")

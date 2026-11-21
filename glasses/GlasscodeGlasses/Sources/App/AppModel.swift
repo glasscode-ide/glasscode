@@ -7,6 +7,11 @@ import SwiftUI
 /// A turn: a pinch → listening (the words on the lens as they are heard) → a pause → the question
 /// goes to the manager's home with what the lens shows → the answer streams back, spoken sentence
 /// by sentence and shown on the lens → places the manager shows (`device.open`) open there.
+///
+/// With the voice on the Mac (Settings › Manager › Voice › On this Mac) a pinch joins its voice
+/// room instead (`RoomVoice`): the talk stays open, a fast talker answers at once and asks this
+/// phone to run its tools (ask the manager, list sessions, show a place on the lens), and the
+/// manager's answer is spoken there too. Without it, the phone listens and speaks itself.
 @MainActor
 final class AppModel: ObservableObject {
     let link = ManagerLink()
@@ -19,6 +24,16 @@ final class AppModel: ObservableObject {
     }()
     private let listener = Listener()
     private let voice = Voice()
+    private let room = RoomVoice()
+    /// The answer being asked for now, its id in the room, and since when (for "how is it going").
+    private var askID = ""
+    private var asking = false
+    private var askedAt = Date()
+    private var askActivity = ""
+    /// The room's sentences go out one after another.
+    private var sayChain: Task<Void, Never>?
+    /// When joining the room last failed: the phone's own speech for a minute.
+    private var roomFailedAt: Date?
 
     @Published private(set) var lens = LensModel()
     @Published private(set) var turn = TurnTaking()
@@ -41,6 +56,15 @@ final class AppModel: ObservableObject {
         listener.onWords = { [weak self] words in self?.heard(words) }
         listener.onError = { [weak self] why in self?.problem = why }
         voice.onFinished = { [weak self] in self?.voiceDone() }
+        room.onHeard = { [weak self] text, handled in self?.roomHeard(text, handled: handled) }
+        room.onSaid = { [weak self] text in self?.roomSaid(text) }
+        room.onState = { [weak self] _ in
+            self?.reportPresence()
+            self?.redraw()
+        }
+        room.onTool = { [weak self] name, arguments in await self?.roomTool(name, arguments) ?? "This phone is busy." }
+        room.onEnded = { [weak self] why in self?.roomEnded(why) }
+        room.onTrouble = { [weak self] why in self?.problem = "The voice on your Mac: \(why)" }
         link.onEvent = { [weak self] name, data in self?.event(name, data) }
         clock = Task { [weak self] in
             var beat = 0
@@ -83,7 +107,7 @@ final class AppModel: ObservableObject {
         case .capture: return
         }
         var model = lens
-        let effect = model.handle(gesture, speaking: voice.isSpeaking)
+        let effect = model.handle(gesture, speaking: voice.isSpeaking || room.speaking)
         lens = model
         perform(effect)
         redraw()
@@ -93,11 +117,21 @@ final class AppModel: ObservableObject {
         switch effect {
         case .none, .back: break
         case .talk: talk()
-        case .sendNow: send(force: true)
+        case .sendNow:
+            // In the room the worker hears when a sentence ends: a pinch asks for quiet.
+            if room.live { Task { await room.stop() } } else { send(force: true) }
         case .cancelListening:
-            listener.stop()
-            turn.cancel()
+            if room.live {
+                Task { await room.hangUp() }
+            } else {
+                listener.stop()
+                turn.cancel()
+            }
         case .stopSpeaking:
+            if room.live {
+                Task { await room.stop() }
+                return
+            }
             voice.stop()
             turn.done()
             Task { await link.stop() }
@@ -117,8 +151,17 @@ final class AppModel: ObservableObject {
             showMessage("Not connected", problemText)
             return
         }
+        if room.live {
+            // The talk is open: it listens already.
+            var model = lens
+            model.show(.listening(""))
+            lens = model
+            redraw()
+            return
+        }
         voice.stop()
         Task {
+            if await joinRoom() { return }
             guard await Listener.permission() else {
                 showMessage("The microphone is off", "Allow the microphone and speech recognition for Glasscode in Settings.")
                 return
@@ -161,13 +204,141 @@ final class AppModel: ObservableObject {
         if let asked = turn.tick(now: Date()) { ask(asked) }
     }
 
+    // MARK: - the voice room on the Mac
+
+    /// Join the Mac's voice room. False: there is none (or it failed), so the phone speaks itself.
+    private func joinRoom() async -> Bool {
+        if let at = roomFailedAt, Date().timeIntervalSince(at) < 60 { return false }
+        do {
+            let pass = try await link.voicePass()
+            try await room.start(pass, name: link.home?.name ?? lens.glance.name)
+            roomFailedAt = nil
+            problem = nil
+            var model = lens
+            model.show(.listening(""))
+            lens = model
+            reportPresence()
+            redraw()
+            return true
+        } catch is CancellationError {
+            return true
+        } catch {
+            roomFailedAt = Date()
+            let why = (error as? LinkError)?.text ?? error.localizedDescription
+            problem = "No voice room (\(why)); the phone listens and speaks itself."
+            return false
+        }
+    }
+
+    /// The room heard the person: on the lens; asked here when the worker has no talker.
+    private func roomHeard(_ text: String, handled: Bool) {
+        var model = lens
+        model.show(.working(["“\(LensCards.clip(text, 60))”"]))
+        lens = model
+        redraw()
+        if !handled { ask(text) }
+    }
+
+    /// What the talker said, on the lens (an answer being written has the lens).
+    private func roomSaid(_ text: String) {
+        guard writing.isEmpty else { return }
+        var model = lens
+        switch model.card {
+        case .working, .listening: model.show(.answer(text, []))
+        default: break
+        }
+        lens = model
+        redraw()
+    }
+
+    private func roomEnded(_ why: String) {
+        var model = lens
+        model.show(.note(title: "The talk ended", body: why, tone: .plain, open: nil))
+        lens = model
+        reportPresence()
+        redraw()
+    }
+
+    /// One of the talker's tools, run on this phone; what it found, in words for the talker.
+    private func roomTool(_ name: String, _ arguments: JSON) async -> String {
+        switch name {
+        case "ask_manager":
+            let request = (arguments.string("request") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !request.isEmpty else { return "There was nothing to ask." }
+            if asking { return "The manager is still on the last request; ask again in a moment." }
+            ask(request)
+            return "started"
+        case "manager_progress":
+            guard asking else { return "The manager is not working on anything now." }
+            let doing = askActivity.isEmpty ? "" : ", now: \(askActivity)"
+            return "The manager has been working on it for \(Int(Date().timeIntervalSince(askedAt))) seconds\(doing)."
+        case "stop_manager":
+            guard asking else { return "Nothing was running." }
+            await link.stop()
+            return "Stopped."
+        case "list_sessions":
+            await refresh()
+            let needs = arguments.bool("needs_you") == true
+            let lines: [String] = sessions.compactMap { entry in
+                guard let id = entry.object("session")?.string("id"), let card = sessionCard(id) else { return nil }
+                if needs, card.question == nil { return nil }
+                let pr = card.pr.map { ", pull request #\($0)" } ?? ""
+                let asks = card.question.map { ", it asks: \(LensCards.clip($0, 80))" } ?? ""
+                return "id \(id): \"\(card.title)\", \(card.state.lowercased())\(pr)\(asks)"
+            }
+            if lines.isEmpty { return needs ? "No session waits for the person." : "No sessions." }
+            return lines.prefix(15).joined(separator: "\n")
+        case "open_place":
+            let id = (arguments.string("id") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch arguments.string("kind") ?? "" {
+            case "session":
+                guard sessionCard(id) != nil else { return "There is no session with the id \(id)." }
+                await open(.session(id))
+            case "pr":
+                guard let number = Int(id.trimmingCharacters(in: CharacterSet(charactersIn: "#"))) else { return "That is not a pull request's number." }
+                await open(.pr(number, session: sessionForPR(number)))
+            default:
+                await open(.today)
+            }
+            return "Shown on the lens."
+        default:
+            return "This phone does not know the tool \(name)."
+        }
+    }
+
+    /// Speak a sentence of the answer in the room, after the ones before it.
+    private func roomSay(_ sentence: String) {
+        let before = sayChain
+        let id = askID
+        sayChain = Task { [room] in
+            await before?.value
+            await room.say(id: id, text: sentence)
+        }
+    }
+
+    /// The word the lens and the Mac's title bar show for the voice.
+    private var voiceWord: String {
+        guard room.live else { return turn.word }
+        switch room.state {
+        case .speaking: return "speaking"
+        case .thinking: return "thinking"
+        case .listening: return "listening"
+        default: return asking ? "thinking" : "listening"
+        }
+    }
+
     /// Ask the manager: the answer streams to the lens and the voice.
     func ask(_ question: String) {
         if !turn.isListening, case .idle = turn.state { turn.talk(now: Date()); turn.heard(question, now: .distantPast); _ = turn.tick(now: Date()) }
         BackgroundKeepAlive.shared.yield()
-        AudioRoute.configureForTalk()
+        // In the room the audio is the room's already.
+        if !room.live { AudioRoute.configureForTalk() }
         sentences = Sentences()
         writing = ""
+        askID = "ask-" + UUID().uuidString.prefix(8).lowercased()
+        asking = true
+        askedAt = Date()
+        askActivity = ""
         var model = lens
         model.show(.working(["“\(LensCards.clip(question, 60))”"]))
         lens = model
@@ -177,10 +348,14 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 let said = try await link.ask(question, focus: focus) { [weak self] update in self?.answerUpdate(update) }
+                asking = false
                 finishAnswer(said)
             } catch {
+                asking = false
                 turn.done()
                 showMessage("No answer", error.localizedDescription)
+                // In the room the person hears why, too.
+                if room.live { roomSay("I could not get an answer: \(error.localizedDescription)") }
                 BackgroundKeepAlive.shared.resume()
             }
             await refresh()
@@ -189,6 +364,7 @@ final class AppModel: ObservableObject {
 
     private func answerUpdate(_ update: AnswerUpdate) {
         if let line = update.activity {
+            askActivity = line
             if case .working(let lines) = lens.card {
                 var model = lens
                 model.replaceTop(.working(lines + [line]))
@@ -226,6 +402,10 @@ final class AppModel: ObservableObject {
     }
 
     private func speak(_ sentence: String) {
+        if room.live {
+            roomSay(sentence)
+            return
+        }
         turn.speaking()
         voice.say(sentence)
     }
@@ -466,7 +646,7 @@ final class AppModel: ObservableObject {
     /// What the glasses do, for the Mac's title bar.
     private func reportPresence() {
         guard started else { return }
-        let presence: JSON = ["glasses": glasses.isConnected, "worn": glasses.isConnected, "lens": glasses.isConnected && glasses.displayOn, "voice": turn.word, "via": link.home?.place.rawValue ?? "mac"]
+        let presence: JSON = ["glasses": glasses.isConnected, "worn": glasses.isConnected, "lens": glasses.isConnected && glasses.displayOn, "voice": voiceWord, "via": link.home?.place.rawValue ?? "mac"]
         let text = "\(presence)"
         guard text != presenceSent else { return }
         presenceSent = text
@@ -497,7 +677,7 @@ final class AppModel: ObservableObject {
             model.glance.line = problemText
             lens = model
         }
-        glasses.show(LensCards.render(lens, voice: turn.word))
+        glasses.show(LensCards.render(lens, voice: voiceWord))
     }
 }
 

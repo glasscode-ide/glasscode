@@ -16,6 +16,7 @@
 		29D8E159CD71C3E3E595B888 /* Speech.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5EC28D51A2ACC2F8932B17A /* Speech.swift */; };
 		3F3972850CE5CEBC5C3C349C /* NIOPosix in Frameworks */ = {isa = PBXBuildFile; productRef = 60246DC929B3A5EB019BAE01 /* NIOPosix */; };
 		4806BE4B89EBDD964E34C16B /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 686F4461A06684C7053DEB12 /* MWDATCore */; };
+		5A87D38A215E717F05792A6A /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = 250A4FCD72AE8130CCE7CF68 /* LiveKit */; };
 		62741EB71EB710741E464A97 /* TurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD9442087CCEA0C71750141 /* TurnTests.swift */; };
 		65543B1CA24697B1BEED009B /* GlasscodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */; };
 		670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */; };
@@ -26,6 +27,7 @@
 		86F79AD2A35D6F0A85248B7F /* DoorLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72F4967BB97526E80AE314EE /* DoorLink.swift */; };
 		871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8E297534B0D5F4CD6197260 /* StayOnTests.swift */; };
 		8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */; };
+		8CCEBEBE35B01848A1A9BBBC /* RoomVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD4A6500D66EF013AB04EB26 /* RoomVoice.swift */; };
 		987E11777E792E9B7ACFBB7C /* AudioRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED117763B964885A22E2551 /* AudioRoute.swift */; };
 		A6F3C44B884741DD0B4DB3BE /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = A0212625ACFF868D3C7AAE92 /* NIOSSH */; };
 		ABDB11272AC8319D9E5D0E72 /* NIOCore in Frameworks */ = {isa = PBXBuildFile; productRef = 981EC6FB3EFCDEF4EFACD079 /* NIOCore */; };
@@ -70,6 +72,7 @@
 		CA7030BE5C5E270404A9245D /* GlassesSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesSession.swift; sourceTree = "<group>"; };
 		D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
 		D5EC28D51A2ACC2F8932B17A /* Speech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Speech.swift; sourceTree = "<group>"; };
+		DD4A6500D66EF013AB04EB26 /* RoomVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomVoice.swift; sourceTree = "<group>"; };
 		E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GlasscodeGlasses.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -84,6 +87,7 @@
 				ABDB11272AC8319D9E5D0E72 /* NIOCore in Frameworks */,
 				3F3972850CE5CEBC5C3C349C /* NIOPosix in Frameworks */,
 				A6F3C44B884741DD0B4DB3BE /* NIOSSH in Frameworks */,
+				5A87D38A215E717F05792A6A /* LiveKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -136,6 +140,7 @@
 		7FAD7EE0520E355CBF18A6B5 /* Speech */ = {
 			isa = PBXGroup;
 			children = (
+				DD4A6500D66EF013AB04EB26 /* RoomVoice.swift */,
 				D5EC28D51A2ACC2F8932B17A /* Speech.swift */,
 			);
 			path = Speech;
@@ -214,6 +219,7 @@
 				981EC6FB3EFCDEF4EFACD079 /* NIOCore */,
 				60246DC929B3A5EB019BAE01 /* NIOPosix */,
 				A0212625ACFF868D3C7AAE92 /* NIOSSH */,
+				250A4FCD72AE8130CCE7CF68 /* LiveKit */,
 			);
 			productName = GlasscodeGlasses;
 			productReference = E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */;
@@ -265,6 +271,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
+				748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 				D0BC3F45CBC0AEF2199CE370 /* XCRemoteSwiftPackageReference "swift-nio" */,
 				33AC06866F6F85BB643775FD /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
 			);
@@ -309,6 +316,7 @@
 				8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */,
 				0A03A98B7E211163DAA55251 /* Pairing.swift in Sources */,
 				E0660AAE4BCA62FED8255F89 /* PhoneViews.swift in Sources */,
+				8CCEBEBE35B01848A1A9BBBC /* RoomVoice.swift in Sources */,
 				71400D9DCCC379C128B7F753 /* ServerLink.swift in Sources */,
 				29D8E159CD71C3E3E595B888 /* Speech.swift in Sources */,
 			);
@@ -567,6 +575,14 @@
 				minimumVersion = 0.8.0;
 			};
 		};
+		748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.19.0;
+			};
+		};
 		9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
@@ -586,6 +602,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		250A4FCD72AE8130CCE7CF68 /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 748A294F35C6A5FDC49EBAEA /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
+		};
 		2DB5A82AC5377366F47AF18C /* MWDATDisplay */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9527DB61DF02917E26F8763D /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;

@@ -1,4 +1,5 @@
 import AVFoundation
+import LiveKit
 
 /// Where voice goes in and out, decided in one place for everything that opens the microphone.
 ///
@@ -28,6 +29,31 @@ enum AudioRoute {
         // The phone's microphone, the glasses' speakers (A2DP): no hands-free call, which would
         // end the lens's session. No voice processing either: iOS turns the session into a call
         // for it.
+        try? session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP, .defaultToSpeaker])
+        try? session.setActive(true, options: [])
+        keepPhoneMic()
+        watchRoute()
+    }
+
+    /// A talk in the manager's voice room (`RoomVoice`): LiveKit plays and records, on this route.
+    static func configureForRoom() {
+        BackgroundKeepAlive.shared.yield()
+        let session = AVAudioSession.sharedInstance()
+        if micOnGlasses {
+            // The glasses are both microphone and speaker: LiveKit sets the call up itself, with
+            // Apple's echo cancelling.
+            AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = true
+            try? AudioManager.shared.setPlatformVoiceProcessingAllowed(true)
+            try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            try? session.setActive(true, options: [])
+            return
+        }
+        // The phone's microphone, the glasses' speakers. Two things would bring the hands-free
+        // link back by themselves, so both are switched off: LiveKit's own setup (it allows
+        // hands-free) and Apple's voice processing (iOS turns the session into a call for it).
+        // The worker drops the manager's own voice when the microphone hears it.
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = false
+        try? AudioManager.shared.setPlatformVoiceProcessingAllowed(false)
         try? session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP, .defaultToSpeaker])
         try? session.setActive(true, options: [])
         keepPhoneMic()

@@ -17,6 +17,10 @@ packages:
   NIOSSH:
     url: https://github.com/apple/swift-nio-ssh.git
     from: "0.8.0"
+  # The manager's voice room on the Mac (RoomVoice.swift): the version the Mac's helper uses.
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    from: "2.19.0"
 
 targets:
   GlasscodeGlasses:
@@ -37,6 +41,8 @@ targets:
         product: NIOPosix
       - package: NIOSSH
         product: NIOSSH
+      - package: LiveKit
+        product: LiveKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glasscode.glasses
@@ -65,6 +71,11 @@ targets:
         NSCameraUsageDescription: "Glasscode scans the pairing code your Mac shows."
         NSBluetoothAlwaysUsageDescription: "Needed to connect to your Meta glasses."
         NSLocalNetworkUsageDescription: "Lets Glasscode reach your Mac and your server over Tailscale."
+        # The voice room on the Mac is reached at its tailnet address (ws://100.x.y.z:7890).
+        # Tailscale carries it encrypted, and LiveKit encrypts the audio itself (DTLS-SRTP).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         NSBonjourServices:
           - _bonjour._tcp
         UIBackgroundModes:
