@@ -527,6 +527,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "add a check", "render_manager", "manager.check.add"),
     op("Manager", "stop a check", "render_manager", "manager.check.remove"),
     op("Manager", "a token for a device's voice", "manager_voice_keys_check", "manager.voice_token"),
+    op("Glasses", "the paired phones and glasses", "door_devices", "device.list"),
+    op("Glasses", "show a place on the lens", "door_open", "device.open"),
     // ----- what the manager reads and shows (the v2 engine's ops, M33.2)
     op("Session view", "the side panel's tab", "ui_seen", "ui.state"),
     op("Manager", "point at a session or a screen", "manager_show", "ui.point"),

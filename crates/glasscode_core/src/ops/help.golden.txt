@@ -196,6 +196,8 @@ More
   browser read --url <url> [--signed-in] may this session read a page in its tab of the Glasscode Browser
   browser act --url <url> [--signed-in] may this session click, type or press keys in a page of its tab
   browser eval --url <url> [--signed-in] may this session run script in a page of its tab
+  device list                           the person's paired phones and glasses, and which are connected now
+  device open <session|pr:<number>|project:<name>|today|conversation> show a place on the person's glasses: a session, a pull request, a project, today or the conversation
 
 Every command takes --json. <session> is an id, its start, or words from its title ("this" is
 the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a

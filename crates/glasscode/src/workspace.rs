@@ -207,6 +207,8 @@ pub struct Workspace {
     /// A sidebar edge being dragged: which, where the mouse started, its width then.
     pub(crate) resizing: Option<(Side, f32, f32)>,
     pub pairing: Option<crate::pair_ui::Pairing>,
+    /// The device door: the glasses app on the person's iPhone, over the tailnet (G04).
+    pub door: crate::device_door::DoorUi,
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
@@ -313,6 +315,7 @@ impl Workspace {
             cli_status: Vec::new(),
             cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
+            door: Default::default(),
             manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
@@ -415,6 +418,7 @@ impl Workspace {
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
+        this.door_start(window, cx);
         this.journal_start(cx);
         // Going to sleep: the server hears it in one last sync (best effort).
         let weak = cx.entity().downgrade();
@@ -490,6 +494,7 @@ impl Workspace {
                 let ticked = this.update(cx, |this, cx| {
                     let begun = Instant::now();
                     this.glasscode_tick(cx);
+                    this.door_fast_tick(cx);
                     crate::shell::frames::tick(0, begun.elapsed());
                 });
                 if ticked.is_err() {
@@ -1632,6 +1637,7 @@ impl Workspace {
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);
+        self.door_tick(cx);
         self.tickets_tick(cx);
         self.usage_tick(cx);
         self.themes_tick(cx);

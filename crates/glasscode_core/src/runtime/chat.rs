@@ -411,6 +411,56 @@ impl UiSnapshot {
     }
 }
 
+// ----- the glasses (G07, docs/mobile-glasses-plan.md) -----------------------------------------------
+
+/// What the person's glasses showed when they asked: the device's own focus, which the app sends
+/// with the question. The Mac keeps only ids it knows (`session`), so "this" never names a
+/// session the brain cannot find.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DeviceFocus {
+    /// The lens's card: glance, session, pr, project, today, answer, card.
+    pub view: String,
+    pub session: Option<String>,
+    pub pr: Option<u64>,
+    pub project: Option<String>,
+}
+
+/// The block before a question asked from the glasses: where the person is, how the answer is
+/// heard and shown, what "this" means, and whether the Mac's window may move (O8: only while they
+/// were at the Mac a moment ago, or when they ask to see it there).
+pub fn glasses_block(focus: &DeviceFocus, session_title: Option<&str>, window_moves: bool) -> String {
+    let mut on_lens = Vec::new();
+    if let Some(id) = &focus.session {
+        on_lens.push(match session_title {
+            Some(title) => format!("the session “{title}” ({id})"),
+            None => format!("the session {id}"),
+        });
+    }
+    if let Some(number) = focus.pr {
+        on_lens.push(format!("pull request #{number}"));
+    }
+    if let Some(project) = &focus.project {
+        on_lens.push(format!("the project {project}"));
+    }
+    let lens = if on_lens.is_empty() { "nothing in particular (their glance: what needs them)".to_string() } else { on_lens.join(", ") };
+    let window = if window_moves {
+        "You may also show it in the Mac's window: they were at the Mac a moment ago, or asked to see it there."
+    } else {
+        "Do not move the Mac's window: they are away from it."
+    };
+    format!(
+        "[Where the person is: on their glasses (a lens and a voice), away from the Mac's window. What you answer is spoken and shown on a small lens: one to three short sentences, no lists, tables or Markdown. To show them a place, call device.open (a session by id, a pull request by number, a project, today or conversation): it appears on their lens. {window} On the lens now: {lens}. “Here”, “this” and “that” mean what is on the lens.]"
+    )
+}
+
+/// Whether a question asks to see something on the Mac ("show it on my Mac"): then the Mac's
+/// window may move for it, wherever the person is (O8).
+pub fn asks_for_the_mac(text: &str) -> bool {
+    let text = text.to_lowercase();
+    ["on my mac", "on the mac", "on my laptop", "on the laptop", "on my screen", "on my computer", "on the computer"].iter().any(|words| text.contains(words))
+}
+
 // ----- moving the screen (M52.2, ux-5) ----------------------------------------------------------------
 
 /// How long after the person's message the chat may move the window in answer.
@@ -1118,6 +1168,26 @@ impl Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G07: a question from the glasses says where the person is, how to answer, and what the lens
+    /// shows; the window moves only when it may (O8).
+    #[test]
+    fn the_glasses_block_says_where_and_how() {
+        let focus = DeviceFocus { view: "session".into(), session: Some("s1".into()), pr: Some(42), project: None };
+        let block = glasses_block(&focus, Some("checkout-fix"), false);
+        assert!(block.contains("on their glasses") && block.contains("device.open"), "{block}");
+        assert!(block.contains("the session “checkout-fix” (s1)") && block.contains("pull request #42"), "{block}");
+        assert!(block.contains("Do not move the Mac's window"), "{block}");
+        assert!(glasses_block(&DeviceFocus::default(), None, true).contains("You may also show it in the Mac's window"));
+        assert!(glasses_block(&DeviceFocus::default(), None, false).contains("what needs them"));
+    }
+
+    #[test]
+    fn asking_for_the_mac_is_heard() {
+        assert!(asks_for_the_mac("Show the checkout PR on my Mac"));
+        assert!(asks_for_the_mac("put it on my screen"));
+        assert!(!asks_for_the_mac("go to the checkout session"));
+    }
 
     /// A "Show me" chip names the place it shows.
     #[test]

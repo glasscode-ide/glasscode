@@ -122,7 +122,7 @@ impl Workspace {
     }
 
     /// What the app sees of each local session: running, activity, an open question.
-    fn mirror_live(&self, cx: &mut Context<Self>) -> HashMap<String, Live> {
+    pub(crate) fn mirror_live(&self, cx: &mut Context<Self>) -> HashMap<String, Live> {
         self.state
             .sessions
             .iter()
@@ -309,28 +309,34 @@ impl Workspace {
         .detach();
     }
 
-    /// Do here what the phone asked for, the way a person at the keyboard would.
+    /// Do here what the phone asked for, the way a person at the keyboard would: what the server
+    /// relayed. What is not done is said in a toast.
     fn mirror_apply(&mut self, id: &str, inputs: Vec<MirrorInput>, cx: &mut Context<Self>) {
         let title = self.state.session(id).map(|s| s.title.clone()).unwrap_or_default();
+        let server = self.server.name();
+        for result in self.relayed_apply(id, inputs, cx) {
+            if let Err(why) = result {
+                log::warn!("mirror: input relayed for {id} not done: {why}");
+                self.show_toast(format!("Something relayed by {server} for \"{title}\" was not done: {why}"), cx);
+            }
+        }
+    }
+
+    /// Do a paired phone's input in session `id`, as a person at the keyboard would: what the
+    /// server relayed, or what came through this Mac's device door (G04). Only what a phone this
+    /// Mac paired signed, for this run, into an agent session, once (`remote::check_relayed`):
+    /// neither the server nor anything on the tailnet can type here by itself. One result per
+    /// input, in order: done, or why not.
+    pub(crate) fn relayed_apply(&mut self, id: &str, inputs: Vec<MirrorInput>, cx: &mut Context<Self>) -> Vec<Result<(), String>> {
+        let title = self.state.session(id).map(|s| s.title.clone()).unwrap_or_default();
         let Some(terminal) = self.terminals.get(id).cloned() else {
-            self.show_toast(format!("Your iPhone sent something to \"{title}\", but it is not running on {}", crate::platform::this_computer()), cx);
-            return;
+            let why = format!("\"{title}\" is not running on {}", crate::platform::this_computer());
+            return inputs.iter().map(|_| Err(why.clone())).collect();
         };
-        // Only what a phone this Mac paired signed, for this run, into an agent session: the
-        // server relays it and cannot type here by itself (its manager acts through the gate).
         let agent = self.state.session(id).map(|s| s.agent).unwrap_or(glasscode_core::model::AgentKind::Shell);
         let paired = self.control.authority.devices.clone();
         let launch = self.control.launch.clone();
-        let mut done = Vec::new();
-        for input in inputs {
-            match glasscode_core::remote::check_relayed(&input, id, agent, &launch, &|device| paired.contains(device), &mut self.mirror.relayed) {
-                Ok(()) => done.push(input),
-                Err(why) => {
-                    log::warn!("mirror: input relayed for {id} not done: {why}");
-                    self.show_toast(format!("Something relayed by {} for \"{title}\" was not done: {why}", self.server.name()), cx);
-                }
-            }
-        }
+        let mut results = Vec::new();
         let mut delay = Duration::ZERO;
         let mut later = |bytes: Vec<u8>, after: Duration, cx: &mut Context<Self>| {
             delay += after;
@@ -341,53 +347,63 @@ impl Workspace {
             })
             .detach();
         };
-        for input in done {
-            match input {
+        for input in inputs {
+            if let Err(why) = glasscode_core::remote::check_relayed(&input, id, agent, &launch, &|device| paired.contains(device), &mut self.mirror.relayed) {
+                results.push(Err(why));
+                continue;
+            }
+            let result = match input {
                 MirrorInput::Text { text, enter, device, .. } => {
                     // Typing into an open question would answer it.
                     if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-                        self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's message was not sent)"), cx);
-                        continue;
-                    }
-                    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    // Relayed by the server, which names the phone its connection declared
-                    // (M13.2); from an older server, or not from a phone, it is nobody's (D1).
-                    glasscode_core::words::record(relayed_origin(device), &line, Some(id), None);
-                    later(line.into_bytes(), Duration::ZERO, cx);
-                    if enter {
-                        later(b"\r".to_vec(), Duration::from_millis(250), cx);
-                    }
-                }
-                MirrorInput::Answer { option, text, device, .. } => {
-                    let Some(open) = prompt::parse(&terminal.read(cx).text_tail(60)) else { continue };
-                    // An answer that allows more than this once is the person's, here.
-                    if let Err(why) = relayed_answer_ok(&open, option) {
-                        self.show_toast(format!("\"{title}\": {why}"), cx);
-                        continue;
-                    }
-                    let Some(keys) = prompt::keys_for(&open, option) else { continue };
-                    // One key at a time, as a person types: the menu reads each.
-                    for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
-                        later(bytes.to_vec(), Duration::from_millis(80), cx);
-                    }
-                    if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                        glasscode_core::words::record(relayed_origin(device), &text, Some(id), None);
-                        later(text.into_bytes(), Duration::from_millis(500), cx);
-                        later(b"\r".to_vec(), Duration::from_millis(250), cx);
+                        Err(format!("\"{title}\" is asking something; answer it first (the message was not sent)"))
+                    } else {
+                        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        // Relayed by the server, which names the phone its connection declared
+                        // (M13.2), or from the door, whose handshake named it; from an older server,
+                        // or not from a phone, it is nobody's (D1).
+                        glasscode_core::words::record(relayed_origin(device), &line, Some(id), None);
+                        later(line.into_bytes(), Duration::ZERO, cx);
+                        if enter {
+                            later(b"\r".to_vec(), Duration::from_millis(250), cx);
+                        }
+                        Ok(())
                     }
                 }
+                MirrorInput::Answer { option, text, device, .. } => match prompt::parse(&terminal.read(cx).text_tail(60)) {
+                    None => Err(format!("\"{title}\" is not asking anything now")),
+                    Some(open) => match relayed_answer_ok(&open, option).and_then(|()| prompt::keys_for(&open, option).ok_or_else(|| format!("the question has no option {option}"))) {
+                        // An answer that allows more than this once is the person's, here.
+                        Err(why) => Err(format!("\"{title}\": {why}")),
+                        Ok(keys) => {
+                            // One key at a time, as a person types: the menu reads each.
+                            for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
+                                later(bytes.to_vec(), Duration::from_millis(80), cx);
+                            }
+                            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                                glasscode_core::words::record(relayed_origin(device), &text, Some(id), None);
+                                later(text.into_bytes(), Duration::from_millis(500), cx);
+                                later(b"\r".to_vec(), Duration::from_millis(250), cx);
+                            }
+                            Ok(())
+                        }
+                    },
+                },
                 MirrorInput::Keys { keys, .. } => {
                     // Keys could pick an option of an open question: those go as an answer.
                     if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-                        self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's keys were not pressed)"), cx);
-                        continue;
-                    }
-                    for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
-                        later(bytes.to_vec(), Duration::from_millis(80), cx);
+                        Err(format!("\"{title}\" is asking something; answer it first (the keys were not pressed)"))
+                    } else {
+                        for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
+                            later(bytes.to_vec(), Duration::from_millis(80), cx);
+                        }
+                        Ok(())
                     }
                 }
-            }
+            };
+            results.push(result);
         }
+        results
     }
 
     /// Someone continued this session on the server: it ends here (its folder stays).

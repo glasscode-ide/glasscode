@@ -130,6 +130,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.show", manager_show),
     ("manager.scene", manager_scene),
     ("manager.voice_token", manager_voice_token),
+    ("device.list", device_list),
+    ("device.open", device_open),
     ("manager.follow_up.list", follow_up_list),
     ("manager.follow_up.add", follow_up_add),
     ("manager.follow_up.done", follow_up_done),
@@ -3103,6 +3105,45 @@ fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
             });
         })
         .detach();
+    })
+}
+
+/// The person's paired phones and glasses, and which are connected through the door (G07).
+fn device_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    let data = ws.door_devices();
+    let list = data["devices"].as_array().cloned().unwrap_or_default();
+    let text = if list.is_empty() {
+        "No phone is paired with this Mac. Settings › Glasses pairs one.".to_string()
+    } else {
+        list.iter()
+            .map(|d| format!("{} · {}{}", d["id"].as_str().unwrap_or_default(), if d["connected"] == true { "connected" } else { "not connected" }, if d["glasses"] == true { ", glasses on" } else { "" }))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    answer(Reply::ok(text, data))
+}
+
+/// Show a place on the person's glasses (G07): only the person, or the manager's chat in answer
+/// to the glasses' question of the last 30 s (the door checks the time and finds the device).
+/// A wake, a playbook and an agent never do.
+fn device_open(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::caller::{Caller as C, Lane};
+    let word = arg(op, "place").trim().to_string();
+    let Some(place) = crate::device_door::DevicePlace::parse(&word) else { return Err(usage("device open <place>")) };
+    match &caller.channel {
+        C::Manager { lane: Lane::Chat, .. } => {}
+        _ if caller.is_person() => {}
+        C::Manager { .. } => return Err(denied("A wake, a playbook or a schedule never shows anything on the glasses; it notes it in the conversation.")),
+        _ => return Err(denied("Only you, and the manager answering your glasses, show a place on them.")),
+    }
+    let _ = ws;
+    plan(Kind::Show, format!("show {word} on the glasses"), move |ws, r, _, cx| {
+        let reply = match ws.door_open(place) {
+            Ok(said) => Reply::ok(said, json!({ "place": word, "shown": true })),
+            Err(why) => failed(why),
+        };
+        ws.reply(r, reply);
+        cx.notify();
     })
 }
 

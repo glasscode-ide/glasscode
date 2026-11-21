@@ -1,0 +1,86 @@
+{
+ "about": "The device ops of the glasses plan (G07), which only the v2 engine knows: the person's paired phones and glasses, and showing a place on the lens. Each case is a command line and the op or error `ops::parse` gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-21",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "Checkout fix",
+    "branch": "fix/checkout-total",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "device list",
+   "words": [
+    "device",
+    "list"
+   ],
+   "op": {
+    "op": "device.list",
+    "args": {}
+   }
+  },
+  {
+   "words": [
+    "device"
+   ],
+   "op": {
+    "op": "device.list",
+    "args": {}
+   }
+  },
+  {
+   "words": [
+    "devices",
+    "list"
+   ],
+   "op": {
+    "op": "device.list",
+    "args": {}
+   }
+  },
+  {
+   "help": "device open <session|pr:<number>|project:<name>|today|conversation>",
+   "words": [
+    "device",
+    "open",
+    "pr:42"
+   ],
+   "op": {
+    "op": "device.open",
+    "args": {
+     "place": "pr:42"
+    }
+   }
+  },
+  {
+   "words": [
+    "device",
+    "open",
+    "checkout"
+   ],
+   "op": {
+    "op": "device.open",
+    "args": {
+     "place": "checkout"
+    }
+   }
+  },
+  {
+   "words": [
+    "device",
+    "open"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "device open <place>"
+   }
+  }
+ ]
+}
