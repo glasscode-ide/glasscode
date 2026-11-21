@@ -30,7 +30,13 @@ pub struct SessionNow {
     pub activity: Option<AgentActivity>,
     /// Its pull request: repository, number and state (OPEN, MERGED, CLOSED), when one is known.
     pub pr: Option<(String, u64, String)>,
+    /// The app started its agent a moment ago (within [`STARTING_SECS`]): its start hook may not
+    /// have come yet, so a start the journal has not heard of is not a gap until then.
+    pub starting: bool,
 }
+
+/// How long after the app starts an agent its start hook may still be on its way.
+pub const STARTING_SECS: u64 = 60;
 
 /// What is true now.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -169,6 +175,8 @@ impl Reconciler {
             let implied_running = implied.running.unwrap_or(implied.activity.is_some());
             match (implied_running, session.running) {
                 (true, false) => out.push(event(kinds::RECONCILED_SESSION_GONE, "its agent is not running, and no event said it ended".into(), json!({ "implied": implied.activity }))),
+                // The app is starting it (a restore at the start): its SessionStart is on its way.
+                (false, true) if session.starting => {}
                 (false, true) => out.push(event(kinds::RECONCILED_SESSION_RUNNING, "it runs, and no event said it started".into(), json!({ "activity": activity }))),
                 _ => {}
             }
@@ -273,7 +281,7 @@ mod tests {
     use super::*;
 
     fn session(id: &str, running: bool, activity: Option<AgentActivity>) -> SessionNow {
-        SessionNow { id: id.into(), project: None, running, activity, pr: None }
+        SessionNow { id: id.into(), project: None, running, activity, pr: None, starting: false }
     }
 
     /// One project (no key yet), its list read.
@@ -311,6 +319,24 @@ mod tests {
         // s3 was never heard of: a baseline, not a gap.
         assert_eq!(events[4].session.as_deref(), Some("s3"));
         assert!(reconciler.run(&now).is_empty());
+    }
+
+    /// A session the app is starting (restored at a start) is not "running with no start" before
+    /// its SessionStart hook comes; once the start window is over, the gap is reported.
+    #[test]
+    fn a_session_the_app_is_starting_waits_for_its_start_hook() {
+        let quit = Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": ["s1"] }));
+        let starting = Snapshot { sessions: vec![SessionNow { starting: true, ..session("s1", true, None) }], ..Snapshot::default() };
+        let mut reconciler = Reconciler::from_events([&quit]);
+        assert!(reconciler.run(&starting).is_empty(), "restored at the start: its hook is on its way");
+        // Its start hook came: nothing to say, then or later.
+        reconciler.observe(&Event::new(kinds::SESSION_STARTED, Source::Hook, "started").session(Some("s1")));
+        let started = Snapshot { sessions: vec![session("s1", true, None)], ..Snapshot::default() };
+        assert!(reconciler.run(&started).is_empty());
+        // No hook in the whole window (hooks off): the gap is reported once the window is over.
+        let mut silent = Reconciler::from_events([&quit]);
+        assert!(silent.run(&starting).is_empty());
+        assert_eq!(kinds_of(&silent.run(&started)), ["reconciled.session_running"]);
     }
 
     /// A quit ended what it listed; a force quit (no `app.quit`) leaves the gap to report.

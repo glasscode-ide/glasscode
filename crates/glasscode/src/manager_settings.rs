@@ -290,6 +290,10 @@ impl Workspace {
         if self.state.manager.brain == agent {
             return;
         }
+        if let Err(why) = brain_choice(agent, self.codex_brain_blocked()) {
+            self.show_toast(why, cx);
+            return;
+        }
         if let Some(form) = self.manager.page.form.get() {
             form.model.update(cx, |input, cx| input.set_text("", cx));
         }
@@ -301,6 +305,13 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    /// This Codex cannot be the manager's brain: its version is known to keep tools no flag turns
+    /// off, or its tool check found such tools in this run.
+    pub(crate) fn codex_brain_blocked(&self) -> bool {
+        let version = self.cli_status.iter().find(|s| s.name == "Codex").and_then(|s| s.installed.as_deref());
+        self.mchat.codex_tools_refused || glasscode_core::runtime::codex::brain_blocked(version)
     }
 
     /// Add the teammate typed into the fields of Teammates.
@@ -543,9 +554,15 @@ impl Workspace {
                 }))
             }))
             .into_any_element();
+        let codex_blocked = self.codex_brain_blocked();
+        let about_brain = if codex_blocked {
+            format!("The agent that thinks for him. {}", glasscode_core::runtime::codex::BRAIN_BLOCKED)
+        } else {
+            "The agent that thinks for him: Claude or Codex. A CLI you added yourself cannot be his brain.".to_string()
+        };
         out.push(group(
             "Brain",
-            "The agent that thinks for him: Claude or Codex. A CLI you added yourself cannot be his brain.",
+            &about_brain,
             vec![
                 row("Agent", "", Some(brain)),
                 row("Account", format!("The {} account he runs as", settings.brain.name()), Some(account)),
@@ -842,6 +859,16 @@ impl Workspace {
 mod tests {
     use super::*;
 
+    /// A Codex that keeps tools Glasscode cannot switch off is not picked as the brain in silence:
+    /// the choice is refused with the sentence Settings shows; Claude, and a Codex not known to,
+    /// may be.
+    #[test]
+    fn a_blocked_codex_cannot_be_picked_as_the_brain() {
+        assert_eq!(brain_choice(AgentKind::Codex, true), Err("Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off)."));
+        assert_eq!(brain_choice(AgentKind::Codex, false), Ok(()));
+        assert_eq!(brain_choice(AgentKind::Claude, true), Ok(()));
+    }
+
     #[test]
     fn a_time_of_day_is_read_however_it_is_typed() {
         assert_eq!(parse_time("9").as_deref(), Some("09:00"));
@@ -933,6 +960,12 @@ mod tests {
         assert_eq!(s.people[1].contact, None);
         assert_eq!(person_detail(&s.people[1]), "No GitHub login · messages go to their name");
     }
+}
+
+/// Whether the person may make `agent` the manager's brain: not a Codex that keeps tools Glasscode
+/// cannot switch off (its first question would fail closed); the sentence says why.
+pub(crate) fn brain_choice(agent: AgentKind, codex_blocked: bool) -> Result<(), &'static str> {
+    if agent == AgentKind::Codex && codex_blocked { Err(glasscode_core::runtime::codex::BRAIN_BLOCKED) } else { Ok(()) }
 }
 
 impl Workspace {
