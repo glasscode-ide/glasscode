@@ -262,7 +262,12 @@ fn claude_settings(origin: SessionOrigin, policy: &ProjectPolicy, facts: &Profil
         "enabled": true,
         "autoAllowBashIfSandboxed": true,
         "filesystem": { "denyRead": deny_read.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), "allowWrite": allow_write },
-        "network": { "allowedDomains": domains, "allowUnixSockets": [facts.socket.to_string_lossy()] },
+        // The control socket is the person's sessions' only: a session the manager drives sends
+        // its `glasscode` commands as request files in its own worktree, which the app knows as
+        // that session's whatever they say (`caller::by_channel_proven`), so it never passes for a
+        // program outside Glasscode by leaving its signature out. Its MCP server and hooks run
+        // outside the sandbox, and keep the socket.
+        "network": { "allowedDomains": domains, "allowUnixSockets": if restricted { Vec::new() } else { vec![facts.socket.to_string_lossy().into_owned()] } },
     });
     if restricted {
         sandbox["allowUnsandboxedCommands"] = json!(false);
@@ -370,7 +375,8 @@ fn codex_permissions(origin: SessionOrigin, facts: &ProfileFacts, denied: &[Path
     // Quarantine has no network; automation neither (Codex has no domain list): its forge work
     // is Glasscode's ops (D13), and its builds use what the worktree has.
     let _ = origin;
-    let network = format!("{{\"enabled\"=false, \"unix_sockets\"={{{}=\"allow\"}}}}", json!(facts.socket.to_string_lossy()));
+    // No control socket either (`claude_settings`): its commands go as request files.
+    let network = "{\"enabled\"=false}".to_string();
     ["-c".into(), r#"default_permissions="glasscode""#.into(), "-c".into(), r#"permissions.glasscode.extends=":workspace""#.into(), "-c".into(), format!("permissions.glasscode.filesystem={}", table(&fs)), "-c".into(), format!("permissions.glasscode.network={network}")].to_vec()
 }
 
