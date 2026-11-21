@@ -27,6 +27,19 @@ detection, transcription, turn taking, interruption and playback; the agent's
 `on_user_turn_completed` hook gets each finished sentence (and stops the session from
 answering by itself), and `session.say()` speaks. See README.md.
 
+With a talker (MANAGER_TALKER set, see providers.py and talker.py) the session also has a fast
+language model: for a client that said `"talker": true` in `manager.config`, the worker holds
+the conversation itself and hands the work to the manager through that client:
+
+    manager.heard   worker -> clients   {..., "handled": true}   shown, not asked: the talker answers
+    manager.said    worker -> clients   {"text": "..."}          what the talker itself says (captions)
+    manager.tool    worker -> a client  {"call", "name", "arguments", "to"}   run one of the talker's tools
+    manager.result  client -> worker    {"call", "text"}         what that tool found
+    manager.config  client -> worker    {..., "talker": true, "place": "mac|glasses|phone"}
+
+The manager's answer still comes on `manager.say`; the talker hears it too (it goes into its
+conversation), and a later sentence of an answer the person talked over is dropped.
+
 Run: `python worker.py start` (the Dockerfile does), or `python worker.py dev` to try it.
 """
 
@@ -56,6 +69,7 @@ from livekit.agents.job import DEFAULT_PARTICIPANT_KINDS
 from livekit.plugins import silero
 
 import providers
+import talker
 from providers import env
 from wake import Attention, is_echo, listen_value
 
@@ -68,6 +82,12 @@ SAY = "manager.say"
 STOP = "manager.stop"
 STATE = "manager.state"
 CONFIG = "manager.config"
+SAID = "manager.said"
+TOOL = talker.TOOL
+RESULT = talker.RESULT
+# How long a device has to answer one of the talker's tools (it answers at once: the
+# manager's own work runs in the background).
+TOOL_SECS = float(env("MANAGER_TOOL_SECS", "12"))
 
 ROOM = env("MANAGER_ROOM", "manager")
 # How long after the manager spoke (or was spoken to) speech still counts without its name.
@@ -88,16 +108,20 @@ LOG_HEARD = env("MANAGER_LOG_HEARD") == "1"
 
 
 class Ears(Agent):
-    """The session's agent. It has no language model: it only hands each sentence on."""
+    """The session's agent. Without a talker it only hands each sentence on; with one it lets
+    the talker answer what a talker client said to the manager."""
 
-    def __init__(self, voice: "ManagerVoice") -> None:
-        super().__init__(instructions="")
+    def __init__(self, voice: "ManagerVoice", tools: list) -> None:
+        super().__init__(instructions=voice.talker_instructions(), tools=tools)
         self._voice = voice
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
-        await self._voice.heard(new_message.text_content or "")
-        # The session must not answer by itself, and the sentence is not kept.
-        raise StopResponse()
+        text = await self._voice.heard(new_message.text_content or "")
+        if text is None:
+            # The session must not answer by itself, and the sentence is not kept.
+            raise StopResponse()
+        # Without the manager's name in front: the talker answers what was asked.
+        new_message.content = [text]
 
 
 class ManagerVoice:
@@ -133,6 +157,17 @@ class ManagerVoice:
         self._tasks: set[asyncio.Task] = set()
         self._brain_task: asyncio.Task | None = None
         self._closing = False
+        # The talker (None: there is none) and its agent.
+        self.talker_llm = None
+        self.agent: Ears | None = None
+        self._instructions_for: tuple[str, str] | None = None
+        # The talker's tool calls waiting for the device: call id -> (identity, future).
+        self.calls: dict[str, tuple[str, asyncio.Future]] = {}
+        self._call_seq = 0
+        # Answers of the manager the person talked over: their later sentences are not spoken.
+        self.cut_ids: set[str] = set()
+        # What came on `manager.say` lately, so it is not told again as the talker's own words.
+        self.said_texts: list[str] = []
 
     # ----- starting -----------------------------------------------------------------------------
 
@@ -142,33 +177,48 @@ class ManagerVoice:
         vad = self.ctx.proc.userdata["vad"]
         try:
             speech_to_text = providers.make_stt()
-            if STT_MODE == "segments" and speech_to_text.capabilities.streaming:
+            segments = STT_MODE == "segments" and speech_to_text.capabilities.streaming
+            if segments:
                 speech_to_text = stt.StreamAdapter(stt=speech_to_text, vad=vad)
             text_to_speech = providers.make_tts()
+            self.talker_llm = providers.make_talker()
         except ValueError as error:
             # Join anyway, say why in words, and leave: the person sees it in Glasscode.
             await self.ctx.connect()
             await self._fail(str(error))
             return
 
-        self.session = AgentSession(
-            stt=speech_to_text,
-            tts=text_to_speech,
-            vad=vad,
-            turn_handling={
-                # The voice detector decides when a sentence ended and when the person cuts in.
-                "turn_detection": "vad",
+        # Soniox says itself when a sentence ended (it hears the pause and the words); every
+        # other service, and Soniox behind the segment adapter, leaves that to the voice detector.
+        turn_detection = "stt" if env("MANAGER_STT", "deepgram").lower() == "soniox" and not segments else "vad"
+        options = {
+            "stt": speech_to_text,
+            "tts": text_to_speech,
+            "vad": vad,
+            "turn_handling": {
+                "turn_detection": turn_detection,
+                # The voice detector decides when the person cuts in.
                 "interruption": {"mode": "vad"},
+                # Thinking ahead on half a sentence sends it to the talker's service: only while
+                # a talker client chose to talk (switched on in `_apply_talker`).
+                "preemptive_generation": {"enabled": False},
             },
-            stt_context_options={"keyterms": [self.attention.name]},
-        )
+            "stt_context_options": {"keyterms": [self.attention.name]},
+        }
+        if self.talker_llm is not None:
+            options["llm"] = self.talker_llm
+        self.session = AgentSession(**options)
         self.session.on("user_state_changed", self._on_user_state)
         self.session.on("user_input_transcribed", self._on_transcribed)
+        self.session.on("agent_state_changed", lambda _event: self._publish_state())
+        self.session.on("conversation_item_added", self._on_item)
         self.session.on("error", self._on_error)
         self.session.on("close", self._on_close)
 
+        tools = talker.tools(self.call_device) if self.talker_llm is not None else []
+        self.agent = Ears(self, tools)
         await self.session.start(
-            agent=Ears(self),
+            agent=self.agent,
             room=self.room,
             # Nothing drives this session from outside; the room only carries the messages above.
             session_host=False,
@@ -186,9 +236,19 @@ class ManagerVoice:
         for participant in self.room.remote_participants.values():
             self._on_joined(participant)
 
+        self._apply_talker()
         self._spawn(self._ticker())
         self._publish_state(force=True)
-        log.info("in room %s, speech to text %s (%s), text to speech %s, brain %s", self.room.name, env("MANAGER_STT", "deepgram"), STT_MODE, env("MANAGER_TTS", "cartesia"), BRAIN)
+        log.info(
+            "in room %s, speech to text %s (%s, turns by %s), text to speech %s, talker %s, brain %s",
+            self.room.name,
+            env("MANAGER_STT", "deepgram"),
+            STT_MODE,
+            turn_detection,
+            env("MANAGER_TTS", "cartesia"),
+            env("MANAGER_TALKER") or "none",
+            BRAIN,
+        )
 
     def _spawn(self, coroutine) -> asyncio.Task:
         task = asyncio.create_task(coroutine)
@@ -238,6 +298,80 @@ class ManagerVoice:
         self.attention.listen = self._listen_of(chosen) if chosen else self.default_listen
         if self.attention.name != before:
             self._pass_name_on()
+        self._apply_talker()
+
+    # ----- the talker ---------------------------------------------------------------------------
+
+    def _talker_on(self) -> bool:
+        """The talker answers: there is one, and the client listened to asked for it."""
+        return self.talker_llm is not None and self.asked.get(self._listened(), {}).get("talker") == "1"
+
+    def talker_instructions(self) -> str:
+        place = self.asked.get(self._listened(), {}).get("place", "")
+        return talker.instructions(self.attention.name, place, env("MANAGER_LANGUAGE", "en"))
+
+    def _apply_talker(self) -> None:
+        """Keep the talker's instructions and thinking-ahead in step with who is listened to."""
+        if self.session is None or self.agent is None or self.talker_llm is None:
+            return
+        want = (self.attention.name, self.asked.get(self._listened(), {}).get("place", ""))
+        if want != self._instructions_for:
+            self._instructions_for = want
+            self._spawn(self.agent.update_instructions(self.talker_instructions()))
+        # Thinking ahead sends half-heard words to the talker's service: only when everything
+        # said counts anyway ("always"), never while it waits for its name.
+        try:
+            self.session.options.turn_handling["preemptive_generation"]["enabled"] = self._talker_on() and self.attention.listen == "always"
+        except (AttributeError, KeyError, TypeError):
+            log.debug("thinking ahead cannot be switched in this version")
+
+    async def call_device(self, name: str, arguments: dict) -> str:
+        """Run one of the talker's tools on the client that is listened to, and wait for it."""
+        to = self._listened()
+        if not to:
+            raise talker.ToolError("No device is in the room.")
+        self._call_seq += 1
+        call = f"t{self._call_seq}"
+        future = asyncio.get_running_loop().create_future()
+        self.calls[call] = (to, future)
+        try:
+            await self.room.local_participant.publish_data(
+                json.dumps({"call": call, "name": name, "arguments": arguments, "to": to}), reliable=True, topic=TOOL, destination_identities=[to]
+            )
+            text = await asyncio.wait_for(future, TOOL_SECS)
+        except asyncio.TimeoutError:
+            raise talker.ToolError("The device did not answer in time.") from None
+        finally:
+            self.calls.pop(call, None)
+        if name == "ask_manager" and text.strip().lower().startswith(talker.STARTED):
+            # The manager works on it: "thinking" until its answer comes on `manager.say`.
+            self.thinking_until = time.monotonic() + THINKING_SECS
+            self._publish_state()
+        if LOG_HEARD:
+            log.info("tool %s on %s: %r", name, to, text[:200])
+        return text
+
+    def _on_result(self, message: dict, sender: str) -> None:
+        waiting = self.calls.get(str(message.get("call") or ""))
+        if waiting is None or waiting[0] != sender or waiting[1].done():
+            return
+        waiting[1].set_result(str(message.get("text") or ""))
+
+    def _on_item(self, event) -> None:
+        """What the talker itself said: for the captions, and to know its echo."""
+        item = event.item
+        if getattr(item, "role", None) != "assistant":
+            return
+        text = (getattr(item, "text_content", None) or "").strip()
+        if not text:
+            return
+        self.last_spoken = (text, time.monotonic())
+        self.attention.keep_open(time.monotonic())
+        if any(said.startswith(text) for said in self.said_texts):
+            # The manager's own answer (cut short, when the person talked over it): the
+            # clients show it already.
+            return
+        self._spawn(self._publish(SAID, {"text": text}))
 
     def _listen_to(self, identity: str | None) -> None:
         if self.session is None:
@@ -253,7 +387,7 @@ class ManagerVoice:
     # ----- what comes in from the clients -------------------------------------------------------
 
     def _on_data(self, packet: rtc.DataPacket) -> None:
-        if packet.topic not in (SAY, STOP, CONFIG):
+        if packet.topic not in (SAY, STOP, CONFIG, RESULT):
             return
         try:
             message = json.loads(packet.data.decode("utf-8")) if packet.data else {}
@@ -262,12 +396,15 @@ class ManagerVoice:
             return
         if not isinstance(message, dict):
             return
+        sender = packet.participant.identity if packet.participant else self._listened()
         if packet.topic == SAY:
             self.say(str(message.get("id") or ""), str(message.get("text") or ""))
         elif packet.topic == STOP:
             self.stop()
+        elif packet.topic == RESULT:
+            self._on_result(message, sender)
         else:
-            self._configure(message, packet.participant.identity if packet.participant else self._listened())
+            self._configure(message, sender)
 
     def _configure(self, message: dict, sender: str) -> None:
         """A client says the manager's name and how it wants to be listened to. Kept per client."""
@@ -277,6 +414,13 @@ class ManagerVoice:
             asked["name"] = self.last_name = name.strip()
         if listen:
             asked["listen"] = listen
+        # A client that runs the talker's tools says so; one that does not (an older build)
+        # keeps asking the manager itself for every sentence.
+        if "talker" in message:
+            asked["talker"] = "1" if message.get("talker") is True else ""
+        place = message.get("place")
+        if isinstance(place, str) and place in talker.PLACES:
+            asked["place"] = place
         self._choose()
         log.info("%s asks for %s; listening to %s (%s)", sender or "a client", asked.get("listen", self.default_listen), self.listened or "nobody", self.attention.listen)
 
@@ -305,22 +449,31 @@ class ManagerVoice:
             self.addressed = True
             self._publish_state()
 
-    async def heard(self, text: str) -> None:
-        """The person finished a sentence. Pass it on when it is meant for the manager."""
+    async def heard(self, text: str) -> str | None:
+        """The person finished a sentence. Pass it on when it is meant for the manager.
+
+        Returns what the talker should answer, or None when the talker does not answer it
+        (it was not meant for the manager, or the client asks the manager itself)."""
         now = time.monotonic()
         self.addressed = False
         if self._is_own_voice(text, now):
             log.info("dropped the manager's own voice coming back through a microphone")
-            return
+            return None
         accepted = self.attention.accept(text, now)
         if LOG_HEARD:
             log.info("understood %r: %s", text, "not for the manager, dropped" if accepted is None else f"passed on as {accepted!r}")
         if accepted is None:
-            return
+            return None
         if not accepted:
             # Only the name: the conversation is open, there is nothing to answer yet.
             self._publish_state()
-            return
+            return None
+        if self._talker_on():
+            # The talker answers; the client shows what was heard.
+            self.attention.keep_open(now)
+            await self._publish(HEARD, {"text": accepted, "final": True, "from": self._listened(), "handled": True})
+            self._publish_state()
+            return accepted
         self.thinking_until = now + THINKING_SECS
         self._publish_state()
         if BRAIN == "server":
@@ -329,6 +482,7 @@ class ManagerVoice:
             self._brain_task = self._spawn(self._ask_server(accepted))
         else:
             await self._publish(HEARD, {"text": accepted, "final": True, "from": self._listened()})
+        return None
 
     def _is_own_voice(self, text: str, now: float) -> bool:
         spoken = [said for _, _, said in self.speeches]
@@ -365,11 +519,20 @@ class ManagerVoice:
     def say(self, say_id: str, text: str) -> None:
         text = text.strip()
         self.thinking_until = 0.0
+        if say_id and say_id in self.cut_ids:
+            # The person talked over this answer: the rest of it is not spoken.
+            self._publish_state()
+            return
         if not text or self.session is None:
             self._publish_state()
             return
+        talking = self._talker_on()
+        if talking:
+            # The talker hears what the manager said (so "and the second one?" makes sense),
+            # but does not tell it again as its own words.
+            self.said_texts = (self.said_texts + [text])[-20:]
         try:
-            handle = self.session.say(text, add_to_chat_ctx=False)
+            handle = self.session.say(text, add_to_chat_ctx=talking)
         except RuntimeError as error:
             log.warning("cannot speak: %s", error)
             self._publish_state()
@@ -379,10 +542,21 @@ class ManagerVoice:
         self._publish_state()
 
     def _on_spoken(self, handle) -> None:
-        for spoken, _, text in self.speeches:
+        said_id = ""
+        for spoken, say_id, text in self.speeches:
             if spoken is handle:
                 self.last_spoken = (text, time.monotonic())
+                said_id = say_id
         self.speeches = [speech for speech in self.speeches if speech[0] is not handle]
+        if said_id and getattr(handle, "interrupted", False):
+            # Talked over: what is still queued of the same answer goes too.
+            self.cut_ids.add(said_id)
+            for queued, say_id, _ in list(self.speeches):
+                if say_id == said_id:
+                    try:
+                        queued.interrupt(force=True)
+                    except Exception:
+                        log.debug("could not drop a queued sentence")
         # What the person says right after it belongs to the conversation.
         self.attention.keep_open(time.monotonic())
         self._publish_state()
@@ -392,7 +566,10 @@ class ManagerVoice:
         if self._brain_task is not None:
             self._brain_task.cancel()
             self._brain_task = None
-        if self.session is not None and self.speeches:
+        for _, say_id, _ in self.speeches:
+            if say_id:
+                self.cut_ids.add(say_id)
+        if self.session is not None and (self.speeches or self._talker_on()):
             try:
                 self.session.interrupt(force=True)
             except RuntimeError as error:
@@ -402,8 +579,13 @@ class ManagerVoice:
     # ----- telling the clients ------------------------------------------------------------------
 
     def _state(self) -> tuple[str, str | None]:
+        agent_state = getattr(self.session, "agent_state", "") if self.session is not None else ""
         if self.speeches:
             return "speaking", self.speeches[0][1] or None
+        if self._talker_on() and agent_state == "speaking":
+            return "speaking", None
+        if self._talker_on() and (agent_state == "thinking" or self.calls):
+            return "thinking", None
         if time.monotonic() < self.thinking_until:
             return "thinking", None
         if self.user_speaking and self.addressed:

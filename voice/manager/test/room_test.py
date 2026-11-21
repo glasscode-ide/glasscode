@@ -97,6 +97,10 @@ async def main():
         who = packet.participant.identity if packet.participant else "?"
         events.append((time.monotonic() - T0, packet.topic, message))
         log(f"      <- {packet.topic} from {who}: {message}")
+        if packet.topic == "manager.tool" and message.get("to") == ME:
+            # As a talker client: the manager takes the request on and answers later.
+            answers = {"ask_manager": "started", "list_sessions": "s1: Voice mode, working"}
+            asyncio.create_task(send("manager.result", {"call": message.get("call"), "text": answers.get(message.get("name"), "ok")}))
 
     async def listen(track):
         global tone_frames
@@ -228,6 +232,44 @@ async def main():
     transcript("what is the time")
     mic.play(load("u2.wav"))
     await wait_for("always: heard without the name", is_heard("what is the time"), 20, mark)
+
+    if os.environ.get("MANAGER_TALKER"):
+        log("--- 10. a talker client: the worker answers itself and hands the work over")
+        await send("manager.say", {"id": "x", "text": "ok"})  # ends the "thinking" of step 9
+        await wait_for("idle before the talker", is_state("idle"), 12)
+        await send("manager.config", {"listen": "always", "talker": True, "place": "glasses"})
+        await asyncio.sleep(0.5)
+        mark, before = len(events), tone_frames
+        transcript("what needs me")
+        mic.play(load("u2.wav"))
+        heard = await wait_for("heard, marked as handled", lambda e: is_heard("what needs me")(e) and e[2].get("handled") is True, 20, mark)
+        await wait_for("the talker's own words", lambda e: e[1] == "manager.said" and e[2].get("text") == "I'll check.", 15, mark)
+        tool = await wait_for("its tool runs here", lambda e: e[1] == "manager.tool" and e[2].get("name") == "ask_manager", 15, mark)
+        if tool and tool[2].get("arguments") != {"request": "what needs me"}:
+            failures.append("tool arguments")
+            log(f"FAIL  tool arguments are {tool[2].get('arguments')}")
+        await wait_for("thinking while the manager works", is_state("thinking"), 10, mark)
+        mark = len(events)
+        await send("manager.say", {"id": "ask-1", "text": "Two sessions need you."})
+        await wait_for("the manager's answer is spoken", is_state("speaking", "ask-1"), 8, mark)
+        await wait_for("idle after the answer", is_state("idle"), 15, mark)
+        if tone_frames - before <= 20:
+            failures.append("talker audio")
+        await expect_none("the manager's answer is not told as the talker's", lambda e: e[1] == "manager.said" and "Two sessions" in e[2].get("text", ""), 1, mark)
+
+        log("--- 11. talked over: the rest of that answer is not spoken")
+        await asyncio.sleep(1.0)
+        mark = len(events)
+        await send("manager.say", {"id": "ask-2", "text": "This is a long answer from the manager. " * 5})
+        await wait_for("speaking ask-2", is_state("speaking", "ask-2"), 8, mark)
+        await asyncio.sleep(1.5)
+        transcript("wait, stop")
+        mic.play(load("u3.wav"))
+        await wait_for("no longer speaking ask-2", lambda e: e[1] == "manager.state" and e[2].get("id") != "ask-2", 8, mark)
+        await asyncio.sleep(1.0)
+        mark = len(events)
+        await send("manager.say", {"id": "ask-2", "text": "And here is more of the same answer."})
+        await expect_none("a later sentence of it is dropped", is_state("speaking", "ask-2"), 3, mark)
 
     await room.disconnect()
     log("disconnected")
