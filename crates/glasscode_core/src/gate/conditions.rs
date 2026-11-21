@@ -97,8 +97,27 @@ fn hours_text(local: (u16, u16), days: u8) -> String {
     format!("{} to {}, {on}", time(local.0), time(local.1))
 }
 
-fn path_matches(glob: &str, path: &Path, home: &Path) -> bool {
+/// A path as text with `/` between its parts, `.` and `..` taken out (by the text only: no link
+/// is read, as `decide` does no IO).
+fn lexical(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
+    let absolute = text.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    if absolute { format!("/{joined}") } else { joined }
+}
+
+fn path_matches(glob: &str, path: &Path, home: &Path) -> bool {
+    let text = lexical(path);
     if let Some(rest) = glob.strip_prefix("~/") {
         return glob_match(&format!("{}/{rest}", home.to_string_lossy().replace('\\', "/").trim_end_matches('/')), &text);
     }
@@ -158,6 +177,20 @@ mod tests {
 
     fn facts<'a>(branches: &'a [String], paths: &'a [PathBuf], local_minutes: Option<i64>) -> Facts<'a> {
         Facts { branches, paths, local_minutes, home: Path::new("/home/dev") }
+    }
+
+    /// A path condition is matched on the path with `.` and `..` taken out: an op's path written
+    /// through a sibling (`app/../vault/x`) is the path it names, and is kept out the same way.
+    #[test]
+    fn a_path_through_dot_dot_is_the_path_it_names() {
+        let paths = Condition::Paths { deny: vec!["vault/**".into(), "~/secret/**".into(), "/srv/keys/**".into()] };
+        for through in ["/code/app/../vault/x.txt", "/home/dev/work/../secret/key", "/srv/./keys/a", "/srv/app/../keys/a"] {
+            let path = [PathBuf::from(through)];
+            assert!(matches!(paths.check(&facts(&[], &path, None)), Verdict::Never(_)), "{through}");
+        }
+        // `..` that leaves the kept folder is out of it.
+        let out = [PathBuf::from("/code/vault/../app/x")];
+        assert_eq!(paths.check(&facts(&[], &out, None)), Verdict::Pass);
     }
 
     #[test]
