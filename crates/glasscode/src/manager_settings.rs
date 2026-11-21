@@ -236,6 +236,10 @@ impl Workspace {
         let Some(form) = self.manager.page.form.get() else { return };
         let text = form.input(field).read(cx).text();
         let changed = apply(&mut self.state.manager, field, &text);
+        if changed && field == Field::Model {
+            // Another model gets its own tool check at its next question.
+            self.mchat.codex_tools_refused = false;
+        }
         if changed {
             form.edits.set(form.edits.get() + 1);
             cx.notify();
@@ -266,10 +270,9 @@ impl Workspace {
         if self.state.manager.brain == agent {
             return;
         }
-        if let Err(why) = brain_choice(agent, self.codex_brain_blocked()) {
-            self.show_toast(why, cx);
-            return;
-        }
+        // Its default model works (`runtime::codex::DEFAULT_MODEL`): a refusal of the model it had
+        // before is no longer this choice's.
+        self.mchat.codex_tools_refused = false;
         if let Some(form) = self.manager.page.form.get() {
             form.model.update(cx, |input, cx| input.set_text("", cx));
         }
@@ -283,11 +286,11 @@ impl Workspace {
         );
     }
 
-    /// This Codex cannot be the manager's brain: its version is known to keep tools no flag turns
-    /// off, or its tool check found such tools in this run.
+    /// Codex thinks for the manager with a model that cannot be its brain: one known to bring tools
+    /// no flag turns off, or one whose tool check found such tools in this run.
     pub(crate) fn codex_brain_blocked(&self) -> bool {
-        let version = self.cli_status.iter().find(|s| s.name == "Codex").and_then(|s| s.installed.as_deref());
-        self.mchat.codex_tools_refused || glasscode_core::runtime::codex::brain_blocked(version)
+        let settings = &self.state.manager;
+        codex_blocked(settings.brain, settings.model.as_deref(), self.mchat.codex_tools_refused)
     }
 
     /// Add the teammate typed into the fields of Teammates.
@@ -896,10 +899,14 @@ mod tests {
     /// the choice is refused with the sentence Settings shows; Claude, and a Codex not known to,
     /// may be.
     #[test]
-    fn a_blocked_codex_cannot_be_picked_as_the_brain() {
-        assert_eq!(brain_choice(AgentKind::Codex, true), Err("Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off)."));
-        assert_eq!(brain_choice(AgentKind::Codex, false), Ok(()));
-        assert_eq!(brain_choice(AgentKind::Claude, true), Ok(()));
+    fn codex_is_blocked_by_its_model_not_its_version() {
+        // Its default model shows only the code-mode tools: Codex can think for the manager.
+        assert!(!glasscode_core::runtime::codex::model_blocked(crate::manager_lanes::default_model(AgentKind::Codex)));
+        assert!(!codex_blocked(AgentKind::Codex, None, false));
+        assert!(codex_blocked(AgentKind::Codex, Some("gpt-5.6-luna"), false), "its sub-agent tools stay under every switch");
+        assert!(codex_blocked(AgentKind::Codex, None, true), "a tool check that refused this run's tools");
+        assert!(!codex_blocked(AgentKind::Claude, Some("gpt-5.6-luna"), true));
+        assert!(glasscode_core::runtime::codex::BRAIN_BLOCKED.contains("gpt-5.6-sol"));
     }
 
     #[test]
@@ -995,10 +1002,11 @@ mod tests {
     }
 }
 
-/// Whether the person may make `agent` the manager's brain: not a Codex that keeps tools Glasscode
-/// cannot switch off (its first question would fail closed); the sentence says why.
-pub(crate) fn brain_choice(agent: AgentKind, codex_blocked: bool) -> Result<(), &'static str> {
-    if agent == AgentKind::Codex && codex_blocked { Err(glasscode_core::runtime::codex::BRAIN_BLOCKED) } else { Ok(()) }
+/// Whether Codex thinks for the manager with a model that cannot be its brain (its first question
+/// would fail closed): `model` as Settings names it (none: [`crate::manager_lanes::default_model`]),
+/// `refused`: its tool check refused this run's tools.
+pub(crate) fn codex_blocked(brain: AgentKind, model: Option<&str>, refused: bool) -> bool {
+    brain == AgentKind::Codex && (refused || glasscode_core::runtime::codex::model_blocked(model.unwrap_or(crate::manager_lanes::default_model(brain))))
 }
 
 impl Workspace {
