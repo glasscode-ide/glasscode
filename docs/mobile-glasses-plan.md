@@ -48,19 +48,20 @@
 | Identity | its own P-256 key, pinned on the Mac (`authority/devices.json`) and on the server (`authorized_keys`, forced command) | none: whoever holds the token |
 | Does | sessions, view-only terminal (SwiftTerm), answers, Today, approvals, push, widgets, Live Activity | lens UI (DAT 1.0.1: Core, Display, Inputs, Speech), Neural Band browsing, the manager's LiveKit voice room, the old ElevenLabs copilot, wake word |
 | Signs Mac input (#288) | not yet: the Mac refuses its input until it does | no |
-| Ran on hardware | yes (it has end-to-end tests against the Docker server) | not recorded: "It builds; it has not run" (`voice/manager/README.md`) |
+| Ran on hardware | not checked here; `architecture.md` lists end-to-end tests against the Docker server | not recorded: "It builds; it has not run" (`voice/manager/README.md`) |
 
 **The owner's choice (2026-11-21): the glasses app is the one app.** Glasscode for iPhone is retired. What stays of it is its server side, which the glasses app reuses: `phones.*`, `gate --device`, the allow-list, push.
 
 ### The shared-token door (a security item either way)
 
-`voice/server.mjs` listens on `0.0.0.0:4517`. It runs the `glasscode` command for any request that carries the shared token (or comes from loopback): `session send`, `session new`, `pr build`, `board add`, `manager ask`, `manager voice-token`. The gate sees a `Terminal` caller, so at v2 the acts wait on cards and the questions are "outside" words. But `manager.voice_token` refuses only agents (`ops_run.rs`, `manager_voice_token`), so **anyone with the token on the network gets a pass into the manager's voice room as the person**. That breaks G-R8's last rule today. Slice G02 closes it first.
+`voice/server.mjs` listens on `0.0.0.0:4517`. It runs the `glasscode` command for any request that carries the shared token (or comes from loopback): `session send`, `session new`, `pr build`, `board add`, `manager ask`, `manager voice-token`. The gate sees a `Terminal` caller, so at v2 the acts wait on cards and the questions are "outside" words. But `manager.voice_token` refuses only agents (`ops_run.rs`, `manager_voice_token`), so **anyone with the token on the network gets a pass into the manager's voice room as the person**. That breaks G-R8's last rule today. Worse, the relay host (`glasscoded relay`, `relay_link.rs`) joins relayed connections to `127.0.0.1:4517`, so `server.mjs` sees them as loopback and asks for no token: the relay's shared secret alone is enough. No fix for either is open on GitHub today. Slice G02 closes both first; after it, the current glasses app cannot reach the Mac until the new one (G11).
 
 ### The manager's side
 
 - **Chat** (M52): every question goes through `manager_chat.rs` into one conversation (`~/.glasscode/manager/conversation/`), by topic. Session and PR references become chips; "Show me" chips move the window when accepted. The focus is a `ui.state` snapshot taken when the message is sent.
 - **Whose words** (D1): composer text is tier 1. Device and voice input are tier 2. Tier 2 cannot back a chat grant (D3), and a spoken "yes" never binds.
 - **Navigation and acts** are registry ops: `ui.open`, `ui.panel`, `ui.state`, `session.open`, `worktree.open` (Window host), `session.send`, `session.answer`, `session.keys`, `session.new`, `pr.view`, `pr.checks`, `pr.diff`, `approvals.list`, `approvals.decide`.
+- **Who is home when you walk away.** Under Automatic with a server paired, the Mac is home only while the person was present at it for a minute (`home::mac_should_be_home`, `PRESENT_FOR_MS`; presence is the Mac's own input). So away from the desk **the server is normally home**, even with the Mac awake. The server's manager acts only on the server's own sessions: for a Mac session every op but a window op answers "runs on the Mac; the server has no handler for it yet" (`brain_host.rs`, `run_op`), and window ops wait for the Mac.
 - **The server as home** (M57, M58): glasscoded's chat lane answers the newest unanswered message in the synced conversation, checking every 2 seconds, and posts the answer when it is complete (no streaming). The phone has no way to post a question there: `manager.*` is not in `PHONE_ALLOWED`, and nothing tells a phone where the manager is home (`state` does not say; `home.*` is machine-only).
 - **Voice**: the LiveKit room (`voice/manager`) turns speech into text and back; the device that heard a sentence asks the brain. Its token is a Window op: the LiveKit keys are in the Mac's Keychain, so no token can be made while the Mac sleeps. No real speech service has been tried.
 
@@ -91,7 +92,8 @@ Each flow starts with the glasses on, the app connected, and the manager on. "Pi
 
 **F4. "Run the tests."** "This" is the session on the lens (the focus).
 - In a **Standard** project the manager may drive sessions: it sends "run the tests" to that session. The lens shows the action line *Asked checkout-fix to run the tests*. When the turn ends, the turn report comes back as a lens note.
-- In a **Careful** project (this one) the manager may not, and the device's words are tier 2, so it cannot use a grant. It offers a **draft**: *Send to checkout-fix: "Run the tests"*, with Send. Pinch Send: the phone sends it with its own signed `sessions.send` (the person's own input, as typing in the terminal). No card, no grant, and the person saw the exact text and target.
+- In a **Careful** project (this one) the manager may not, and the device's words are tier 2, so it cannot use a grant. Its `session.send` becomes a **card**: *Send to checkout-fix: "Run the tests"*, with Allow and Deny. Pinch Allow: the phone signs `approvals.decide` over the op's arguments, and the manager's send runs through the gate and the effect ledger, as any approved card does. One pinch, through the wall that exists.
+- Considered and not proposed: a "draft" the phone sends as the person's own input. It would put text the manager wrote into a session as the person's, with no card and no effect record, and keep the session's person profile (`control_mark_driven` skips phones); D1 ranks text Glasscode wrote as "never".
 
 **F5. "Tell that session to rebase on main."** As F4. "That" is the focus. If the name heard is unsure ("checkout" matches two sessions), the lens shows both and asks; nothing is sent until one is picked.
 
@@ -101,9 +103,11 @@ Each flow starts with the glasses on, the app connected, and the manager on. "Pi
 
 **F8. A card that needs you.** "Message Sam that the fix is ready." The outbox drafts it; sending needs the person's OK. The lens shows the card with the **full** text. Allow is offered on the lens only when the whole payload fits on it; otherwise *Read it on the phone*, and Allow is there. The phone signs `approvals.decide` over the op's argument hash. A spoken "yes" does nothing.
 
-**F9. The Mac is asleep.** The server is home. F1 to F8 work the same, through the server. What only the Mac can do (its window, the messenger) is queued and said: "That waits for your Mac."
+**F9. Away from the desk.** This is the normal case, not an edge case (section 2: the server is home when the person has not used the Mac for a minute).
+- **The Mac is awake** (lid open at home or at the office): proposed (O9), a paired device's use counts as presence, so the Mac stays home while the glasses are in use and it is reachable. F1 to F8 work as at the desk, through the Mac's door.
+- **The Mac sleeps**: the server is home. Questions, reads, answers from code and cards work. Acting works on the server's own sessions, which is where Server mode put the open ones before you left. A Mac session cannot be driven: the manager says so ("checkout-fix is on your Mac, which is asleep"). What only the Mac can do (its window, the messenger) is queued and said: "That waits for your Mac."
 
-**F10. "Show it on my Mac."** Only when the person says so: the manager uses `ui.open` on the Mac (the Mac must be reachable). Otherwise a device's question never moves the Mac's window; a move it would make becomes a *Show me* chip in the Mac's conversation.
+**F10. "Show it on my Mac."** Where "go to" shows is decision O8. Proposed: the lens always; the Mac's window as well while the Mac is home and you were at it (D5's presence), as the old glasses app moved the IDE to the session it opened; and always when you say "on my Mac". Otherwise a move becomes a *Show me* chip in the Mac's conversation.
 
 ## 4. The shape
 
@@ -147,11 +151,10 @@ New ops, on the registry (`table_manager.rs`, `table_device.rs`) and in both all
 | `manager.conversation` | phone, read | the conversation since a cursor, for the phone's screen |
 | `manager.stop` (phone form) | phone | stop the answer it asked for (only its own) |
 | `device.open` | the chat lane only | put a session, PR, project, Today or the conversation on the asking device. Navigate class. Only within 30 s of that device's message (the `may_move_screen` rule, made per surface). |
-| `device.presence` | phone | glasses connected, worn, lens on; what the voice is doing. Drives the title bar indicator; the server passes it to the Mac with the sync. |
-| `device.draft` | the chat lane | a proposed input for a session (text and target) that the person sends from the device with their own signed `sessions.send` |
+| `device.presence` | phone | glasses connected, worn, lens on; what the voice is doing. Drives the title bar indicator; the server passes it to the Mac with the sync. With O9, use through the Mac's door counts as presence for home. |
 
 - **Focus.** The phone sends its focus (what the lens shows: view, session, PR, project) with each question. The home checks the ids and builds a `DeviceSnapshot`, used as `UiSnapshot` is: "this", "here" and "that" resolve from it, and the brain is told the person is on their glasses.
-- **Showing.** From a device's question, "show" means the device (`device.open`). The Mac's window moves only on F10. Window ops from a device's turn otherwise become *Show me* chips on the Mac.
+- **Showing.** From a device's question, "show" means the device (`device.open`), and the Mac's window as decided in O8 (F10). A window move outside that rule becomes a *Show me* chip on the Mac.
 - **The server.** glasscoded learns `manager.ask` (phone form) and `manager.home`; its chat lane wakes when a question is posted instead of every 2 seconds, and streams; `device.open` on the server sends the event down the asking phone's connection.
 - **The conversation stays one.** What is said from the glasses is in the Mac's Manager page and chat bubble, with a small glasses mark.
 
@@ -205,7 +208,7 @@ Optional (decision O5): a wake word, the manager's name, heard on the phone on-d
 4. **Answer**: up to five short lines, said aloud at the same time; chips under it (sessions, PRs) as buttons. *More on the phone* when longer.
 5. **Session** (from `device.open`): title, branch, state, last reply in two lines, the open question.
 6. **Pull request**: title, checks by name, reviews, what CI says.
-7. **Draft**: "Send to checkout-fix: …" with the full text, Send and Cancel.
+7. **A session act to approve**: "Send to checkout-fix: …" with the full text, Allow and Deny (a card, as in F4).
 8. **Card to approve**: the op's own sentence and its full payload, Allow and Deny. Allow only when the payload fits; else *Read it on the phone*.
 9. **Question from a session**: its options as rows; "allow for good" is left out.
 10. **Note**: a session finished, failed, or needs you. Pinch opens it; swipe left lets it go.
@@ -223,8 +226,8 @@ The phone's own screen shows the same conversation in full, the session and PR v
 | Ops as the person | none beyond the list: `gate::phone()` stops allowing every op that is not person-only, and runs `mode_raised` | Enforced: gate | `gate/mod.rs` `phone()`; `caller::rule` agrees |
 | Its words | tier 2 (`Device`), typed or spoken | Enforced: words ledger | `words.rs` (`command_origin`, `tier_of`) unchanged |
 | What the manager does on its question | the project's level default; no chat grant (tier 2 cannot back one) | Enforced: gate (`Manager` chat lane) | unchanged |
-| Beyond the level | a card; the phone approves with `approvals.decide` signed over the argument hash, only while the glasses are worn or the phone is unlocked; from the lens only when the payload fits | Enforced: gate `PHONE_CONFIRMS` and the signature; the "fits" length is checked by the home, not the app | `gate/mod.rs`, `today.rs` |
-| The person's own input | drafts and direct input go as signed `sessions.send/answer`: agent sessions only, no `!`, no `BTab`, no keys while a question is open, no "allow for good" | Enforced: `phone_session_refusal`, `remote::check_relayed` (#288) | unchanged; the app now signs |
+| Beyond the level | a card; the phone approves with `approvals.decide` signed over the argument hash; from the lens only when the payload fits; only while the glasses are worn or the phone is unlocked | Enforced: gate `PHONE_CONFIRMS`, the signature, and the payload length (the home checks it). Guarded: "worn or unlocked" and "it was shown on the lens" are what the phone app says | `gate/mod.rs`, `today.rs` |
+| The person's own input | answers to a session's question, and words the person speaks or types for a session, go as signed `sessions.send/answer`: agent sessions only, no `!`, no `BTab`, no keys while a question is open, no "allow for good". Never text the manager wrote. | Enforced: `phone_session_refusal`, `remote::check_relayed` (#288) | unchanged; the app now signs |
 | Spoken yes | never binds | Enforced: only a signed decide approves | unchanged |
 | Person-only ops (levels, policy, pairing, pause release, settings) | never from a device | Enforced: gate | unchanged |
 | Terminal | view only | Enforced: tmux `-r` (#305) | unchanged |
@@ -281,6 +284,8 @@ Measured so far: the Claude brain's first text 1.9 to 3.2 s and its full answer 
 | O5 | How to talk | Pinch from anywhere; the wake word as an option, off. |
 | O6 | Hardware and Meta | Do you have Ray-Ban Display with the Neural Band, Developer Mode on, a Meta account in a supported country? G01 needs them. Move DAT from 1.0.1 to 1.1.0. |
 | O7 | The Mac's door | The app's own door on the tailnet address (section 4). The alternative, macOS Remote Login with a forced command, needs an admin setting and writes `~/.ssh/authorized_keys` on the Mac. |
+| O8 | Where "go to" shows | The lens always; the Mac's window as well while the Mac is home and you were at it; always when you say "on my Mac" (F10). The glasses icon goes in the title bar, beside the Server mode switch. |
+| O9 | Home while you use the glasses | Use through the Mac's door counts as presence, so an awake Mac stays home and its sessions can be driven from the glasses. Without it, away from the desk the server is home and Mac sessions cannot be driven (F9). |
 
 ## 10. Slices
 
@@ -303,10 +308,15 @@ Order: wave 0 (G00 to G02), wave 1 (G03, G05, G06), wave 2 (G04, G07, G08, G10),
 - **Server:** none.
 
 ### G02 Close the shared-token door (wave 0, S)
-- **Files:** `voice/server.mjs`, `crates/glasscode/src/ops_run.rs` (`manager_voice_token`), `crates/glasscode/src/settings_ui.rs`.
-- **Steps:** bind `server.mjs` to loopback by default; refuse `manager.voice_token` to `Terminal`; say in Settings that off-Mac voice comes with the new app.
-- **Tests:** `voice_token_refused_to_a_terminal`; `voice_token_for_the_person`.
-- **Server:** none. **Windows:** none.
+- **Files:** `voice/server.mjs`, `crates/glasscoded/src/relay_link.rs`, `crates/glasscode/src/ops_run.rs` (`manager_voice_token`), `crates/glasscode/src/settings_ui.rs`.
+- **Steps:**
+  1. bind `server.mjs` to loopback by default;
+  2. the relay's `control` channel no longer joins port 4517 (relayed requests arrive as loopback and skip the token); `ssh` stays;
+  3. refuse `manager.voice_token` to `Terminal` (and to `Session`, `Manager` as today);
+  4. say in Settings that the glasses reach the Mac again with the new app. Until G11 the current glasses app cannot reach the Mac.
+- **Tests:** `voice_token_refused_to_a_terminal`; `voice_token_for_the_person`; `relay_control_channel_is_closed`.
+- **Verify:** `cargo test -p glasscode -p glasscoded`; `curl` from another tailnet device to port 4517 is refused.
+- **Server:** the relay change. **Windows:** none.
 
 ### G03 The device link protocol (wave 1, L)
 - **Files:** new `crates/glasscode_core/src/device_link.rs`; `remote.rs` (events on a connection); `caller.rs`.
@@ -317,68 +327,125 @@ Order: wave 0 (G00 to G02), wave 1 (G03, G05, G06), wave 2 (G04, G07, G08, G10),
 ### G04 The Mac's device door (wave 2, L)
 - **Files:** new `crates/glasscode/src/device_door.rs`; `control_ui.rs` (calls from the door as `Phone{device}`); `workspace.rs`.
 - **Steps:** listen on the tailnet address only while a device is paired; one thread per connection; requests go through the registry and the gate as `Phone{device}`; events out (conversation, notes, presence); close on quit.
+- **Depends on:** G03, G05, G06.
 - **Tests:** `door_refuses_a_lan_address`; `door_caller_is_the_phone`; `door_runs_only_the_list`; `door_closes_without_devices`.
+- **Verify:** `cargo test -p glasscode_core -p glasscode`.
 - **Demonstration:** in a scratch home, a test client with a scratch key pairs, connects and reads `state`; an unpaired key is refused.
+- **Server:** none (the server keeps SSH). **Windows:** not offered.
 
 ### G05 Pairing without a server; Settings › Devices (wave 1, M)
 - **Files:** `crates/glasscode/src/pair_ui.rs`, `settings_ui.rs`, `glasscode_core/src/gate/authority.rs` (`pin_device`).
 - **Steps:** pairing pins the device on the Mac with or without a server; the reply carries the door's address and key, and the server's SSH endpoint when one is paired (`phones.add` as today); Settings › Devices lists them, with Remove (on both ends).
-- **Tests:** `pairing_without_a_server_pins_the_device`; `remove_unpins_on_both`.
+- **Depends on:** G03.
+- **Tests:** `pairing_without_a_server_pins_the_device`; `remove_unpins_on_both`; `pairing_reply_carries_the_door_key`.
+- **Verify:** `cargo test -p glasscode`.
+- **Demonstration:** in a scratch home with no server, pair a test client by its QR payload; Settings › Devices lists it.
+- **Server:** `phones.add` as today when one is paired. **Windows:** not ported (S16).
 
 ### G06 A phone's rights (wave 1, M)
 - **Files:** `crates/glasscode_core/src/gate/mod.rs` (`phone`), `caller.rs` (`rule`), `glasscoded/src/daemon.rs`.
 - **Steps:** section 6's table, as code: the list, `mode_raised` for phones, the approval only while worn or unlocked (a flag the signature covers), the "fits on the lens" length checked by the home.
+- **Depends on:** G03.
 - **Tests:** one per row of the table (`phone_cannot_start_a_bypass_session`, `phone_words_are_tier_two`, `lens_approval_refused_for_a_long_payload`, …).
+- **Verify:** `cargo test -p glasscode_core -p glasscoded`; M02's callers evals.
+- **Server:** the same list in `daemon_refusal`. **Windows:** the same core.
 
 ### G07 The manager over the link (wave 2, L)
 - **Files:** `crates/glasscode/src/manager_chat.rs`, `ops_run.rs`, `glasscode_core/src/ops/table_manager.rs`, new `table_device.rs`, `runtime/chat.rs` (`DeviceSnapshot`), `conversation.rs` (the device mark).
-- **Steps:** `manager.home`, `manager.ask` (phone form, streamed), `manager.conversation`, `manager.stop`; the focus snapshot; the brain's instructions for a device's turn ("the person is on their glasses: show with `device.open`; keep spoken answers short").
-- **Tests:** `device_question_is_tier_two_and_marked`; `focus_resolves_this`; `answer_streams_to_the_asker_only`; `window_move_from_a_device_becomes_a_chip`.
+- **Depends on:** G03, G04, G06.
+- **Steps:** `manager.home`, `manager.ask` (phone form, streamed), `manager.conversation`, `manager.stop`; the focus snapshot; the brain's instructions for a device's turn ("the person is on their glasses: show with `device.open`; keep spoken answers short"); O8's window rule; with O9, door use counts as presence in `home_ui.rs`.
+- **Tests:** `device_question_is_tier_two_and_marked`; `focus_resolves_this`; `answer_streams_to_the_asker_only`; `window_move_follows_o8`; `door_use_keeps_an_awake_mac_home` (O9).
+- **Verify:** `cargo test -p glasscode_core -p glasscode`.
+- **Demonstration:** a test client asks "what needs me?" through the door of a scratch app; the answer streams back, and the Manager page shows the question with the glasses mark.
+- **Server:** G08. **Windows:** builds; no door.
 
 ### G08 The server: the manager for phones (wave 2, L)
 - **Files:** `crates/glasscoded/src/brain.rs`, `daemon.rs`, `manager.rs`, `home.rs`.
 - **Steps:** the phone ops of G07 on glasscoded; the chat lane wakes on a posted question and streams; `device.open` and notes go down the phone's connection; `manager.home` for phones.
-- **Tests:** `phone_asks_the_server_home`; `chat_wakes_on_post`; `server_answer_streams`; on the Docker test server, a paired phone stand-in.
+- **Depends on:** G03, G06, G07.
+- **Tests:** `phone_asks_the_server_home`; `chat_wakes_on_post`; `server_answer_streams`; `mac_session_act_says_why`; on the Docker test server, a paired phone stand-in.
+- **Verify:** `cargo test -p glasscoded`; `script/test-server/run.sh`.
+- **Demonstration:** with the scratch Mac app quit, a phone stand-in asks the server; the answer streams, and reopening the Mac shows it in the conversation.
+- **Server:** this slice. **Windows:** client only.
 
-### G09 Drafts, cards and notes on the device (wave 4, M)
-- **Files:** `gate/pending.rs`, `notify_ui.rs`, `ops_run.rs`, `table_device.rs`.
-- **Steps:** `device.draft`; cards and session questions as device events; notes for turn reports that need the person.
-- **Tests:** `draft_is_sent_only_by_the_phone`; `draft_words_are_not_the_persons`.
+### G09 Cards, questions and notes on the device (wave 4, M)
+- **Files:** `gate/pending.rs`, `notify_ui.rs`, `ops_run.rs`, `table_device.rs`; `crates/glasscoded/src/today.rs`.
+- **Depends on:** G06, G07, G08.
+- **Steps:** pending cards, session questions and turn-report notes as device events on both ends; the lens's Allow only for a payload the home says fits.
+- **Tests:** `card_reaches_the_asking_device`; `lens_allow_refused_for_a_long_payload`; `allow_for_good_never_offered`.
+- **Verify:** `cargo test -p glasscode_core -p glasscode -p glasscoded`.
+- **Demonstration:** in a Careful scratch project, "run the tests" from a test client gives a card; a signed Allow runs the send once.
+- **Server:** the same events from glasscoded. **Windows:** none.
 
 ### G10 The IDE: no tab, a glasses indicator (wave 2, M)
 - **Files:** `right_panel.rs`, `glasscode_ui.rs`, `shell.rs` (`render_title_bar`), `capabilities.rs`, `workspace.rs`, `manager_ui.rs` (the glasses mark).
 - **Steps:** remove the tab and the mirror; the indicator and its panel from `device.presence` (direct or through the server's sync).
+- **Depends on:** G07 (presence).
 - **Tests:** `no_glasscode_tab`; `indicator_states_from_presence`.
-- **Windows:** the indicator shows; no voice.
+- **Verify:** `cargo test -p glasscode`; `GLASSCODE_DEBUG_OPEN` shows each state.
+- **Server:** presence comes with the sync. **Windows:** the indicator shows; no voice.
 
 ### G11 The one app: identity, link and routing (wave 3, XL; L if the `ios/` transport is found)
 - **Files:** `glasses/GlasscodeGlasses/` (renamed Glasscode): new `Link/` (device key in the Secure Enclave, the door carrier, the SSH carrier with swift-nio-ssh, routing by `manager.home`, reconnect), `Pairing/` (QR, `glasscode://pair`), `project.yml` (iOS 26, DAT 1.1.0, no ElevenLabs).
-- **Tests:** unit tests of the link against a stand-in door; the Docker server's phone path.
+- **Depends on:** G03, G04, G05, G08 (the server's ops), O1.
+- **Steps:** the key, both carriers, routing to the home and fallback to the other end, signed input (#288's `input_message`), the old `GlasscodeControl`, `GlasscodeLink`, `GlasscodeConfig` and relay proxy deleted.
+- **Tests:** unit tests of the link against a stand-in door; the Docker server's phone path (`script/test-server`).
+- **Verify:** `xcodebuild test` on the simulator.
+- **Demonstration:** on a phone, pair with a scratch Mac app; the app shows where the manager is home, and asks it.
+- **Server:** uses G08. **Windows:** none.
 
 ### G12 The lens and the band (wave 3, L)
-- **Files:** new `Lens/` (cards of section 5), `Band/` (gestures), the "stay on Glasscode" restart kept.
-- **Tests:** the card builders (pure); the mock device for the session lifecycle (`StayOnTests` keeps working). Whether the mock draws display content is unknown (G01).
+- **Files:** new `Lens/` (cards of section 5), `Band/` (gestures), the "stay on Glasscode" restart kept; `GlasscodeFlow.swift`, `GlasscodeScreens.swift`, `GlassesHUD.swift` deleted.
+- **Depends on:** G01 (which events arrive), G11.
+- **Tests:** the card builders (pure, one per card); the focus and gesture state machine (pure); the mock device for the session lifecycle (`StayOnTests` keeps working). Whether the mock draws display content is unknown (G01).
+- **Verify:** `xcodebuild test`.
+- **Demonstration:** on the glasses, F1 and F2 with a scratch Mac.
+- **Server:** none. **Windows:** none.
 
 ### G13 Speech on the phone (wave 3, L)
-- **Files:** new `Speech/` (on-device STT, TTS by sentence, barge-in, the audio route from G01).
-- **Tests:** the turn-taking state machine (pure), with recorded audio.
+- **Files:** new `Speech/` (on-device speech to text, voices by sentence, barge-in, the audio route from G01); `AudioRoute.swift`, `BackgroundKeepAlive.swift` kept and adapted.
+- **Depends on:** G01, G11.
+- **Tests:** the turn-taking state machine (pure), with recorded audio; the pause length; a pinch stops the voice.
+- **Verify:** `xcodebuild test`.
+- **Demonstration:** on the glasses, ten questions; the time to the first sound is logged.
+- **Server:** none. **Windows:** none.
 
 ### G14 The phone's screens (wave 3, L)
-- **Steps:** the conversation, session and PR views, the view-only terminal, cards, Settings (devices, voice, wake word).
+- **Files:** new `Phone/` (SwiftUI).
+- **Depends on:** G11.
+- **Steps:** the conversation, session and PR views, the view-only terminal, cards with their full payload, Settings (devices, voice, wake word).
+- **Tests:** view models (pure); UI tests in the simulator.
+- **Verify:** `xcodebuild test`.
+- **Demonstration:** the same conversation on the phone and on the Mac's Manager page.
+- **Server:** none. **Windows:** none.
 
 ### G15 Notes and push (wave 4, M)
+- **Files:** `crates/glasscoded/src/push.rs`; the app's notification handling.
+- **Depends on:** G09, G11.
 - **Steps:** the server's push (APNs) for the new bundle id; lens notes when the app is connected, push when it is not.
+- **Tests:** `push_once_per_need` (kept); the app's routing of a push to its card.
+- **Verify:** `cargo test -p glasscoded`; a push on a phone.
+- **Server:** this slice. **Windows:** none.
 
 ### G16 The old voice stack goes (wave 4, M; on O4)
-- **Steps:** section 7's list; the voice screen and microphones start the manager's voice. Option: a room token made on the server from its own LiveKit keys, so the phone can join the room.
+- **Files:** section 7's list; `glasscode_ui.rs`, `voice_view.rs`, `today_ui.rs`, `status_bar.rs`, `settings_ui.rs`.
+- **Depends on:** G02, G10.
+- **Steps:** delete the list; the voice screen and microphones start the manager's voice (`manager_voice.rs`). Option: a room token made on the server from its own LiveKit keys, so the phone can join the room.
+- **Tests:** `mic_starts_the_managers_voice`; the build has no reference to port 4517.
+- **Verify:** `cargo test -p glasscode`; `cargo check` for Windows.
+- **Server:** the relay commands go. **Windows:** no voice, as today.
 
 ### G17 Latency and a soak (wave 4, S)
+- **Depends on:** G07, G08, G13.
 - **Steps:** measure section 8's targets; a two-hour walk with the glasses (Mac home, then server home, then a switch).
+- **Verify:** the numbers in `docs/glasses-proofs.md`.
 
 ### G18 Distribution (wave 4, S)
+- **Depends on:** G11 to G14.
 - **Steps:** TestFlight for the owner; Meta's private Beta release channel; the MetaAppID, client token and team id from Meta's developer center (never in the repository).
 
 ### G19 Docs (wave 4, S)
+- **Depends on:** everything before it.
 - **Steps:** `architecture.md`'s iPhone section becomes "The glasses app"; `CONNECTIVITY.md`; `voice/README.md`; this plan's results.
 
 ## 11. Risks
@@ -389,10 +456,11 @@ Order: wave 0 (G00 to G02), wave 1 (G03, G05, G06), wave 2 (G04, G07, G08, G10),
 | Public publishing is not open | Meta says submission is "coming soon" | Private channel and TestFlight only |
 | The microphone | The glasses' microphone as a Bluetooth call may end the lens session; the phone's microphone in a pocket hears less | G01.1 measures it before any speech work |
 | Background | iOS suspends apps; today the app plays silence to stay alive | G01.2; acceptable for TestFlight, an App Review risk later |
+| Away from the desk the server is home | Its manager cannot drive Mac sessions; its chat does not stream yet | O9 keeps an awake Mac home while the glasses are used; Server mode moves the open sessions before you leave; G08 is on the critical path |
 | Brain latency | 2 to 6 s for a brain answer | Answers from code first, streaming, an earcon, the lens shows progress |
 | The server does not stream yet | +2 s and whole answers through the server | G08 |
 | Mishearing names | "checkout" matches two sessions | The lens shows what was heard and asks when unsure; nothing acts on an unsure target |
-| Careful projects ask a lot | Tier 2 means cards or drafts for most acts | Drafts the person sends, quick approval on the lens |
+| Careful projects ask a lot | Tier 2 means a card for most acts | One pinch to approve on the lens; the full text is shown |
 | A new door on the Mac | A listening socket | Tailnet only, closed without devices, handshake first, the same list as the server, its own tests |
 | Tailscale on the phone | The VPN can be off or relayed | The app says so on the glance; G01.6 measures |
 | Parallel security work | `caller.rs`, `gate/mod.rs`, `daemon.rs` change often | Small slices, merge `origin/main` before each |
