@@ -104,12 +104,18 @@ pub fn ours_in_list(list: &Value, file: &Path, group: usize) -> Vec<(String, Str
         .collect()
 }
 
+/// The words after the program for `codex app-server`: its update check off (versions are
+/// Glasscode's), then the subcommand.
+pub fn app_server_args() -> Vec<String> {
+    vec!["-c".into(), crate::agents::CODEX_NO_UPDATE_CHECK.into(), "app-server".into()]
+}
+
 /// `codex app-server`'s `hooks/list` for `cwd`, as the account at `codex_home` sees it: the program
 /// is asked on stdio (`initialize`, `initialized`, `hooks/list`) and stopped. It runs a process:
 /// never on the main thread.
 pub fn hooks_list(program: &str, first: &[String], codex_home: &Path, cwd: &Path, env: &HashMap<String, String>) -> anyhow::Result<Value> {
     let mut cmd = Command::new(program);
-    cmd.args(first).arg("app-server").envs(env).env("CODEX_HOME", codex_home).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(first).args(app_server_args()).envs(env).env("CODEX_HOME", codex_home).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = cmd.spawn().context("codex app-server did not start")?;
     let mut stdin = child.stdin.take().context("no stdin")?;
     let stdout = child.stdout.take().context("no stdout")?;
@@ -229,6 +235,12 @@ pub fn without_brief_trust(config: &str, hooks_file: &Path, group: usize) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `codex app-server` runs with Codex's update check off, the option before the subcommand.
+    #[test]
+    fn app_server_never_checks_for_updates() {
+        assert_eq!(app_server_args(), ["-c", "check_for_update_on_startup=false", "app-server"]);
+    }
 
     /// Glasscode's group goes in once, in its place; the person's own hooks stay as they are.
     #[test]

@@ -330,7 +330,13 @@ impl PolicySet {
     /// D17: whether the manager's brain may read `key`. A project bound to one account
     /// (`model_account`) only when that is the manager's account (`manager_account`).
     pub fn manager_may_read(&self, key: &ProjectKey) -> bool {
-        self.policy.of(key).model_account.as_deref().is_none_or(|only| self.manager_account.as_deref() == Some(only))
+        self.account_may_read(key, self.manager_account.as_deref())
+    }
+
+    /// D17: whether a model on `account` may read `key` (a headless run of Glasscode's own, such as
+    /// moving in's study): a project bound to one account only on that account.
+    pub fn account_may_read(&self, key: &ProjectKey, account: Option<&str>) -> bool {
+        self.policy.of(key).model_account.as_deref().is_none_or(|only| account == Some(only))
     }
 
     /// Of `keys`, the projects the manager's brain may not read (D17): what its reads with no

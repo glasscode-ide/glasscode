@@ -180,11 +180,16 @@ fn is_folder(path: &Path) -> bool {
 pub fn session_profile(origin: SessionOrigin, agent: AgentKind, policy: &ProjectPolicy, facts: &ProfileFacts) -> SessionProfile {
     let restricted = origin != SessionOrigin::Person;
     let mut denied = class_paths(&DENIED);
+    let mut read_only_classes = READ_ONLY.to_vec();
     if restricted {
-        denied.extend(class_paths(&[PathClass::Handoff]));
+        // Trusted memory too (lead decision, 2026-11-21): the files hold every project's, and
+        // employer's, memory; an automation or quarantine session reads its own project's
+        // through `glasscode memory`, which keeps it to that project.
+        denied.extend(class_paths(&[PathClass::Handoff, PathClass::TrustedMemory]));
+        read_only_classes.retain(|class| *class != PathClass::TrustedMemory);
         denied.extend(facts.other_worktrees.iter().cloned());
     }
-    let read_only = class_paths(&READ_ONLY);
+    let read_only = class_paths(&read_only_classes);
     let label = match origin {
         SessionOrigin::Person => "person",
         SessionOrigin::Automation => "automation",
@@ -455,7 +460,8 @@ fn codex_no_tools() -> Vec<String> {
     for feature in CODEX_FEATURES_OFF {
         args.extend(["--disable".to_string(), feature.to_string()]);
     }
-    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#] {
+    // Its own update check too: versions are Glasscode's, and a run asks no release server.
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#, crate::agents::CODEX_NO_UPDATE_CHECK] {
         args.extend(["-c".to_string(), setting.to_string()]);
     }
     args
@@ -616,6 +622,8 @@ fn gate_path(ctx: &GateCtx, path: &Path, writes: bool) -> Result<(), String> {
     let _ = ctx;
     match paths::class_of(path) {
         Classified::Class(class) if DENIED.contains(&class) => Err(format!("{} is Glasscode's or a credential: sessions do not read it", path.display())),
+        // The gate guards only the sessions the person does not drive (`gate_tool`).
+        Classified::Class(PathClass::TrustedMemory) => Err(format!("{} is Glasscode's memory: a session the manager drives reads its project's with `glasscode memory search`", path.display())),
         Classified::Class(PathClass::Handoff) => Err(format!("{} holds other work's handoffs", path.display())),
         Classified::Class(class) if writes && READ_ONLY.contains(&class) => Err(format!("{} is read-only for sessions", path.display())),
         Classified::InsideUnlisted => Err(format!("{} is Glasscode's own: sessions do not touch it", path.display())),

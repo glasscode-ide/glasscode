@@ -248,6 +248,7 @@ mod tests {
             &["--disable", "goals"],
             &["--disable", "image_generation"],
             &["-c", r#"web_search="disabled""#],
+            &["-c", "check_for_update_on_startup=false"],
             &["-c", "skills.include_instructions=false"],
             &["-c", "skills.bundled.enabled=false"],
             &["-c", "sandbox_workspace_write.network_access=false"],
