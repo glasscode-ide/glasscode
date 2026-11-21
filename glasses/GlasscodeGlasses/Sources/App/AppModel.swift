@@ -381,7 +381,8 @@ final class AppModel: ObservableObject {
         for a in approvals {
             guard let id = a.int("id"), !seenApprovals.contains(id) else { continue }
             seenApprovals.insert(id)
-            let payload = a.string("command") ?? ""
+            // All of what it does (the Mac's `card_payload`), else its command line.
+            let payload = a.string("payload").flatMap { $0.isEmpty ? nil : $0 } ?? a.string("command") ?? ""
             let card = LensModel.ApprovalCard(id: id, launch: launch, who: a.string("who") ?? "", what: a.string("what") ?? "", payload: payload, fits: payload.count <= LensModel.lensFits)
             if case .listening = model.card {} else if case .working = model.card {} else { model.show(.approval(card)) }
         }

@@ -487,7 +487,9 @@ pub fn answers_the_person(caller: &crate::caller::Caller, last_person_ms: Option
 
 /// Whether an op moves the window (an op of the Navigate class that does more than say a line).
 pub fn moves_window(op: &crate::ops::Op) -> bool {
-    op.spec.effect == crate::ops::EffectClass::Navigate && !matches!(op.name(), "ui.say" | "manager.say")
+    // `device.open` shows a place on the glasses' lens, not in the window (G07): its own rule (in
+    // answer to that device's question of the last 30 s) is its handler's.
+    op.spec.effect == crate::ops::EffectClass::Navigate && !matches!(op.name(), "ui.say" | "manager.say" | "device.open")
 }
 
 /// A "Show me" chip's matter (`Kind::Nudge`): the op it runs, for the person, when taken.
@@ -1352,6 +1354,8 @@ mod tests {
         assert_eq!(show_me_op(&show_me_matter(&op)), Some(op));
         // Saying a line moves nothing.
         assert!(!moves_window(&crate::ops::typed("ui.say", serde_json::json!({ "text": "hi" })).unwrap()));
+        // The lens is not the window: the glasses' question is away from it.
+        assert!(!moves_window(&crate::ops::typed("device.open", serde_json::json!({ "place": "pr:42" })).unwrap()));
     }
 
     #[test]

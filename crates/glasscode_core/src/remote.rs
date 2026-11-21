@@ -379,6 +379,34 @@ pub struct TodayApproval {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_title: Option<String>,
+    /// All of what it does, as the person reads it before allowing it: the command line, or the
+    /// op's arguments (G09). The glasses allow it only when this fits on the lens.
+    #[serde(default)]
+    pub payload: String,
+    /// It leaves the Mac or removes something: allowed only where its whole payload shows (the
+    /// phone's card, or the lens when it fits), never from a popup.
+    #[serde(default)]
+    pub review: bool,
+}
+
+/// What a card does, in full, for the person to read before they allow it: the command line it came
+/// as, or else the op and its arguments, one per line (G09).
+pub fn card_payload(command: &str, op: Option<&crate::ops::Op>) -> String {
+    if !command.trim().is_empty() {
+        return command.trim().to_string();
+    }
+    let Some(op) = op else { return String::new() };
+    let mut lines = vec![op.name().to_string()];
+    if let Some(args) = op.args.as_object() {
+        for (key, value) in args {
+            let text = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            lines.push(format!("{key}: {text}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// What a phone did on Today, for the Mac to carry out (`today.op`).

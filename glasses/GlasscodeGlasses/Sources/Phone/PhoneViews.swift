@@ -162,7 +162,7 @@ struct HomeView: View {
             ForEach(Array(approvals.enumerated()), id: \.offset) { _, a in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(a.string("what") ?? "").font(.subheadline.weight(.semibold))
-                    Text(a.string("command") ?? "").font(.footnote.monospaced()).foregroundStyle(.secondary)
+                    Text(a.string("payload").flatMap { $0.isEmpty ? nil : $0 } ?? a.string("command") ?? "").font(.footnote.monospaced()).foregroundStyle(.secondary)
                     HStack {
                         Button("Allow") { decide(a, true) }.buttonStyle(.borderedProminent).tint(.green)
                         Button("Deny") { decide(a, false) }.buttonStyle(.bordered)

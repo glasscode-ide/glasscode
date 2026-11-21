@@ -36,6 +36,8 @@ const IDLE: Duration = Duration::from_secs(120);
 const LOOK_EVERY: Duration = Duration::from_secs(30);
 /// How long a device's use counts as the person being present (O9).
 pub const PRESENT_FOR: Duration = Duration::from_secs(90);
+/// How long a device's question may wait for its answer.
+const ASK_WITHIN: Duration = Duration::from_secs(200);
 /// How long after a device's question the manager may show it a place (`device.open`).
 const OPEN_WITHIN_MS: u64 = 30_000;
 
@@ -80,6 +82,7 @@ struct DeviceAsk {
     device: String,
     request: u64,
     client_id: String,
+    since: Instant,
     /// How much of the answer was sent, and the last activity line.
     sent: usize,
     activity: Option<String>,
@@ -427,6 +430,12 @@ impl Workspace {
 
     /// Four times a second while a device asks something: the answer as it is written.
     pub fn door_fast_tick(&mut self, _cx: &mut Context<Self>) {
+        // A question whose answer never came (the turn ended some other way): let it go, so the
+        // next one is taken and the person's own chat moves the window again.
+        if let Some(ask) = self.door.ask.as_ref().filter(|ask| ask.since.elapsed() > ASK_WITHIN) {
+            let (conn, request) = (ask.conn, ask.request);
+            self.door_answered(conn, request, Err("The manager took too long to answer; the answer comes in the conversation.".into()));
+        }
         let Some(ask) = self.door.ask.as_mut() else { return };
         let Some(turn) = self.mchat.turn.as_ref() else { return };
         let mut lines = Vec::new();
@@ -518,6 +527,11 @@ impl Workspace {
                         self.door.presence.remove(&gone.device);
                     }
                 }
+                // Its question goes with it.
+                if self.door.ask.as_ref().is_some_and(|ask| ask.conn == conn) {
+                    self.door.ask = None;
+                    self.mchat.device_focus = None;
+                }
                 self.door.told_home.remove(&conn);
                 self.door.told_items.remove(&conn);
                 self.door.told_today.remove(&conn);
@@ -578,10 +592,7 @@ impl Workspace {
                 serde_json::to_value(self.today_snapshot(&mac_id, &mac)).map_err(|e| e.to_string())
             }
             "today.op" => match serde_json::from_value::<glasscode_core::remote::TodayOp>(params.clone()) {
-                Ok(op) => {
-                    self.today_apply(op, window, cx);
-                    Ok(json!({ "ok": true }))
-                }
+                Ok(op) => self.today_apply_checked(op, window, cx).map(|()| json!({ "ok": true })),
                 Err(err) => Err(format!("not a Today op: {err}")),
             },
             // Push notifications go through the server; a phone that reaches only this Mac gets
@@ -777,7 +788,7 @@ impl Workspace {
         // ask to see it there.
         let window_moves = self.window_active || glasscode_core::runtime::chat::asks_for_the_mac(&text);
         let now = glasscode_core::clock::now_ms();
-        self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), sent: 0, activity: None, window_moves });
+        self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), since: Instant::now(), sent: 0, activity: None, window_moves });
         self.door.last_ask = Some((device.clone(), conn, now));
         self.mchat.device_focus = Some(glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves));
         let words = glasscode_core::words::record(glasscode_core::words::Origin::Device(device), &text, focus.session.as_deref(), None);

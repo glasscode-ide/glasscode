@@ -329,7 +329,12 @@ impl Workspace {
                 let memory = glasscode_core::memstore::Memory::open();
                 match memory_ask {
                     Asked::Recall(topic) => q::recall(&memory, topic.as_deref()),
-                    Asked::Forget(what) => q::forget(&memory, &what),
+                    // Forgetting lets go of what the person said: never from a device's words (G06,
+                    // tier 2), which a misheard sentence can make.
+                    Asked::Forget(what) => match words.as_ref().and_then(glasscode_core::words::find) {
+                        Some(record) if matches!(record.origin, glasscode_core::words::Origin::Device(_)) => "Forgetting needs your own typed words: write it in the Manager chat on your Mac.".to_string(),
+                        _ => q::forget(&memory, &what),
+                    },
                     Asked::Remember(fact) => match words.as_ref().and_then(glasscode_core::words::find) {
                         Some(record) => q::remember(&memory, &record, &fact),
                         None => "Your words were not recorded, so I kept nothing; say it again in the chat.".to_string(),
