@@ -151,9 +151,10 @@ pub struct Workspace {
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
     pub worktrees: HashMap<String, Vec<Worktree>>,
-    /// The projects whose worktrees git listed at the last read (`refresh_worktrees`): an unread
-    /// or failed list is empty in `worktrees`, and the reconciler must not take it for one.
-    pub worktrees_read: HashSet<String>,
+    /// How git's last read of each project's worktrees went (`refresh_worktrees`): read, or why
+    /// not; none yet just after a start. An unread or failed list is empty in `worktrees`, and the
+    /// reconciler must not take it for one.
+    pub worktree_reads: HashMap<String, Result<(), String>>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
     pub right_tab: RightTab,
@@ -319,7 +320,7 @@ impl Workspace {
             activity: HashMap::new(),
             attention: HashSet::new(),
             worktrees: HashMap::new(),
-            worktrees_read: HashSet::new(),
+            worktree_reads: HashMap::new(),
             changes: Vec::new(),
             changes_for: None,
             right_tab,
@@ -1580,7 +1581,7 @@ impl Workspace {
             .collect();
         let task = cx.background_spawn(async move {
             let lists: Vec<(String, anyhow::Result<Vec<Worktree>>)> = projects.into_iter().map(|(id, root)| (id, git::worktrees(&root))).collect();
-            let read: HashSet<String> = lists.iter().filter(|(_, list)| list.is_ok()).map(|(id, _)| id.clone()).collect();
+            let read: HashMap<String, Result<(), String>> = lists.iter().map(|(id, list)| (id.clone(), list.as_ref().map(|_| ()).map_err(glasscode_core::git::short_error))).collect();
             (lists.into_iter().map(|(id, list)| (id, list.unwrap_or_default())).collect::<HashMap<_, _>>(), read)
         });
         cx.spawn(async move |this, cx| {
@@ -1599,7 +1600,7 @@ impl Workspace {
                     }
                 }
                 this.worktrees = result;
-                this.worktrees_read = read;
+                this.worktree_reads = read;
                 if changed {
                     this.save();
                 }
