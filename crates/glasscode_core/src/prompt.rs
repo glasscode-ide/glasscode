@@ -81,6 +81,68 @@ fn is_footer(line: &str) -> bool {
 /// Only a numbered list with exactly one highlighted entry counts (that is a menu waiting for a
 /// key); a numbered list in the agent's own reply has no highlight and is left alone.
 pub fn parse(screen: &str) -> Option<PendingPrompt> {
+    parse_numbered(screen).or_else(|| parse_unnumbered(screen))
+}
+
+/// A selector whose options carry no numbers, answered with the arrows and Enter: Claude 2.1's
+/// "trust this folder?" (`❯ No, exit` over `  Yes, I trust this folder`, chosen "No, exit"). Only
+/// over the footer "Enter to confirm", so the agent's input box (`❯ Try …`) and its slash-command
+/// list never read as a question. Its options are numbered in screen order.
+fn parse_unnumbered(screen: &str) -> Option<PendingPrompt> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let marked_label = |line: &str| -> Option<String> {
+        let t = strip_frame(line);
+        let first = t.chars().next()?;
+        matches!(first, '❯' | '›' | '▶' | '→').then(|| t[first.len_utf8()..].trim().to_string()).filter(|l| !l.is_empty())
+    };
+    let item = |line: &str| -> bool {
+        let t = strip_frame(line);
+        !t.is_empty() && !is_rule(line) && !is_footer(t) && !t.ends_with('?') && !t.ends_with(':') && t.split_whitespace().count() <= 8 && option_line(line).is_none()
+    };
+    // The footer that confirms with Enter, near the bottom, and the options right above it.
+    let footer = lines.iter().rposition(|l| strip_frame(l).to_lowercase().contains("enter to confirm"))?;
+    if lines[footer + 1..].iter().filter(|l| !strip_frame(l).trim().is_empty()).count() > 3 {
+        return None;
+    }
+    let mut last = footer;
+    while last > 0 && strip_frame(lines[last - 1]).is_empty() {
+        last -= 1;
+    }
+    let last = last.checked_sub(1)?;
+    let mut first = last;
+    while first > 0 && (item(lines[first - 1]) || marked_label(lines[first - 1]).is_some()) && last - first < 6 {
+        first -= 1;
+    }
+    let mut options = Vec::new();
+    let mut selected = None;
+    for line in &lines[first..=last] {
+        let (marked, label) = match marked_label(line) {
+            Some(label) => (true, label),
+            None if item(line) => (false, strip_frame(line).to_string()),
+            None => return None,
+        };
+        if marked {
+            if selected.is_some() {
+                return None;
+            }
+            selected = Some(options.len());
+        }
+        options.push(PromptOption { number: options.len() as u32 + 1, label, wants_text: false });
+    }
+    let selected = selected?;
+    if options.len() < 2 {
+        return None;
+    }
+    // The question: the nearest line above that asks one (it may go on past its '?'), else the
+    // nearest real line.
+    let above = first.saturating_sub(14)..first;
+    let q = above.clone().rev().find(|&i| strip_frame(lines[i]).contains('?')).or_else(|| above.rev().find(|&i| !strip_frame(lines[i]).is_empty() && !is_rule(lines[i])))?;
+    let question = strip_frame(lines[q]).to_string();
+    let detail: Vec<String> = lines[q + 1..first].iter().map(|l| strip_frame(l).to_string()).filter(|l| !l.is_empty() && !is_rule(l)).take(8).collect();
+    Some(PendingPrompt { title: None, question, detail, options, selected })
+}
+
+fn parse_numbered(screen: &str) -> Option<PendingPrompt> {
     let lines: Vec<&str> = screen.lines().collect();
     // The last option line, near the bottom (only footers may follow it).
     let last = lines.iter().rposition(|l| option_line(l).is_some())?;
@@ -248,7 +310,8 @@ pub fn prompt_id(session: &str, prompt: &PendingPrompt) -> String {
 /// "for this session"): the person's alone to choose.
 pub fn grants_for_good(option: &PromptOption) -> bool {
     let label = option.label.to_lowercase().replace('’', "'");
-    ["don't ask again", "do not ask again", "always", "this session", "all edits", "allow all", "remember"].iter().any(|words| label.contains(words))
+    // Trusting a folder lasts too: Claude reads its settings and hooks from then on.
+    ["don't ask again", "do not ask again", "always", "this session", "all edits", "allow all", "remember", "trust this folder"].iter().any(|words| label.contains(words))
 }
 
 /// Why an answer cannot be sent to the prompt on `screen` now.
@@ -402,6 +465,57 @@ mod tests {
     }
 
     // Codex's first-run folder-trust selector: the headline is a statement, not a "?" question.
+    /// Claude 2.1.328's folder trust, as its screen shows it in a new worktree: options without
+    /// numbers, "No, exit" chosen.
+    const CLAUDE_TRUST: &str = "\
+────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /Users/dev/.glasscode/worktrees/app/feat-login
+
+ Quick safety check: Is this a project you created or one you trust? (Like your
+ own code, a well-known open source project, or work from your team). If not,
+ take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+";
+
+    /// Claude's input box and its status line: a highlighted line, but no question.
+    const CLAUDE_INPUT: &str = "\
+────────────────────────────────────────────────────────────────────────────
+❯ Try \"refactor main.rs\"
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+";
+
+    /// A list with a highlight that is not answered with Enter to confirm (a slash-command list).
+    const SLASH_LIST: &str = "\
+> /re
+  ❯ /review        Review a pull request
+    /resume        Resume a conversation
+    /release-notes View release notes
+";
+
+    #[test]
+    fn reads_claudes_folder_trust_without_numbers() {
+        let p = parse(CLAUDE_TRUST).expect("the trust dialog is a prompt");
+        assert!(p.question.starts_with("Quick safety check: Is this a project you created or one you trust?"), "{}", p.question);
+        assert_eq!(p.options.iter().map(|o| (o.number, o.label.as_str())).collect::<Vec<_>>(), [(1, "No, exit"), (2, "Yes, I trust this folder")]);
+        assert_eq!(p.selected, 0, "No, exit is chosen");
+        assert_eq!(keys_for(&p, 2), Some(vec!["Down", "Enter"]));
+        assert!(grants_for_good(&p.options[1]) && !grants_for_good(&p.options[0]), "trusting a folder is the person's to answer");
+        assert!(!unreadable_question(CLAUDE_TRUST));
+        assert_eq!(parse(CLAUDE_INPUT), None, "the input box is no question");
+        assert_eq!(parse(SLASH_LIST), None, "nor a list without Enter to confirm");
+    }
+
     const CODEX_TRUST: &str = "\
 > You are running Codex in /Users/dev/app
 
