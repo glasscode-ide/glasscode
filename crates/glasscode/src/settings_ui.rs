@@ -284,7 +284,7 @@ cards! {
     BrowserReset in Browser: "Start over", "Quits the Glasscode Browser and forgets everything it knows: sign-ins, history, extensions.";
 
     Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
-    Phones in Server: "iPhone", "Phones that reach your server. Pair one with a code to scan in Glasscode for iPhone.";
+    Phones in Server: "Glasses", "The Glasscode app on your iPhone, with your Ray-Ban Display: it talks to the manager on this Mac, and on your server while the Mac sleeps, over Tailscale.";
     Voice in Server: "The glasses", "The voice server on port 4517 answers this computer only. The glasses reach Glasscode with a device you pair, over Tailscale.";
 
     UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
@@ -731,7 +731,8 @@ impl Workspace {
         self.settings.section = section;
         // A section chosen: the search is over.
         self.settings_clear_search(cx);
-        if section == Section::Server && self.server.connected() {
+        // The paired glasses are this Mac's own pins: read with or without a server.
+        if section == Section::Server {
             self.phones_refresh(cx);
         }
         if section == Section::Browser {
@@ -1280,12 +1281,7 @@ impl Workspace {
             CardId::BrowserReset => frame().control(crate::browser_ui::reset_control(self, cx)),
 
             CardId::Server => frame().rows(self.server_rows(cx)),
-            CardId::Phones => {
-                if !self.server.connected() {
-                    return Vec::new();
-                }
-                frame().rows(self.phone_rows(cx))
-            }
+            CardId::Phones => frame().rows(self.phone_rows(cx)),
             CardId::Voice => {
                 if !crate::glasscode_ui::VOICE {
                     return Vec::new();
@@ -2063,6 +2059,7 @@ impl Workspace {
     }
 
     fn phone_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let connected: std::collections::BTreeSet<String> = self.door.conns.values().map(|c| c.device.clone()).collect();
         let mut rows: Vec<Div> = self
             .phones
             .clone()
@@ -2071,15 +2068,17 @@ impl Workspace {
             .enumerate()
             .map(|(i, phone)| {
                 let key = phone.key.clone();
-                let short = phone
-                    .key
-                    .split_whitespace()
-                    .nth(1)
-                    .map(|k| format!("…{}", &k[k.len().saturating_sub(10)..]))
-                    .unwrap_or_default();
+                let device = glasscode_core::gate::device_id(&phone.key);
+                let presence = self.door.presence.get(&device);
+                let state = match (connected.contains(&device), presence) {
+                    (true, Some(p)) if p.glasses && p.worn => "Connected · glasses on".to_string(),
+                    (true, Some(p)) if p.glasses => "Connected · glasses not worn".to_string(),
+                    (true, _) => "Connected · no glasses".to_string(),
+                    (false, _) => "Paired · not connected".to_string(),
+                };
                 row(
                     phone.name.clone(),
-                    format!("Paired · key {short}"),
+                    state,
                     Some(
                         ui::button(SharedString::from(format!("phone-remove-{i}")), "Remove")
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -2090,18 +2089,24 @@ impl Workspace {
                 )
             })
             .collect();
-        rows.push(row(
-            "Pair an iPhone",
-            "Shows a code to scan with Glasscode for iPhone",
-            Some(
-                ui::primary_button("settings-pair", "Pair an iPhone…")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_server_dialog(window, cx);
-                        this.start_pairing(cx);
-                    }))
-                    .into_any_element(),
-            ),
-        ));
+        if let Some(why) = &self.door.error {
+            rows.push(row("Not reachable", why.clone(), None));
+        }
+        if self.pairing.is_some() {
+            rows.push(div().px(theme::sz(16.)).py(theme::sz(12.)).child(self.render_pairing_code(cx)));
+        } else {
+            rows.push(row(
+                "Pair glasses",
+                "Shows a code to scan with Glasscode on your iPhone",
+                Some(
+                    ui::primary_button("settings-pair", "Pair glasses…")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.start_pairing(cx);
+                        }))
+                        .into_any_element(),
+                ),
+            ));
+        }
         rows
     }
 

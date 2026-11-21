@@ -1,10 +1,13 @@
-//! "Pair iPhone": a QR code that lets the Glasscode iPhone app reach this Mac's server.
+//! Pairing the glasses: a QR code that lets the Glasscode app on the person's iPhone (with their
+//! Ray-Ban Display) reach this Mac's device door, and the server when one is paired (G05).
 //!
 //! The code carries a one-time token and the addresses this Mac answers on (Tailscale first,
-//! then the local network). The phone makes its own key (kept in its Secure Enclave), posts the
-//! public half here with the token, and this Mac adds it on the server — restricted to
-//! `glasscoded gate` — then answers with the server's address and host keys for the phone to
-//! pin. The listener closes after one pairing, or after ten minutes.
+//! then the local network). The phone makes its own key (kept in its Secure Enclave) and posts the
+//! public half here with the token. This Mac pins it (`authority/devices.json`): the door and the
+//! gate trust only keys pinned here. With a server, the Mac also adds it there, restricted to
+//! `glasscoded gate`. It answers with what the phone pins in turn: this Mac's door (its tailnet
+//! address and port, and its door key) and, with a server, the server's SSH endpoint and host
+//! keys. The listener closes after one pairing, or after ten minutes.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -24,7 +27,8 @@ use crate::workspace::Workspace;
 const LIFETIME: Duration = Duration::from_secs(600);
 
 pub enum PairEvent {
-    Paired(String),
+    /// The phone's name and its device id, pinned here.
+    Paired(String, String),
     Failed(String),
 }
 
@@ -100,7 +104,7 @@ fn respond(stream: &mut TcpStream, status: &str, body: &serde_json::Value) {
 }
 
 /// One HTTP request: `POST /pair {token, name, key}`.
-fn handle(mut stream: TcpStream, token: &str, client: &RemoteClient, config: &ServerConfig) -> anyhow::Result<Option<String>> {
+fn handle(mut stream: TcpStream, token: &str, server: Option<(&RemoteClient, &ServerConfig)>, door: &DoorPairing) -> anyhow::Result<Option<(String, String)>> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -137,45 +141,97 @@ fn handle(mut stream: TcpStream, token: &str, client: &RemoteClient, config: &Se
         respond(&mut stream, "403 Forbidden", &json!({ "error": format!("This code has expired. Show a new one on the {}.", crate::platform::computer()) }));
         return Ok(None);
     }
-    let phone = PhoneKey { name: request["name"].as_str().unwrap_or("iPhone").to_string(), key: request["key"].as_str().unwrap_or_default().to_string() };
-    match client.call::<PhonePairing>("phones.add", serde_json::to_value(&phone)?) {
-        Ok(pairing) => {
-            // This Mac pins the key it paired itself (trust-m5): the gate trusts only pinned keys,
-            // whatever the server lists later.
-            if let Err(err) = glasscode_core::gate::pin_phone(&phone.key, &phone.name) {
-                log::warn!("pairing: could not pin the phone's key: {err}");
-            }
-            let (host, port, user) = ssh_endpoint(config);
-            respond(
-                &mut stream,
-                "200 OK",
-                &json!({
-                    "server": {
-                        "name": config.name(),
-                        "host": host,
-                        "port": port,
-                        "user": if user.is_empty() { pairing.user.clone() } else { user },
-                        "host_keys": pairing.host_keys,
-                        "bin": config.remote_bin,
-                        "hostname": pairing.host,
-                    }
-                }),
-            );
-            Ok(Some(phone.name))
-        }
-        Err(err) => {
-            respond(&mut stream, "502 Bad Gateway", &json!({ "error": format!("{err:#}") }));
-            bail!("{err:#}")
-        }
+    let phone = PhoneKey { name: request["name"].as_str().unwrap_or("iPhone").chars().filter(|c| !c.is_control()).take(60).collect(), key: request["key"].as_str().unwrap_or_default().to_string() };
+    if !phone.key.starts_with("ecdsa-sha2-nistp256 ") {
+        respond(&mut stream, "400 Bad Request", &json!({ "error": "That is not a phone's key." }));
+        bail!("not a phone's key");
     }
+    // The server first, when there is one: a phone the server refused is not pinned here either.
+    let server_reply = match server {
+        Some((client, config)) => match client.call::<PhonePairing>("phones.add", serde_json::to_value(&phone)?) {
+            Ok(pairing) => {
+                let (host, port, user) = ssh_endpoint(config);
+                Some(json!({
+                    "name": config.name(),
+                    "host": host,
+                    "port": port,
+                    "user": if user.is_empty() { pairing.user.clone() } else { user },
+                    "host_keys": pairing.host_keys,
+                    "bin": config.remote_bin,
+                    "hostname": pairing.host,
+                }))
+            }
+            Err(err) => {
+                respond(&mut stream, "502 Bad Gateway", &json!({ "error": format!("{err:#}") }));
+                bail!("{err:#}")
+            }
+        },
+        None => None,
+    };
+    // This Mac pins the key it paired itself (trust-m5): the door and the gate trust only pinned
+    // keys, whatever the server lists later.
+    let device = match glasscode_core::gate::pin_phone(&phone.key, &phone.name) {
+        Ok(device) => device,
+        Err(err) => {
+            respond(&mut stream, "500 Internal Server Error", &json!({ "error": format!("This Mac could not keep the phone's key: {err}") }));
+            bail!("could not pin the phone's key: {err}")
+        }
+    };
+    respond(
+        &mut stream,
+        "200 OK",
+        &json!({
+            "device": device,
+            "mac": {
+                "name": door.name,
+                "id": door.id,
+                "key": door.key,
+                "addresses": door.addresses,
+            },
+            "server": server_reply,
+        }),
+    );
+    Ok(Some((phone.name, device)))
+}
+
+/// What the phone pins of this Mac's door.
+#[derive(Clone)]
+struct DoorPairing {
+    name: String,
+    id: String,
+    key: String,
+    /// `ip:port` on the tailnet (and loopback in a debug build, for the simulator).
+    addresses: Vec<String>,
+}
+
+fn door_pairing() -> anyhow::Result<DoorPairing> {
+    let key = glasscode_core::device_link::DoorKey::this_mac()?.public_openssh();
+    let port = glasscode_core::device_link::port();
+    let mut addresses: Vec<String> = glasscode_core::device_link::tailscale_ipv4().map(|ip| format!("{ip}:{port}")).into_iter().collect();
+    if cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DOOR_LOOPBACK").is_some() {
+        addresses.push(format!("127.0.0.1:{port}"));
+    }
+    let name = glasscode_core::mirror::identity().1;
+    let id = glasscode_core::paths::MachineId::this().map(|id| id.as_str().to_string()).unwrap_or_default();
+    Ok(DoorPairing { name: if name.is_empty() { crate::platform::this_computer().to_string() } else { name }, id, key, addresses })
 }
 
 impl Workspace {
     pub fn start_pairing(&mut self, cx: &mut Context<Self>) {
-        let (Some(client), Some(config)) = (self.server.client.clone(), self.server.config.clone()) else {
-            self.show_toast("Connect to your server first.", cx);
-            return;
+        // A server is not needed: the glasses reach this Mac's door; with a server connected, the
+        // phone is added there too.
+        let server = self.server.client.clone().zip(self.server.config.clone()).filter(|_| self.server.connected());
+        let door = match door_pairing() {
+            Ok(door) => door,
+            Err(err) => {
+                self.show_toast(format!("The door key could not be kept in the Keychain: {err:#}"), cx);
+                return;
+            }
         };
+        if door.addresses.is_empty() {
+            self.show_toast("Tailscale is not running on this Mac. Start it, then pair your glasses.", cx);
+            return;
+        }
         let listener = match TcpListener::bind("0.0.0.0:0") {
             Ok(l) => l,
             Err(err) => {
@@ -191,7 +247,7 @@ impl Workspace {
             // The iOS simulator runs on this Mac and may not get past the firewall otherwise.
             addresses.push(format!("127.0.0.1:{port}"));
         }
-        let payload = format!("glasscode://pair?v=1&t={token}&a={}&n={}", addresses.join(","), config.name());
+        let payload = glasscode_core::device_link::pairing_link(&token, &addresses, &door.name);
         let modules = match qrcode::QrCode::with_error_correction_level(payload.as_bytes(), qrcode::EcLevel::M) {
             Ok(code) => {
                 let width = code.width();
@@ -212,9 +268,10 @@ impl Workspace {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        match handle(stream, &token, &client, &config) {
-                            Ok(Some(name)) => {
-                                let _ = tx.send(PairEvent::Paired(name));
+                        let server = server.as_ref().map(|(client, config)| (client.as_ref(), config));
+                        match handle(stream, &token, server, &door) {
+                            Ok(Some((name, device))) => {
+                                let _ = tx.send(PairEvent::Paired(name, device));
                                 return;
                             }
                             Ok(None) => {}
@@ -242,7 +299,11 @@ impl Workspace {
         let mut changed = false;
         while let Ok(event) = pairing.events.try_recv() {
             pairing.done = Some(match event {
-                PairEvent::Paired(name) => Ok(name),
+                PairEvent::Paired(name, device) => {
+                    // The door lets it in at once (the authority is read again every half minute).
+                    self.control.authority.devices.insert(device);
+                    Ok(name)
+                }
                 PairEvent::Failed(err) => Err(err),
             });
             changed = true;
@@ -253,16 +314,19 @@ impl Workspace {
         }
         if changed {
             if let Some(Ok(name)) = pairing.done.clone() {
-                self.show_toast(format!("{name} is paired with {}.", self.server.name()), cx);
+                self.show_toast(format!("{name} is paired with this {}.", crate::platform::computer()), cx);
                 self.phones_refresh(cx);
             }
             cx.notify();
         }
     }
 
+    /// The phones this Mac paired (its own pins, `authority/devices.json`: what the door trusts).
     pub fn phones_refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.server.client.clone() else { return };
-        let task = cx.background_spawn(async move { client.call::<Vec<PhoneKey>>("phones.list", json!({})) });
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            glasscode_core::gate::Devices::load().map(|devices| devices.phones.into_values().map(|d| PhoneKey { name: d.name, key: d.key }).collect::<Vec<_>>())
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -274,13 +338,19 @@ impl Workspace {
     }
 
     pub(crate) fn phone_remove(&mut self, key: String, cx: &mut Context<Self>) {
-        let Some(client) = self.server.client.clone() else { return };
+        let client = self.server.client.clone().filter(|_| self.server.connected());
+        let device = glasscode_core::gate::device_id(&key);
+        // Not trusted from now on: the door closes its connections at the next request.
+        self.control.authority.devices.remove(&device);
         let task = cx.background_spawn(async move {
             // Unpinned first: a phone the person removed is not trusted, even if the server keeps it.
-            if let Err(err) = glasscode_core::gate::unpin_device(&glasscode_core::gate::device_id(&key)) {
+            if let Err(err) = glasscode_core::gate::unpin_device(&device) {
                 log::warn!("could not unpin the phone: {err}");
             }
-            client.call_value("phones.remove", json!({ "key": key }))
+            match client {
+                Some(client) => client.call_value("phones.remove", json!({ "key": key })),
+                None => Ok(serde_json::Value::Null),
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -294,15 +364,22 @@ impl Workspace {
         .detach();
     }
 
-    /// The "iPhone" part of the Server dialog.
+    /// The "Glasses" part of the Server dialog.
     pub fn render_pairing(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut section = div().flex().flex_col().gap_2().child(ui::caps_label("IPHONE"));
+        let mut section = div().flex().flex_col().gap_2().child(ui::caps_label("GLASSES"));
         section = section.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(
-            "The Glasscode iPhone app opens these sessions from anywhere, over Tailscale. Its key can only use Glasscode on the server: no shell, no forwarding.",
+            "The Glasscode app on your iPhone, with your Ray-Ban Display, talks to the manager here and on this server, over Tailscale. Its key cannot use a shell, start a session or change a setting.",
         ));
+        section = section.child(self.render_pairing_code(cx));
+        section.into_any_element()
+    }
+
+    /// The pairing code with its status, or the button that shows one; then the paired phones.
+    pub fn render_pairing_code(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut section = div().flex().flex_col().gap_2();
         match &self.pairing {
             None => {
-                section = section.child(div().flex().child(ui::primary_button("pair-iphone", "Pair iPhone").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))));
+                section = section.child(div().flex().child(ui::primary_button("pair-iphone", "Pair glasses").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))));
             }
             Some(pairing) => {
                 // Whole pixels at each scale: modules of 5.75 px leave seams that a scanner can
@@ -316,7 +393,7 @@ impl Workspace {
                     .map(|row| div().flex().children(row.iter().map(|&dark| div().size(px(cell)).bg(if dark { theme::c(0x000000) } else { theme::c(0xffffff) }).into_any_element())).into_any_element())
                     .collect();
                 let status = match &pairing.done {
-                    None => (format!("Open Glasscode on the iPhone and scan this code. {}", crate::platform::firewall_note()), theme::text()),
+                    None => (format!("Open Glasscode on your iPhone and scan this code. {}", crate::platform::firewall_note()), theme::text()),
                     Some(Ok(name)) => (format!("{name} is paired. You can close this."), theme::added()),
                     Some(Err(err)) => (err.clone(), theme::removed()),
                 };
@@ -340,7 +417,7 @@ impl Workspace {
                                     // For a phone without a camera (or the simulator): paste this link in the app.
                                     ui::button("pair-copy", "Copy link").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                                        this.show_toast("Pairing link copied. Paste it in the iPhone app.", cx);
+                                        this.show_toast("Pairing link copied. Paste it in Glasscode on your iPhone.", cx);
                                     }))
                                 }).child(
                                     ui::button("pair-close", "Done").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
