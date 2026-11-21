@@ -47,6 +47,8 @@ pub struct MirrorUi {
     /// The server's latest stamp, for "use the server's copy".
     pub server_stamp: Option<glasscode_core::identity::Hlc>,
     pub local_only: std::collections::HashSet<String>,
+    /// The nonces of the phone input done in this run (`remote::check_relayed`): none twice.
+    relayed: std::collections::HashSet<String>,
 }
 
 impl MirrorUi {
@@ -70,6 +72,7 @@ impl MirrorUi {
             clock_back: None,
             server_stamp: None,
             local_only: Default::default(),
+            relayed: Default::default(),
         }
     }
 
@@ -313,6 +316,21 @@ impl Workspace {
             self.show_toast(format!("Your iPhone sent something to \"{title}\", but it is not running on {}", crate::platform::this_computer()), cx);
             return;
         };
+        // Only what a phone this Mac paired signed, for this run, into an agent session: the
+        // server relays it and cannot type here by itself (its manager acts through the gate).
+        let agent = self.state.session(id).map(|s| s.agent).unwrap_or(glasscode_core::model::AgentKind::Shell);
+        let paired = self.control.authority.devices.clone();
+        let launch = self.control.launch.clone();
+        let mut done = Vec::new();
+        for input in inputs {
+            match glasscode_core::remote::check_relayed(&input, id, agent, &launch, &|device| paired.contains(device), &mut self.mirror.relayed) {
+                Ok(()) => done.push(input),
+                Err(why) => {
+                    log::warn!("mirror: input relayed for {id} not done: {why}");
+                    self.show_toast(format!("Something relayed by {} for \"{title}\" was not done: {why}", self.server.name()), cx);
+                }
+            }
+        }
         let mut delay = Duration::ZERO;
         let mut later = |bytes: Vec<u8>, after: Duration, cx: &mut Context<Self>| {
             delay += after;
@@ -323,9 +341,9 @@ impl Workspace {
             })
             .detach();
         };
-        for input in inputs {
+        for input in done {
             match input {
-                MirrorInput::Text { text, enter, device } => {
+                MirrorInput::Text { text, enter, device, .. } => {
                     // Typing into an open question would answer it.
                     if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
                         self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's message was not sent)"), cx);
@@ -340,8 +358,13 @@ impl Workspace {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
                 }
-                MirrorInput::Answer { option, text, device } => {
+                MirrorInput::Answer { option, text, device, .. } => {
                     let Some(open) = prompt::parse(&terminal.read(cx).text_tail(60)) else { continue };
+                    // An answer that allows more than this once is the person's, here.
+                    if let Err(why) = relayed_answer_ok(&open, option) {
+                        self.show_toast(format!("\"{title}\": {why}"), cx);
+                        continue;
+                    }
                     let Some(keys) = prompt::keys_for(&open, option) else { continue };
                     // One key at a time, as a person types: the menu reads each.
                     for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
@@ -353,7 +376,12 @@ impl Workspace {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
                 }
-                MirrorInput::Keys { keys } => {
+                MirrorInput::Keys { keys, .. } => {
+                    // Keys could pick an option of an open question: those go as an answer.
+                    if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
+                        self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's keys were not pressed)"), cx);
+                        continue;
+                    }
                     for bytes in keys.iter().filter_map(|k| mirror::key_bytes(k)) {
                         later(bytes.to_vec(), Duration::from_millis(80), cx);
                     }
@@ -401,6 +429,16 @@ impl Workspace {
     }
 }
 
+/// Whether a phone may pick option `number` of the open question `open`: never one that allows
+/// more than this once ("allow for good", "don't ask again"), which only the person picks here.
+fn relayed_answer_ok(open: &prompt::PendingPrompt, number: u32) -> Result<(), String> {
+    match open.options.iter().find(|o| o.number == number) {
+        Some(option) if prompt::grants_for_good(option) => Err(format!("“{}” allows it for good: only you choose that, here", option.label)),
+        Some(_) => Ok(()),
+        None => Err(format!("the question has no option {number}")),
+    }
+}
+
 /// Whose words a phone's input relayed by the server is: the phone's, by the device its
 /// connection declared, or nobody's. A device is tier two at most (D1), whatever the server says.
 fn relayed_origin(device: Option<String>) -> glasscode_core::words::Origin {
@@ -421,5 +459,17 @@ mod tests {
         for device in [None, Some(String::new()), Some("a b".into())] {
             assert_eq!(super::relayed_origin(device), Origin::Outside);
         }
+    }
+
+    /// A phone answers a question here only with an option that allows it this once.
+    #[test]
+    fn a_relayed_answer_never_allows_for_good() {
+        use glasscode_core::prompt::{PendingPrompt, PromptOption};
+        let option = |number: u32, label: &str| PromptOption { number, label: label.into(), wants_text: false };
+        let open = PendingPrompt { title: Some("Bash command".into()), question: "Do you want to proceed?".into(), detail: vec!["git push".into()], options: vec![option(1, "Yes"), option(2, "Yes, and don't ask again for git commands"), option(3, "No")], selected: 0 };
+        assert_eq!(super::relayed_answer_ok(&open, 1), Ok(()));
+        assert_eq!(super::relayed_answer_ok(&open, 3), Ok(()));
+        assert!(super::relayed_answer_ok(&open, 2).is_err(), "for good");
+        assert!(super::relayed_answer_ok(&open, 4).is_err(), "no such option");
     }
 }

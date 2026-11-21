@@ -260,6 +260,54 @@ pub(crate) fn refused_here(request: &Request, session: Option<&str>) -> Option<S
     }
 }
 
+/// One worktree's request files on the server: each plain request nobody committed goes to
+/// `take` with the file its answers go to; anything else in the folder that is not a plain file
+/// is cleared away, and an answer nobody collected goes after a day. False when the worktree has
+/// no such folder of its own: a link in place of the folder (or of `.glasscode`) is never
+/// followed (`control::own_drop_dir`), as glasscoded clears and writes there outside any sandbox.
+fn scan_drop_dir(worktree: &std::path::Path, take: &dyn Fn(Request, PathBuf)) -> bool {
+    let Some(dir) = control::own_drop_dir(worktree) else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let plain = entry.file_type().is_ok_and(|t| t.is_file());
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("req") if plain && !glasscode_core::git::is_tracked(worktree, &path) => {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let out = path.with_extension("out");
+                let _ = std::fs::remove_file(&out);
+                match serde_json::from_str::<Request>(text.trim()) {
+                    Ok(request) => take(request, out),
+                    Err(e) => write_answer(&out, &Reply::fail(code::USAGE, format!("could not read the request: {e}"))),
+                }
+            }
+            Some("req") if plain => {
+                let _ = std::fs::remove_file(&path);
+            }
+            Some("out" | "tmp") if plain => {
+                if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            _ => {
+                if !plain {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// One answer line into a request's answer file, never through a link a session planted there
+/// (`control::append_answer`).
+fn write_answer(out: &std::path::Path, reply: &Reply) {
+    if let Err(err) = control::append_answer(out, &serde_json::to_string(reply).unwrap_or_default()) {
+        log(format!("a request's answer was not written: {err}"));
+    }
+}
+
 /// Pass a command to the Mac and stream its answers to `send` (until Done).
 fn relay_call(shared: &Shared, request: Request, mut send: impl FnMut(&Reply)) {
     // A brain of this server's manager (M57): served here, never passed to the Mac, whose secret
@@ -398,44 +446,43 @@ pub fn start(shared: Shared) {
         for worktree in worktrees {
             // Keep .glasscode/ out of the repository on the server too.
             let _ = glasscode_core::git::exclude(&worktree, ".glasscode/");
-            let Ok(entries) = std::fs::read_dir(control::drop_dir(&worktree)) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let plain = entry.file_type().is_ok_and(|t| t.is_file());
-                match path.extension().and_then(|e| e.to_str()) {
-                    Some("req") if plain && !glasscode_core::git::is_tracked(&worktree, &path) => {
-                        let text = std::fs::read_to_string(&path).unwrap_or_default();
-                        let _ = std::fs::remove_file(&path);
-                        let out = path.with_extension("out");
-                        let _ = std::fs::remove_file(&out);
-                        let shared = shared.clone();
-                        std::thread::spawn(move || {
-                            let write = |reply: &Reply| {
-                                if let Ok(mut file) = std::fs::OpenOptions::new().create_new(true).append(true).open(&out).or_else(|_| std::fs::OpenOptions::new().append(true).open(&out)) {
-                                    let _ = writeln!(file, "{}", serde_json::to_string(reply).unwrap_or_default());
-                                }
-                            };
-                            match serde_json::from_str::<Request>(text.trim()) {
-                                Ok(request) => relay_call(&shared, request, write),
-                                Err(e) => write(&Reply::fail(code::USAGE, format!("could not read the request: {e}"))),
-                            }
-                        });
-                    }
-                    Some("req") if plain => {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                    Some("out" | "tmp") if plain => {
-                        if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                    _ => {
-                        if !plain {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                }
-            }
+            let take = |request: Request, out: PathBuf| {
+                let shared = shared.clone();
+                std::thread::spawn(move || relay_call(&shared, request, |reply| write_answer(&out, reply)));
+            };
+            scan_drop_dir(&worktree, &take);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sandboxed session on the server writes its worktree only; glasscoded answers and clears
+    /// its request folder outside any sandbox. A link there must not take glasscoded elsewhere:
+    /// not at the folder (the scan would clear another folder's links), not at the answer (it
+    /// would append the request's words to `~/.bashrc`), symbolic or hard.
+    #[test]
+    fn a_link_in_the_request_folder_is_never_followed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let worktree = scratch.path().join("wt");
+        let dir = control::drop_dir(&worktree);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = scratch.path().join("bashrc");
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        std::os::unix::fs::symlink(&rc, dir.join("a.out")).unwrap();
+        write_answer(&dir.join("a.out"), &Reply::fail(code::USAGE, "No project “$(touch pwned)”."));
+        std::fs::hard_link(&rc, dir.join("b.out")).unwrap();
+        write_answer(&dir.join("b.out"), &Reply::fail(code::USAGE, "No project “$(touch pwned)”."));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n", "an answer went through a link");
+        // A link in place of the folder.
+        let victim = scratch.path().join("bin");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::os::unix::fs::symlink("/bin/ls", victim.join("tool")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&victim, &dir).unwrap();
+        assert!(!scan_drop_dir(&worktree, &|_, _| panic!("no request is there")));
+        assert!(std::fs::symlink_metadata(victim.join("tool")).is_ok(), "the scan removed a link in the folder the request folder points at");
+    }
 }

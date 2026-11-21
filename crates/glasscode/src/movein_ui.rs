@@ -254,6 +254,10 @@ impl Workspace {
         let projects = form.projects.clone();
         let agent = self.state.manager.brain;
         let config_dir = self.state.default_account(agent).and_then(|a| a.config_dir());
+        // D17: the run is on this account; a project bound to another is not given to it.
+        let account = self.state.default_account(agent).map(|a| a.id.clone());
+        let set = self.control_policy_set();
+        movein::skip_unreadable(&mut progress, |key| set.account_may_read(key, account.as_deref()));
         let env = self.env.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
@@ -491,7 +495,8 @@ impl Workspace {
     fn move_in_estimate(&mut self, projects: Vec<ProjectIn>, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             let estimates: Vec<(glasscode_core::paths::ProjectKey, movein::Estimate)> = projects.iter().map(|p| (p.key.clone(), movein::estimate(p))).collect();
-            let left = glasscode_core::runtime::budget::Ledger::load().ok().map(|l| l.left_today(glasscode_core::clock::now_ms()));
+            // With the daily cap off, no budget is said beside it.
+            let left = glasscode_core::runtime::budget::Ledger::load().ok().filter(|l| l.daily_cap != glasscode_core::runtime::budget::NO_CAP).map(|l| l.left_today(glasscode_core::clock::now_ms()));
             let line = movein::estimate_line(&estimates, left);
             (estimates, line)
         });
@@ -520,7 +525,8 @@ impl Workspace {
                     form.note = Some("Reading the export…".into());
                 });
                 cx.notify();
-                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                let shown = path.clone();
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path, &[]) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |ws, cx| {
@@ -530,8 +536,12 @@ impl Workspace {
                                 Ok(done) => {
                                     form.error = None;
                                     form.note = Some(format!(
-                                        "Moved in from the export: {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.",
-                                        done.memory_files, done.project_keys, done.words_records, done.set_aside
+                                        "Moved in from the export: {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}",
+                                        done.memory_files,
+                                        done.project_keys,
+                                        done.words_records,
+                                        done.set_aside,
+                                        crate::ops_run::import_held(&done.held, &shown)
                                     ));
                                 }
                                 Err(err) => {

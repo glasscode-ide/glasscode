@@ -79,9 +79,32 @@ pub fn no_agents() -> bool {
     cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
 }
 
+impl Workspace {
+    /// The app started this session's agent less than `within` ago.
+    pub(crate) fn launched_recently(&self, id: &str, within: Duration) -> bool {
+        self.launched_at.get(id).and_then(|at| at.elapsed().ok()).is_some_and(|since| since < within)
+    }
+}
+
+/// The state of a session whose agent ended while its terminal stays open (`session list`): it
+/// ended (exit 0), or it crashed (another status, or a signal). It is not "idle": nothing runs.
+pub fn exit_word(status: Option<i32>) -> &'static str {
+    match status {
+        Some(0) => "ended",
+        _ => "crashed",
+    }
+}
+
 /// Whether a session's program may start: a shell always, Claude and Codex unless `no_agents`.
 pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
+}
+
+/// Whether an agent's start waits for the engine switch and the authority (`ControlUi::engine_read`):
+/// its profile comes from them (M22), and a start before they are read had none. A shell has none
+/// and never waits.
+pub fn waits_for_engine(agent: AgentKind, engine_read: bool) -> bool {
+    agent != AgentKind::Shell && !engine_read
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,9 +146,15 @@ pub struct Workspace {
     /// Claude sessions that wait on a question before Claude starts: their NeedsInput is ours.
     startup_waits: HashSet<String>,
     launched_at: HashMap<String, SystemTime>,
+    /// Sessions whose agent ended while its terminal stays open: its exit status (none: a signal).
+    pub exits: HashMap<String, Option<i32>>,
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
     pub worktrees: HashMap<String, Vec<Worktree>>,
+    /// How git's last read of each project's worktrees went (`refresh_worktrees`): read, or why
+    /// not; none yet just after a start. An unread or failed list is empty in `worktrees`, and the
+    /// reconciler must not take it for one.
+    pub worktree_reads: HashMap<String, Result<(), String>>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
     pub right_tab: RightTab,
@@ -291,9 +320,11 @@ impl Workspace {
             hooked: HashSet::new(),
             startup_waits: HashSet::new(),
             launched_at: HashMap::new(),
+            exits: HashMap::new(),
             activity: HashMap::new(),
             attention: HashSet::new(),
             worktrees: HashMap::new(),
+            worktree_reads: HashMap::new(),
             changes: Vec::new(),
             changes_for: None,
             right_tab,
@@ -1137,6 +1168,14 @@ impl Workspace {
         if self.setup_first(&session, window, cx) {
             return;
         }
+        // At the start the engine switch is read in the background: an agent waits for it, so it
+        // starts under its profile (a session restored at the start ran without one).
+        if waits_for_engine(session.agent, self.control.engine_read) {
+            if !self.control.held_starts.contains(&session.id) {
+                self.control.held_starts.push(session.id.clone());
+            }
+            return;
+        }
         if !may_start(session.agent, no_agents()) {
             // The session view says why (`session_view.rs`); nothing starts.
             log::warn!("GLASSCODE_DEBUG_NO_AGENTS: {} not started for session {}", session.agent.name(), session.id);
@@ -1207,6 +1246,7 @@ impl Workspace {
                 }
                 TerminalEvent::Exited(status) => {
                     this.activity.remove(&id);
+                    this.exits.insert(id.clone(), *status);
                     this.journal_turn_exit(&id, *status, cx);
                 }
                 TerminalEvent::TitleChanged => {}
@@ -1218,6 +1258,7 @@ impl Workspace {
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
         self.journal_tail_started(session_id);
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
+        self.exits.remove(session_id);
         if crate::platform::chat_status_fixes() {
             // A new launch: Claude's first hook event is still to come.
             self.hooked.remove(session_id);
@@ -1545,13 +1586,12 @@ impl Workspace {
             .map(|p| (p.id.clone(), p.root.clone()))
             .collect();
         let task = cx.background_spawn(async move {
-            projects
-                .into_iter()
-                .map(|(id, root)| (id, git::worktrees(&root).unwrap_or_default()))
-                .collect::<HashMap<_, _>>()
+            let lists: Vec<(String, anyhow::Result<Vec<Worktree>>)> = projects.into_iter().map(|(id, root)| (id, git::worktrees(&root))).collect();
+            let read: HashMap<String, Result<(), String>> = lists.iter().map(|(id, list)| (id.clone(), list.as_ref().map(|_| ()).map_err(glasscode_core::git::short_error))).collect();
+            (lists.into_iter().map(|(id, list)| (id, list.unwrap_or_default())).collect::<HashMap<_, _>>(), read)
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let (result, read) = task.await;
             let _ = this.update(cx, |this, cx| {
                 // A branch switched or renamed inside a worktree shows up in its sessions too.
                 let mut changed = false;
@@ -1566,6 +1606,7 @@ impl Workspace {
                     }
                 }
                 this.worktrees = result;
+                this.worktree_reads = read;
                 if changed {
                     this.save();
                 }
@@ -1719,6 +1760,8 @@ impl Workspace {
                             session.initial_prompt = None;
                             dirty = true;
                         }
+                        // Its first turn made the file: the journal reads it from the start.
+                        self.journal.found_rollouts.insert(id.clone());
                     }
                 }
             }
@@ -2207,11 +2250,31 @@ impl Workspace {
 mod tests {
     use super::*;
 
+    /// An agent that ended is not "idle" in `session list` (the live checks: killed sessions
+    /// listed as idle).
+    #[test]
+    fn an_ended_agent_is_ended_or_crashed() {
+        assert_eq!(exit_word(Some(0)), "ended");
+        assert_eq!(exit_word(Some(129)), "crashed", "SIGHUP's status, as Claude exits on a closed terminal");
+        assert_eq!(exit_word(Some(1)), "crashed");
+        assert_eq!(exit_word(None), "crashed", "killed by a signal");
+    }
+
     /// `GLASSCODE_DEBUG_NO_AGENTS` stops Claude and Codex, never a shell.
     #[test]
     fn the_debug_switch_stops_agents_and_not_shells() {
         assert!(may_start(AgentKind::Shell, true));
         assert!(!may_start(AgentKind::Claude, true) && !may_start(AgentKind::Codex, true));
         assert!(may_start(AgentKind::Claude, false) && may_start(AgentKind::Codex, false) && may_start(AgentKind::Shell, false));
+    }
+
+    /// An agent restored at the start waits for the engine switch and the authority, so it starts
+    /// under its profile (the live checks: one started before they were read, with none); a shell
+    /// needs neither.
+    #[test]
+    fn an_agent_waits_for_its_profile_and_a_shell_does_not() {
+        assert!(waits_for_engine(AgentKind::Claude, false) && waits_for_engine(AgentKind::Codex, false));
+        assert!(!waits_for_engine(AgentKind::Shell, false));
+        assert!(!waits_for_engine(AgentKind::Claude, true) && !waits_for_engine(AgentKind::Codex, true));
     }
 }

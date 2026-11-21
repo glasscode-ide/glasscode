@@ -130,6 +130,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.show", manager_show),
     ("manager.scene", manager_scene),
     ("manager.voice_token", manager_voice_token),
+    ("manager.budget", manager_budget),
     ("manager.follow_up.list", follow_up_list),
     ("manager.follow_up.add", follow_up_add),
     ("manager.follow_up.done", follow_up_done),
@@ -1793,6 +1794,9 @@ struct MemoryAsk {
     links: glasscode_core::model::State,
     /// The policy header of the project (its level, from the gate).
     policy: Option<String>,
+    /// The projects the caller may not read at all: for the manager, those bound to another
+    /// account than its own (D17). Its reads that name no project leave them out.
+    hidden: Vec<glasscode_core::paths::ProjectKey>,
 }
 
 impl MemoryAsk {
@@ -1900,6 +1904,19 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         return Err(denied("This command runs in no project's session, so it has no project's memory."));
     }
     let everywhere = reach == Reach::Everywhere;
+    // D17: the manager reads no project bound to another account, named or not (the gate refuses
+    // one an op names; a session named here is about its project too).
+    let hidden = if who == Who::Manager {
+        let set = ws.control_policy_set();
+        set.hidden_from_manager(ws.control.project_keys.values())
+    } else {
+        Vec::new()
+    };
+    if let Some((_, _, Some(key))) = &project
+        && hidden.contains(key)
+    {
+        return Err(denied(format!("Only the account the person chose may read {key}, and the manager runs on another.")));
+    }
     let policy = project.as_ref().and_then(|(_, _, key)| key.as_ref()).map(|key| {
         let level = ws.control_policy_set().policy.of(key).level;
         format!("Project {key} is at the {level:?} level. Glasscode's gate decides what runs; this line only says so.")
@@ -1910,7 +1927,7 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         links.ticket_of.extend(ws.state.ticket_of.get(&s.id).map(|t| (s.id.clone(), t.clone())));
         links.pr_of.extend(ws.state.pr_of.get(&s.id).map(|p| (s.id.clone(), p.clone())));
     }
-    Ok(MemoryAsk { who, everywhere, project, session, links, policy })
+    Ok(MemoryAsk { who, everywhere, project, session, links, policy, hidden })
 }
 
 /// A memory error as the command's reply.
@@ -1952,7 +1969,7 @@ fn memory_search(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let key = if ask.everywhere { None } else { ask.key()? };
             let work = key.as_ref().and_then(|key| ask.work(key));
             let root = ask.project.as_ref().map(|(_, root, _)| root.as_path());
-            glasscode_core::ops::core_reads::memory_search(key.as_ref(), work.as_ref(), root, &query, limit, history)
+            glasscode_core::ops::core_reads::memory_search(key.as_ref(), work.as_ref(), root, &query, limit, history, &ask.hidden)
         };
         run().unwrap_or_else(|reply| reply)
     })
@@ -1964,7 +1981,7 @@ fn memory_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     memory_plan(Kind::Read, "read memory", move || {
         let run = || -> Result<Reply, Reply> {
             let key = if ask.everywhere { None } else { ask.key()? };
-            glasscode_core::ops::core_reads::memory_show(key.as_ref(), &what)
+            glasscode_core::ops::core_reads::memory_show(key.as_ref(), &what, &ask.hidden)
         };
         run().unwrap_or_else(|reply| reply)
     })
@@ -1979,6 +1996,8 @@ fn memory_brief(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             .projects
             .iter()
             .filter_map(|p| ws.control.project_keys.get(&p.id).map(|key| (p, key)))
+            // D17: a project bound to another account is not in the manager's brief.
+            .filter(|(_, key)| set.manager_may_read(key))
             .map(|(p, key)| {
                 let policy = set.policy.of(key);
                 memstore::brief::ProjectLine { key: key.clone(), name: p.name.clone(), level: format!("{:?}", policy.level), local_only: policy.local_only }
@@ -2224,12 +2243,13 @@ impl Workspace {
             let Some(path) = paths.into_iter().next() else { return };
             let _ = this.update(cx, |ws, cx| {
                 ws.show_toast(format!("Importing {}…", home_relative(&path)), cx);
-                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                let shown = path.clone();
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path, &[]) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |ws, cx| match result {
                         Ok(done) => ws.show_toast(
-                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.", done.memory_files, done.project_keys, done.words_records, done.set_aside),
+                            format!("Imported {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.{}{}", done.memory_files, done.project_keys, done.words_records, done.set_aside, import_refused(done.refused), import_held(&done.held, &shown)),
                             cx,
                         ),
                         Err(err) => ws.show_toast(format!("Could not import: {err:#}"), cx),
@@ -2437,16 +2457,66 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
+/// What an import's reply says of the entries the scan left out.
+fn import_refused(refused: usize) -> String {
+    match refused {
+        0 => String::new(),
+        1 => " 1 entry was left out: memory's scan refused it (an instruction or a secret).".into(),
+        n => format!(" {n} entries were left out: memory's scan refused them (instructions or secrets)."),
+    }
+}
+
+/// What an import's reply says of the project keys it left unchanged: what the export would add
+/// to each, and how to let it.
+pub(crate) fn import_held(held: &[glasscode_core::portability::KeyAdditions], from: &std::path::Path) -> String {
+    if held.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = held.iter().map(|add| add.line()).collect();
+    format!(
+        " It left {} project keys you have unchanged; the export would add {}. To add them to a key, run `glasscode data import {} --confirm <key>`.",
+        held.len(),
+        lines.join(" and "),
+        from.display()
+    )
+}
+
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
     let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
-    memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
+    let mut confirm = Vec::new();
+    for word in op.texts("confirm") {
+        confirm.push(glasscode_core::paths::ProjectKey::parse(word.trim()).ok_or_else(|| usage(format!("“{word}” is not a project key (such as app-3f9a1c); `glasscode data import <file> --dry-run` lists them.")))?);
+    }
+    if op.on("dry_run") {
+        return memory_plan(Kind::Read, format!("read {}", home_relative(&from)), move || match glasscode_core::portability::preview(&from) {
+            Ok(seen) => {
+                let keys = if seen.new_keys.is_empty() { "no new project keys".to_string() } else { format!("new project keys {}", seen.new_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) };
+                let adds = if seen.additions.is_empty() {
+                    " It adds nothing to the project keys you have.".to_string()
+                } else {
+                    format!(" To project keys you have it would add, only with --confirm <key>: {}.", seen.additions.iter().map(|a| a.line()).collect::<Vec<_>>().join("; "))
+                };
+                Reply::ok(
+                    format!("This import would bring {} memory files and {keys}.{adds} Nothing was changed.", seen.memory_files),
+                    json!({ "memory_files": seen.memory_files, "new_keys": seen.new_keys, "additions": seen.additions }),
+                )
+            }
+            Err(err) => failed(format!("Could not read the export: {err:#}")),
+        });
+    }
+    memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from, &confirm) {
         Ok(done) => Reply::ok(
             format!(
-                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.",
-                done.memory_files, done.project_keys, done.words_records, done.set_aside
+                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.{}{}",
+                done.memory_files,
+                done.project_keys,
+                done.words_records,
+                done.set_aside,
+                import_refused(done.refused),
+                import_held(&done.held, &from)
             ),
-            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside }),
+            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside, "refused": done.refused, "held": done.held }),
         ),
         Err(err) => failed(format!("Could not import: {err:#}")),
     })
@@ -2587,14 +2657,14 @@ fn app_log(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     }
 }
 
-fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
-    let list = &ws.control.approvals;
+fn app_approvals(ws: &mut Workspace, caller: &Caller, _: &Op) -> Planned {
+    let list: Vec<&crate::control_ui::Approval> = ws.control.approvals.iter().filter(|a| crate::control_ui::sees_approval(&caller.channel, a)).collect();
     let text = if list.is_empty() {
         "Nothing waits for the person.".to_string()
     } else {
         list.iter().map(|a| format!("#{}  {}  ({})", a.id, a.summary(), a.command)).collect::<Vec<_>>().join("\n")
     };
-    answer(Reply::ok(text, ws.control_approvals_json()))
+    answer(Reply::ok(text, ws.control_approvals_json(&caller.channel)))
 }
 
 /// What waits for the person (v2): each pending action with every argument, who asks and why, and
@@ -2936,7 +3006,8 @@ fn manager_memory(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         let run = || -> Result<Reply, Reply> {
             let snap = Memory::open().snapshot().map_err(memory_reply)?;
             let key = if ask.everywhere { None } else { ask.key()? };
-            let scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
+            let mut scope = memstore::search::scope_for(&snap, key.as_ref(), None).map_err(memory_reply)?;
+            scope.hidden = ask.hidden.clone();
             let hits = memstore::search::search(&snap, if query.is_empty() { "*" } else { &query }, &scope, limit).map_err(memory_reply)?;
             Ok(Reply::ok(memstore::search::as_data(&hits, snap.commit()), json!({ "commit": snap.commit() })))
         };
@@ -3038,13 +3109,46 @@ fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::
     ws.reply(r, Reply::ok(format!("Drawing {title} ({}).", plural(steps, "step", "steps")), data));
 }
 
+/// The manager's daily token cap (D6): with a cap, keep it in the token ledger; with none, say it
+/// and what today used. The person's alone, as in Settings › Manager.
+fn manager_budget(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::runtime::budget;
+    use glasscode_core::store::Store as _;
+    person_only(caller, "change the manager's daily token cap")?;
+    let cap = op.text("cap").map(budget::parse_cap).transpose().map_err(usage)?;
+    let what = match cap {
+        Some(cap) => format!("set the manager's daily token cap to {}", budget::cap_words(cap)),
+        None => "say the manager's daily token cap".to_string(),
+    };
+    memory_plan(Kind::Settings, what, move || {
+        let result = match cap {
+            Some(cap) => budget::set_daily_cap(cap),
+            None => budget::Ledger::load(),
+        };
+        match result {
+            Ok(ledger) => {
+                let now = glasscode_core::clock::now_ms();
+                let today = ledger.today(now);
+                let used: u64 = today.values().sum();
+                let off = ledger.daily_cap == budget::NO_CAP;
+                let is = if cap.is_some() { "is now" } else { "is" };
+                Reply::ok(
+                    format!("The manager's daily cap {is} {}; today (UTC) it used {}.", budget::cap_words(ledger.daily_cap), budget::thousands(used)),
+                    json!({ "daily_cap": if off { Value::Null } else { json!(ledger.daily_cap) }, "off": off, "used_today": used, "today": today }),
+                )
+            }
+            Err(err) => failed(format!("Could not keep the daily cap: {err}")),
+        }
+    })
+}
+
 fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
     // A token lets a device listen and speak in the manager's room as the person: for the person
-    // and their own devices (the voice server asks for the glasses and the phone), never for an
-    // agent in a session or the manager's own.
-    if caller.is_agent() {
-        return Err(denied("A voice token is for the person's own devices, not for an agent."));
+    // in the app and a device they paired, never for an agent, a session's program, a command or
+    // a program outside Glasscode, which any session can pass for.
+    if !glasscode_core::caller::may_have_voice_token(&caller.channel) {
+        return Err(denied("A voice token is for you, in Glasscode, or a device you paired; not for an agent, a command or a program."));
     }
     let url = settings.voice.livekit_url.trim().to_string();
     if url.is_empty() {
@@ -3605,7 +3709,7 @@ mod tests {
     #[test]
     fn every_plan_site_has_an_op() {
         // The plans whose kind is not their op's: a dry run only reads.
-        const OTHER_KINDS: &[(&str, &str)] = &[("worktree.clean", "Read")];
+        const OTHER_KINDS: &[(&str, &str)] = &[("worktree.clean", "Read"), ("data.import", "Read")];
         let mut sites = 0;
         for (op, body) in bodies() {
             let spec = ops::find(op).unwrap();

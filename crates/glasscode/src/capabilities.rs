@@ -575,6 +575,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "add a check", "manager_next", "manager.check.add"),
     op("Manager", "stop a check", "manager_next", "manager.check.remove"),
     op("Manager", "a token for a device's voice", "manager_voice_keys_check", "manager.voice_token"),
+    op("Manager", "Daily tokens: the manager's daily cap, or off", "manager_budget_set", "manager.budget"),
+    op("Command", "glasscode manager budget", "control_handle_as", "manager.budget"),
     // ----- what the manager reads and shows (the v2 engine's ops, M33.2)
     op("Session view", "the side panel's tab", "ui_seen", "ui.state"),
     op("Manager", "point at a session or a screen", "manager_show", "ui.point"),

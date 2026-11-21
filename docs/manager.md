@@ -93,14 +93,26 @@ it is made.
 - It cannot send anything of a project marked "stays on this Mac" to the server: not its memory,
   sessions, words, journal or cards.
 - It cannot run past its budget: at most six routine wakes an hour, a daily token cap, and
-  nothing on paid overage unless you allow it. With no budget left, or signed out, it answers
-  from what it knows and says why. When its plan's limit is used up, it holds your question and
+  nothing on paid overage unless you allow it. The daily cap starts at 1,500,000 tokens a UTC
+  day, the chat and its wakes together; raise it or turn it off in Settings › Manager › Daily
+  tokens, or with `glasscode manager budget 6m` (or `off`). Off, the hour's wakes and your plan's
+  own limits still hold, and learning still keeps to a fifth of the default. With no budget
+  left, or signed out, it answers from what it knows and says why. When its plan's limit is used up, it holds your question and
   answers when the limit resets, or you ask the other agent (Claude or Codex) instead.
 - It cannot start on a Claude Code older than 2.1.322 or a Codex older than 0.167.0. It says
   which version it needs.
 - It cannot do the same thing twice. Each effect (a message, a report, a push) is done once,
   under its key, also after a crash or a restart.
 - In its first round after you switch it on it says nothing about what was already there.
+- It cannot keep a session from reading your files while session profiles are off (the default
+  until the owner's live run of them): then no session has a sandbox, and each one can read any
+  file you can, `~/.glasscode/memory/` included. With profiles on, a session the manager drives
+  reads its own project's memory through `glasscode memory` only; your own sessions keep reading
+  the files.
+- It cannot keep a program that runs as you, outside any sandbox, from calling Glasscode as the
+  manager. Its brain's Glasscode tools carry a signature, kept in a file only you can read
+  (`~/.glasscode/manager/run/`), never on a command line; anything that runs as you can still read
+  that file. Sessions cannot: their profiles deny that folder.
 
 ## Where its data lives
 

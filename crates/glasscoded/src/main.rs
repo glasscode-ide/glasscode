@@ -239,10 +239,9 @@ fn gate_device(args: &[String]) -> anyhow::Result<String> {
 #[cfg(unix)]
 fn phone_rpc(device: &str) -> anyhow::Result<()> {
     let stream = connect()?;
-    if let Err(err) = declare_on(&stream, &Caller::Phone { device: device.to_string() }) {
-        // An older daemon, until it restarts with this binary: the phone keeps what it had.
-        eprintln!("glasscoded gate: the daemon did not take the phone's caller: {err:#}");
-    }
+    // Never an undeclared connection (which is the app's): a daemon that does not take the
+    // phone's caller (an older one, until it restarts with this binary) serves the phone nothing.
+    declare_on(&stream, &Caller::Phone { device: device.to_string() }).context("the daemon did not take the phone's caller")?;
     let from_daemon = stream.try_clone()?;
     let replies = std::thread::spawn(move || pump(from_daemon, std::io::stdout()));
     let mut to = &stream;
@@ -292,10 +291,8 @@ fn request(method: &str, params: Value) -> anyhow::Result<Value> {
 #[cfg(unix)]
 fn request_as(caller: Option<&Caller>, method: &str, params: Value) -> anyhow::Result<Value> {
     let mut stream = connect()?;
-    if let Some(caller) = caller
-        && let Err(err) = declare_on(&stream, caller)
-    {
-        eprintln!("glasscoded: the daemon did not take the caller: {err:#}");
+    if let Some(caller) = caller {
+        declare_on(&stream, caller).context("the daemon did not take the caller")?;
     }
     let mut line = serde_json::to_string(&Request { id: 1, method: method.into(), params })?;
     line.push('\n');
@@ -390,6 +387,11 @@ fn attach(name: Option<&str>, caller: Option<&Caller>) -> anyhow::Result<()> {
         .find(|s| s.tmux_name == name || s.session.id.starts_with(name) || s.session.title == name)
         .with_context(|| format!("no session {name}; see `glasscoded status`"))?;
     let attach: glasscode_core::remote::Attach = serde_json::from_value(request_as(caller, "sessions.attach", serde_json::json!({ "session_id": session.session.id }))?)?;
+    // A phone's terminal is view only: the gate runs nothing else for it (an older daemon's
+    // argv, which would let it type, is not run).
+    if matches!(caller, Some(Caller::Phone { .. })) && !tmux::is_view_only(&attach.argv) {
+        bail!("this server's glasscoded is older than its gate: update it to open a session from a phone");
+    }
     let err = Command::new(&attach.argv[0]).args(&attach.argv[1..]).exec();
     bail!("could not run tmux: {err}")
 }

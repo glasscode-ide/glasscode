@@ -64,13 +64,16 @@ fn automation_denies_authority_and_credentials() {
     let rules = deny(&p);
     let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(super::posix(path).trim_start_matches('/')));
     for path in [paths::authority_dir(), paths::home().join(".ssh"), paths::home().join(".config").join("gh"), paths::root().join("state.json"), paths::root().join("events"), paths::root().join("journal")] {
-        for tool in ["Read", "Edit", "Write"] {
+        for tool in ["Read", "Edit"] {
             assert!(has(tool, &path), "{tool} {}", path.display());
         }
     }
-    // The trusted memory reads, never writes; the worktree's .env at launch is denied.
+    // No `Write(...)` rule: Claude says each one never matches (Edit covers it) at every start.
+    assert!(!rules.iter().any(|r| r.starts_with("Write(")), "{rules:?}");
+    // The trusted memory neither reads nor writes (lead decision, 2026-11-21: through
+    // `glasscode memory` only); the worktree's .env at launch is denied.
     let memory = paths::memory_dir();
-    assert!(has("Edit", &memory) && !has("Read", &memory));
+    assert!(has("Edit", &memory) && has("Read", &memory));
     assert!(has("Read", &facts(Path::new("/x")).env_files[0]));
     // The other worktree too, for automation only; and the sandbox denies the same for the shell.
     let other = facts(Path::new("/x")).other_worktrees[0].clone();
@@ -85,7 +88,42 @@ fn automation_denies_authority_and_credentials() {
     // Codex: the same classes denied by path in its permission profile.
     let codex = session_profile(SessionOrigin::Automation, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
     assert!(codex.contains(&format!("{}=\"deny\"", json!(paths::authority_dir().to_string_lossy()))), "{codex}");
-    assert!(codex.contains(&format!("{}=\"read\"", json!(memory.to_string_lossy()))), "{codex}");
+    assert!(codex.contains(&format!("{}=\"deny\"", json!(memory.to_string_lossy()))), "{codex}");
+}
+
+/// Lead decision (2026-11-21): ~/.glasscode/memory/ holds every project's and employer's memory,
+/// so the automation and quarantine profiles deny it in both columns, for Claude and Codex: the
+/// sandbox's denyRead and the file tools' Read rule (which Claude applies to Grep and Glob too),
+/// and the gate hook for Read, Grep and the shell. Such a session reads its own project's memory
+/// through `glasscode memory`, which keeps it to that project. A person's session keeps reading
+/// it: it is the person's own data.
+#[test]
+fn memory_is_denied_to_sessions_the_person_does_not_drive() {
+    let memory = paths::memory_dir();
+    let text = memory.to_string_lossy().into_owned();
+    for (origin, denied) in [(SessionOrigin::Automation, true), (SessionOrigin::Quarantine, true), (SessionOrigin::Person, false)] {
+        let p = profile(origin, &ProjectPolicy::default());
+        let deny_read: Vec<&str> = p.claude_settings["sandbox"]["filesystem"]["denyRead"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(deny_read.contains(&text.as_str()), denied, "{origin:?}: the sandbox's denyRead");
+        // A rule has the path as Claude Code matches it (`posix`: /c/Users/… on Windows).
+        let in_rule = super::posix(&memory);
+        let in_rule = in_rule.trim_start_matches('/');
+        let read_rule = deny(&p).iter().any(|r| r.starts_with("Read(//") && r.contains(in_rule));
+        assert_eq!(read_rule, denied, "{origin:?}: the Read rule");
+        // Nobody writes it directly.
+        assert!(deny(&p).iter().any(|r| r.starts_with("Edit(//") && r.contains(in_rule)), "{origin:?}");
+        let codex = session_profile(origin, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
+        if origin != SessionOrigin::Person {
+            assert!(codex.contains(&format!("{}=\"deny\"", json!(text))) && !codex.contains(&format!("{}=\"read\"", json!(text))), "{origin:?}: {codex}");
+        }
+    }
+    let ctx = GateCtx { origin: Some(SessionOrigin::Automation), worktree: paths::root().join("worktrees").join("app").join("feat-a"), ..GateCtx::default() };
+    let file = memory.join("projects").join("other-3f9a1c").join("decisions.md");
+    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": file })).is_err());
+    assert!(gate_tool(&ctx, "Grep", &json!({ "pattern": "x", "path": memory })).is_err());
+    assert!(gate_tool(&ctx, "Bash", &json!({ "command": format!("cat {}", file.display()) })).is_err());
+    let person = GateCtx { origin: Some(SessionOrigin::Person), ..ctx };
+    assert!(gate_tool(&person, "Read", &json!({ "file_path": file })).is_ok());
 }
 
 /// P07: every absolute rule starts with `//` (one `/` is relative to the settings file).
@@ -106,9 +144,27 @@ fn quarantine_network_forge_only() {
     assert_eq!(q.claude_settings["sandbox"]["network"]["allowedDomains"], json!(["github.com", "api.github.com"]));
     let a = profile(SessionOrigin::Automation, &ProjectPolicy::default());
     assert_eq!(a.claude_settings["sandbox"]["network"]["allowedDomains"], json!(["github.com", "api.github.com", "registry.npmjs.org", "crates.io"]));
-    // Codex: the network off for both, the control socket allowed.
+    // Codex: the network off for both, and no control socket (below).
     let codex = session_profile(SessionOrigin::Quarantine, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
-    assert!(codex.contains("permissions.glasscode.network={\"enabled\"=false, \"unix_sockets\"={"), "{codex}");
+    assert!(codex.contains("permissions.glasscode.network={\"enabled\"=false}"), "{codex}");
+}
+
+/// A session the manager drives cannot reach the control socket from its sandbox: there, any
+/// program may leave out a session's signature and pass for one outside Glasscode. Its `glasscode`
+/// commands go as request files in its own worktree, the app's to attribute
+/// (`caller::by_channel_proven`). The person's sessions keep the socket.
+#[test]
+fn no_control_socket_in_a_restricted_sandbox() {
+    let socket = facts(Path::new("/x")).socket.to_string_lossy().into_owned();
+    for (origin, reaches) in [(SessionOrigin::Automation, false), (SessionOrigin::Quarantine, false), (SessionOrigin::Person, true)] {
+        let p = profile(origin, &ProjectPolicy::default());
+        let allowed = p.claude_settings["sandbox"]["network"]["allowUnixSockets"].as_array().unwrap().iter().any(|v| v.as_str() == Some(socket.as_str()));
+        assert_eq!(allowed, reaches, "{origin:?}");
+        // Codex's restricted profile opens no unix socket (its network is off); the person's
+        // session has no permission profile at all.
+        let codex = session_profile(origin, AgentKind::Codex, &ProjectPolicy::default(), &facts(Path::new("/x"))).codex_args.join(" ");
+        assert!(!codex.contains("unix_sockets"), "{origin:?}: {codex}");
+    }
 }
 
 #[test]
@@ -276,7 +332,7 @@ fn the_gate_refuses_what_a_session_never_does() {
     assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::home().join(".ssh").join("id_rsa") })).is_err());
     assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::authority_dir().join("policy.json") })).is_err());
     assert!(gate_tool(&ctx, "Edit", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_err());
-    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_ok());
+    assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::memory_dir().join("x.md") })).is_err());
     assert!(gate_tool(&ctx, "Edit", &json!({ "file_path": ctx.worktree.join("src").join("main.rs") })).is_ok());
     for tool in ["SendMessage", "ListAgents", "WebFetch", "mcp__glasscode-browser__open"] {
         assert!(gate_tool(&ctx, tool, &json!({})).is_err(), "{tool}");
@@ -504,6 +560,30 @@ fn pushes_send_only_the_sessions_own_commits() {
     assert!(own_commits_only(&["abc".into()], &["ab".into()]).is_err(), "a short id under 7 digits counts for nothing");
 }
 
+/// alt-m1, trust-m2: a headless run reads outside text (a stranger's pull request, the pull
+/// request a session the manager drives wrote for the validator, a project studied when moving
+/// in) with no tool at all. Codex shows its shell (`exec_command`, `write_stdin`), its apps,
+/// plugins and the account's own configuration unless they are turned off (P02's table), and its
+/// read-only sandbox reads the whole disk (`~/.ssh` too). So a headless Codex run turns off what
+/// the brain's does, and reads no configuration of the account's.
+#[test]
+fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
+    for kind in [HeadlessKind::AutoReview, HeadlessKind::Study, HeadlessKind::Reflect] {
+        let args = headless_profile(kind, AgentKind::Codex, &json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt")).codex_args;
+        let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use", "goals", "image_generation"] {
+            assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
+        }
+        assert!(has(&["-c", r#"web_search="disabled""#]), "{kind:?}: web search stays on in {args:?}");
+        assert!(has(&["-c", "check_for_update_on_startup=false"]), "{kind:?}: Codex checks for updates in {args:?}");
+        for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
+            assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
+        }
+        // The answer still comes as before: bound to the schema, in the answer file, from stdin.
+        assert!(has(&["--output-schema", "/s.json"]) && has(&["-o", "/a.txt"]) && args.last().map(String::as_str) == Some("-"), "{args:?}");
+    }
+}
+
 /// A scratch repository for the push tests: `git` with a fixed identity and none of the person's
 /// configuration, and `at` (when given) as the commit's date.
 fn scratch_git(dir: &Path, args: &[&str], at: Option<u64>) -> String {
@@ -558,6 +638,11 @@ fn a_branch_moved_onto_other_work_is_not_the_sessions_own() {
     scratch_git(scratch.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()], None);
     scratch_commit(&other, "teammates-work", Some(hour_ago + 30));
     scratch_git(&other, &["push", "-q", "origin", "main"], None);
+    // And the remote has a ref whose commit no fetch of branches brings here (a fork's pull
+    // request head on GitHub, `refs/pull/<n>/head`).
+    scratch_git(&other, &["checkout", "-q", "-b", "fork"], None);
+    scratch_commit(&other, "a-forks-work", Some(hour_ago + 40));
+    scratch_git(&other, &["push", "-q", "origin", "fork:refs/pull/1/head"], None);
     // The person's work on another branch, never pushed.
     scratch_git(&repo, &["checkout", "-q", "-b", "person-wip"], None);
     let theirs = scratch_commit(&repo, "the-persons-work", Some(hour_ago + 60));

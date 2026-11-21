@@ -266,6 +266,10 @@ impl Workspace {
         if self.state.manager.brain == agent {
             return;
         }
+        if let Err(why) = brain_choice(agent, self.codex_brain_blocked()) {
+            self.show_toast(why, cx);
+            return;
+        }
         if let Some(form) = self.manager.page.form.get() {
             form.model.update(cx, |input, cx| input.set_text("", cx));
         }
@@ -277,6 +281,13 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    /// This Codex cannot be the manager's brain: its version is known to keep tools no flag turns
+    /// off, or its tool check found such tools in this run.
+    pub(crate) fn codex_brain_blocked(&self) -> bool {
+        let version = self.cli_status.iter().find(|s| s.name == "Codex").and_then(|s| s.installed.as_deref());
+        self.mchat.codex_tools_refused || glasscode_core::runtime::codex::brain_blocked(version)
     }
 
     /// Add the teammate typed into the fields of Teammates.
@@ -299,6 +310,66 @@ impl Workspace {
 
     /// Look whether the Keychain holds the LiveKit key and secret, off the main thread.
     /// Called when Settings › Manager opens; drawing the section never asks the Keychain.
+    /// Read the manager's daily token cap and today's use, in the background (Settings › Manager
+    /// opened, or the cap changed).
+    pub fn manager_budget_refresh(&mut self, cx: &mut Context<Self>) {
+        use glasscode_core::store::Store as _;
+        let read = cx.background_spawn(async {
+            let ledger = glasscode_core::runtime::budget::Ledger::load().ok()?;
+            Some((ledger.daily_cap, ledger.today(glasscode_core::clock::now_ms()).values().sum::<u64>()))
+        });
+        cx.spawn(async move |this, cx| {
+            let budget = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.manager.page.budget = budget;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A daily cap picked in Settings › Manager: kept in the token ledger (as `manager budget`
+    /// keeps it), then said.
+    fn manager_budget_set(&mut self, cap: u64, cx: &mut Context<Self>) {
+        use glasscode_core::runtime::budget;
+        let task = cx.background_spawn(async move { budget::set_daily_cap(cap) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(ledger) => {
+                        this.manager.page.budget = Some((ledger.daily_cap, ledger.today(glasscode_core::clock::now_ms()).values().sum()));
+                        this.show_toast(format!("The manager's daily cap is now {}.", budget::cap_words(ledger.daily_cap)), cx);
+                    }
+                    Err(err) => this.show_toast(format!("Could not keep the daily cap: {err}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Settings › Manager's row of the daily token cap: the caps it offers, and today's use.
+    fn manager_budget_row(&self, cx: &mut Context<Self>) -> Div {
+        use glasscode_core::runtime::budget::{CAP_CHOICES, cap_words, thousands};
+        let budget = self.manager.page.budget;
+        let current = budget.map(|(cap, _)| cap);
+        let choices = ui::segmented()
+            .children(CAP_CHOICES.iter().enumerate().map(|(i, (cap, label))| {
+                let cap = *cap;
+                ui::segment(SharedString::from(format!("manager-budget-{i}")), current == Some(cap), *label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_budget_set(cap, cx)))
+            }))
+            .into_any_element();
+        let detail = match budget {
+            Some((cap, used)) => {
+                let other = if CAP_CHOICES.iter().any(|(c, _)| *c == cap) { String::new() } else { format!(" Now: {}.", cap_words(cap)) };
+                format!("What he may use in a day (UTC), the chat and his wakes together; {} so far today.{other} Your plan's own limits hold either way.", thousands(used))
+            }
+            None => "What he may use in a day (UTC), the chat and his wakes together. Your plan's own limits hold either way.".to_string(),
+        };
+        row("Daily tokens", detail, Some(choices))
+    }
+
     pub fn manager_voice_keys_check(&mut self, cx: &mut Context<Self>) {
         let looked = cx.background_spawn(async { voice::keys().is_some() });
         cx.spawn(async move |this, cx| {
@@ -390,6 +461,7 @@ impl Workspace {
                     "One agent above all your sessions. Off: nothing of him runs and nothing of him shows.",
                     Some(switch("manager-enabled", settings.enabled).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set(|m| m.enabled = !m.enabled, cx))).into_any_element()),
                 ),
+                self.manager_budget_row(cx),
                 row("Name", "Used everywhere, in his signature and as the wake word", Some(field(&form.name).into_any_element())),
                 row("Your first name", "For the signature", Some(field(&form.owner).into_any_element())),
                 row(
@@ -515,9 +587,15 @@ impl Workspace {
                 }))
             }))
             .into_any_element();
+        let codex_blocked = self.codex_brain_blocked();
+        let about_brain = if codex_blocked {
+            format!("The agent that thinks for him. {}", glasscode_core::runtime::codex::BRAIN_BLOCKED)
+        } else {
+            "The agent that thinks for him: Claude or Codex. A CLI you added yourself cannot be his brain.".to_string()
+        };
         out.push(titled_group(
             "Brain",
-            "The agent that thinks for him: Claude or Codex. A CLI you added yourself cannot be his brain.",
+            &about_brain,
             vec![
                 row("Agent", "", Some(brain)),
                 row("Account", format!("The {} account he runs as", settings.brain.name()), Some(account)),
@@ -814,6 +892,16 @@ impl Workspace {
 mod tests {
     use super::*;
 
+    /// A Codex that keeps tools Glasscode cannot switch off is not picked as the brain in silence:
+    /// the choice is refused with the sentence Settings shows; Claude, and a Codex not known to,
+    /// may be.
+    #[test]
+    fn a_blocked_codex_cannot_be_picked_as_the_brain() {
+        assert_eq!(brain_choice(AgentKind::Codex, true), Err("Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off)."));
+        assert_eq!(brain_choice(AgentKind::Codex, false), Ok(()));
+        assert_eq!(brain_choice(AgentKind::Claude, true), Ok(()));
+    }
+
     #[test]
     fn a_time_of_day_is_read_however_it_is_typed() {
         assert_eq!(parse_time("9").as_deref(), Some("09:00"));
@@ -905,6 +993,12 @@ mod tests {
         assert_eq!(s.people[1].contact, None);
         assert_eq!(person_detail(&s.people[1]), "No GitHub login · messages go to their name");
     }
+}
+
+/// Whether the person may make `agent` the manager's brain: not a Codex that keeps tools Glasscode
+/// cannot switch off (its first question would fail closed); the sentence says why.
+pub(crate) fn brain_choice(agent: AgentKind, codex_blocked: bool) -> Result<(), &'static str> {
+    if agent == AgentKind::Codex && codex_blocked { Err(glasscode_core::runtime::codex::BRAIN_BLOCKED) } else { Ok(()) }
 }
 
 impl Workspace {

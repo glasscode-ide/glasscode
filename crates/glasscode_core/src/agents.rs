@@ -310,6 +310,49 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
     }
 }
 
+/// The file where Claude keeps an account's settings of each folder (its trust among them):
+/// `.claude.json` in the account's config folder, or the person's `~/.claude.json` for the login
+/// Claude had before Glasscode (never in a test: that one is the person's own).
+fn claude_config_file(account: Option<&Account>) -> Option<PathBuf> {
+    match account.and_then(Account::config_dir) {
+        Some(dir) => Some(dir.join(".claude.json")),
+        None if !paths::testing() => Some(paths::home().join(".claude.json")),
+        None => None,
+    }
+}
+
+/// Make Claude trust a worktree Glasscode made, as the person's "Yes, I trust this folder" does:
+/// its folder's `hasTrustDialogAccepted` in `file`. Best effort, and careful with a file Claude
+/// itself writes: nothing when the file is not there yet (Claude's first start writes it) or does
+/// not read as JSON, nothing when the folder is trusted already, and else one write that keeps
+/// everything else and replaces the file whole (a rename), with its permissions.
+fn ensure_claude_trusts(file: &Path, worktree: &Path) {
+    let Ok(text) = std::fs::read_to_string(file) else { return };
+    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let folder = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let Some(key) = folder.to_str() else { return };
+    let Some(top) = config.as_object_mut() else { return };
+    let projects = top.entry("projects").or_insert_with(|| serde_json::json!({}));
+    let Some(projects) = projects.as_object_mut() else { return };
+    let entry = projects.entry(key.to_string()).or_insert_with(|| serde_json::json!({}));
+    let Some(entry) = entry.as_object_mut() else { return };
+    if entry.get("hasTrustDialogAccepted").and_then(serde_json::Value::as_bool) == Some(true) {
+        return;
+    }
+    entry.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+    let Ok(out) = serde_json::to_string_pretty(&config) else { return };
+    let temp = file.with_file_name(format!(".claude.json.glasscode-{}", std::process::id()));
+    if std::fs::write(&temp, out).is_err() {
+        return;
+    }
+    if let Ok(meta) = std::fs::metadata(file) {
+        let _ = std::fs::set_permissions(&temp, meta.permissions());
+    }
+    if std::fs::rename(&temp, file).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
 /// Make Codex trust a worktree so it does not stop to ask on first use. Best effort: append
 /// the same entry a person would add by hand, and only when the file has none for the folder
 /// yet — never rewriting the file, so it cannot disturb the account's own config or block launch.
@@ -497,6 +540,31 @@ pub fn launch_with(
     base_env: &HashMap<String, String>,
     profile: Option<&crate::profile::SessionProfile>,
 ) -> Launch {
+    launch_of(session, account, base_env, profile, true)
+}
+
+/// The arguments and environment of [`launch_with`], with nothing written for a start: no folder
+/// trusted in the account's Codex config. The argument contract reads its lists this way
+/// (`versions::argument_lists`); a launch would trust the system's temporary folder in the
+/// person's own `~/.codex/config.toml` at every check of a new CLI version.
+pub fn launch_args(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+) -> Launch {
+    launch_of(session, account, base_env, profile, false)
+}
+
+/// [`launch_with`] (`start`: the session starts now, so its worktree is trusted for Codex) or
+/// [`launch_args`] (nothing written).
+fn launch_of(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+    start: bool,
+) -> Launch {
     let restricted = profile.is_some_and(|p| p.origin != crate::profile::SessionOrigin::Person);
     let mut env = base_env.clone();
     env.insert("GLASSCODE_SESSION_ID".into(), session.id.clone());
@@ -522,6 +590,14 @@ pub fn launch_with(
             // Versions are managed by Glasscode's approved-version list.
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
             let config_dir = account.map(Account::effective_dir);
+            // A worktree Glasscode made for the person's project, trusted up front as for Codex:
+            // Claude 2.1 asks "trust this folder?" in each new one, with "No, exit" chosen.
+            // Not for automation and quarantine sessions (trust-19): their folder's prompt stays.
+            if start && profile.is_none_or(|p| p.pretrust) && session.worktree.starts_with(paths::worktrees_dir()) {
+                if let Some(file) = claude_config_file(account) {
+                    ensure_claude_trusts(&file, &session.worktree);
+                }
+            }
             // Usage: where the status line keeps this session's limits, and the person's own
             // status line, which runs after it as before.
             env.insert("GLASSCODE_LIMITS".into(), crate::usage::limits_file(&session.id).to_string_lossy().into_owned());
@@ -591,13 +667,14 @@ pub fn launch_with(
                 None => args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id)),
                 Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Codex, &session.id, &profile.browser_hosts)),
             }
+            args.extend(["-c".to_string(), CODEX_NO_UPDATE_CHECK.to_string()]);
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
             // prompt is easy to miss in chat view.
             // Not for automation and quarantine sessions (trust-19): what a repository carries for
             // Codex gets its prompt there.
-            if profile.is_none_or(|p| p.pretrust) {
+            if start && profile.is_none_or(|p| p.pretrust) {
                 ensure_codex_trusts(&codex_home, &session.worktree);
             }
             args.extend(cli_args(AgentKind::Codex, Some(&codex_home)));
@@ -629,6 +706,14 @@ pub fn launch_with(
         }
     }
 }
+
+/// Codex's own update check, off in every session, the manager's brain, every headless run and
+/// `codex app-server` (as `DISABLE_AUTOUPDATER` is for Claude):
+/// versions are Glasscode's to manage. With it on, Codex 0.167 opens "Update available" at start
+/// with "Update now" (`brew upgrade --cask codex`) chosen, so the first Enter, the person's or a
+/// message Glasscode types in, would upgrade the CLI that every session shares (P06; the live
+/// checks of 2026-11-20 saw it in a Glasscode session).
+pub(crate) const CODEX_NO_UPDATE_CHECK: &str = "check_for_update_on_startup=false";
 
 /// The Codex options for a session's mode. Codex 0.167 removed `--full-auto`, which was a short
 /// form of "the workspace-write sandbox, and the model asks when it needs to" (`--sandbox
@@ -1038,6 +1123,15 @@ impl RolloutTail {
         Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, events: None }
     }
 
+    /// The journal's tail of a Codex session's rollout (M30's turns): from its start when this
+    /// launch found the conversation (`found`: Codex writes its rollout at the first turn, which
+    /// has often ended by the time Glasscode finds the file, and a tail from the end would never
+    /// report it), else from now ([`RolloutTail::resumed`]).
+    pub fn for_turns(path: &Path, found: bool) -> Self {
+        let tail = if found { RolloutTail::new(path) } else { RolloutTail::resumed(path) };
+        tail.keeping_events()
+    }
+
     /// Keep each turn line it reads, for [`RolloutTail::take_events`].
     pub fn keeping_events(mut self) -> Self {
         self.events = Some(Vec::new());
@@ -1334,6 +1428,93 @@ mod tests {
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
     }
 
+    /// The argument lists of a launch, read for the CLI contract (`launch_args`), write nothing: a
+    /// start trusts its worktree in the account's Codex config, the lists never do.
+    #[test]
+    fn launch_args_trust_no_folder() {
+        let account = Account { id: format!("codex-args-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let config = account.effective_dir().join("config.toml");
+        let listed = launch_args(&session(AgentKind::Codex, None), Some(&account), &HashMap::new(), None);
+        assert!(!config.exists(), "the lists trusted a folder: {}", std::fs::read_to_string(&config).unwrap_or_default());
+        let started = launch_with(&session(AgentKind::Codex, None), Some(&account), &HashMap::new(), None);
+        assert_eq!(listed.args, started.args, "the same arguments");
+        assert!(std::fs::read_to_string(&config).unwrap_or_default().contains("trust_level = \"trusted\""), "a start trusts its worktree");
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// A worktree Glasscode made is trusted in the account's Claude config as the person's start
+    /// launches it (Claude 2.1's "trust this folder?" defaults to "No, exit"); everything else in
+    /// the file stays. Not for the argument lists, an automation session, a folder Glasscode did
+    /// not make, nor an account with no config file yet.
+    #[test]
+    fn claude_trusts_a_worktree_glasscode_made() {
+        use crate::profile::{ProfileFacts, SessionOrigin};
+        let account = Account { id: format!("claude-trust-{}", std::process::id()), agent: AgentKind::Claude, label: "Test".into(), plan: None, system_default: false };
+        let dir = account.config_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".claude.json");
+        let worktree = paths::worktrees_dir().join("app").join(format!("feat-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&worktree).unwrap();
+        let key = std::fs::canonicalize(&worktree).unwrap().to_string_lossy().into_owned();
+        let before = serde_json::json!({ "numStartups": 3, "projects": { "/other": { "allowedTools": ["Read"] } } });
+        let reset = || std::fs::write(&file, before.to_string()).unwrap();
+        let read = || serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut s = session(AgentKind::Claude, None);
+        s.worktree = worktree.clone();
+        // The argument lists write nothing; an automation session keeps its folder's prompt.
+        reset();
+        launch_args(&s, Some(&account), &HashMap::new(), None);
+        assert_eq!(read(), before);
+        let facts = ProfileFacts { worktree: worktree.clone(), ..ProfileFacts::default() };
+        let automation = crate::profile::session_profile(SessionOrigin::Automation, AgentKind::Claude, &crate::gate::ProjectPolicy::default(), &facts);
+        launch_with(&s, Some(&account), &HashMap::new(), Some(&automation));
+        assert_eq!(read(), before);
+        // The person's start trusts it, once, and keeps the rest.
+        launch_with(&s, Some(&account), &HashMap::new(), None);
+        let after = read();
+        assert_eq!(after["projects"][&key]["hasTrustDialogAccepted"], true, "{after}");
+        assert_eq!((after["numStartups"].clone(), after["projects"]["/other"].clone()), (serde_json::json!(3), serde_json::json!({ "allowedTools": ["Read"] })));
+        let person = crate::profile::session_profile(SessionOrigin::Person, AgentKind::Claude, &crate::gate::ProjectPolicy::default(), &facts);
+        launch_with(&s, Some(&account), &HashMap::new(), Some(&person));
+        assert_eq!(read(), after, "trusted once");
+        // A folder Glasscode did not make, and an account Claude never started in: untouched.
+        reset();
+        let mut own = s.clone();
+        own.worktree = std::env::temp_dir();
+        launch_with(&own, Some(&account), &HashMap::new(), None);
+        assert_eq!(read(), before);
+        std::fs::remove_file(&file).unwrap();
+        launch_with(&s, Some(&account), &HashMap::new(), None);
+        assert!(!file.exists(), "no config file is made");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&worktree);
+    }
+
+    /// Every Codex session starts with Codex's own update check off, new or resumed, the person's
+    /// or under any profile: its "Update available" dialog has "Update now" chosen, and a first
+    /// Enter would run `brew upgrade` on the CLI every session shares.
+    #[test]
+    fn a_codex_session_never_checks_for_updates() {
+        use crate::profile::{ProfileFacts, SessionOrigin};
+        let account = Account { id: format!("codex-update-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let facts = ProfileFacts { worktree: "/tmp".into(), ..ProfileFacts::default() };
+        let profiles = [None, Some(SessionOrigin::Person), Some(SessionOrigin::Automation), Some(SessionOrigin::Quarantine)];
+        for conversation in [None, Some("019a0000-0000-7000-8000-000000000001")] {
+            for origin in profiles {
+                let profile = origin.map(|o| crate::profile::session_profile(o, AgentKind::Codex, &crate::gate::ProjectPolicy::default(), &facts));
+                let args = launch_with(&session(AgentKind::Codex, conversation), Some(&account), &HashMap::new(), profile.as_ref()).args;
+                let at = args.windows(2).position(|w| w == ["-c", CODEX_NO_UPDATE_CHECK]);
+                let end = args.iter().position(|a| a == "resume" || a == "--").unwrap_or(args.len());
+                assert!(at.is_some_and(|at| at < end), "{origin:?}, {conversation:?}: {args:?}");
+            }
+        }
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn the_memory_brief_is_a_second_session_start_hook_only_when_on() {
         let off: Value = serde_json::from_str(&claude_hook_settings(None, false, false, false)).unwrap();
@@ -1448,6 +1629,28 @@ mod tests {
     const TURN_START: &[&str] = &["event_msg task_started", "response_item message developer", "response_item message user", "world_state", "turn_context", "response_item message user", "event_msg item_completed"];
     /// The rest of the turn that answered.
     const GOOD_TURN_END: &[&str] = &["event_msg item_completed", "event_msg item_completed", "response_item reasoning", "response_item message assistant", "token_usage_record", "event_msg token_count", "event_msg task_complete"];
+
+    #[test]
+    fn a_new_conversations_first_turn_is_read_from_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-01-01T00-00-00-c1.jsonl");
+        // The first turn ended before Glasscode found the file (the live checks: never reported).
+        append_to(&path, &rollout(&["session_meta"]));
+        append_to(&path, &rollout(TURN_START));
+        append_to(&path, &rollout(GOOD_TURN_END));
+        let kinds = |tail: &mut RolloutTail| {
+            tail.poll();
+            tail.take_events().iter().filter_map(|e| e["payload"]["type"].as_str().map(str::to_string)).collect::<Vec<_>>()
+        };
+        let mut found = RolloutTail::for_turns(&path, true);
+        let seen = kinds(&mut found);
+        assert!(seen.contains(&"task_started".to_string()) && seen.contains(&"task_complete".to_string()), "{seen:?}");
+        // A conversation resumed by this launch: its old turns are not news.
+        let mut resumed = RolloutTail::for_turns(&path, false);
+        assert!(kinds(&mut resumed).is_empty());
+        append_to(&path, &rollout(TURN_START));
+        assert_eq!(kinds(&mut resumed), ["task_started"]);
+    }
 
     #[test]
     fn a_codex_turn_works_from_its_start_to_its_end() {

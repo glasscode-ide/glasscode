@@ -1241,7 +1241,13 @@ account) and returns what phones queued (`MirrorInput`: text, answer, keys), the
 continued on the server, and how much of each conversation the server has; the rest goes with
 `mirror.conversation` (appended in 512 KB pieces). The server keeps mirrors in
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
-the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
+the copy and queues `sessions.send/answer/keys` for the Mac, with the phone's signature
+(`signed`: its device key, a nonce and its signature of `remote::input_message`, which names
+the Mac app's `launch` and the session). The Mac does an input only when a phone it pinned at
+pairing signed it, once per nonce, and never into a shell (`remote::check_relayed`); it picks no
+option that allows something for good, and presses no keys while a question is open. The server
+cannot type into the Mac's sessions by itself, and its manager reaches only its own sessions.
+`mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
 the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
@@ -1262,7 +1268,11 @@ the epoch changed or another move is under way), then one push and one `worktree
 the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
 the same move tag gives the same session, so a retry after a lost reply never starts a
 second), then `owners.commit`, which starts them. A failure before the commit sends
-`owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
+`owners.abort`: the held sessions go, and the unit stays where it was. A commit whose reply is
+lost is settled by the owner record; when the record cannot be read either (the connection went
+with the reply), the outcome is unknown (`switch::Unsettled`): the move's note
+(`State::worktrees_moving`) stays, nothing of the unit starts on the Mac, and `switch::recover`
+settles it by the record once the server answers again. A move that makes no
 progress for 2 minutes is given up by the server's clock. Every runner checks the record:
 glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
 a session whose worktree the server owns now, but keeps the session listed. Opening it brings
@@ -1351,6 +1361,14 @@ iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate 
 Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
 ```
 
+A phone's key runs only `glasscoded gate`, and the gate only `rpc` (as the phone's declared
+connection, within `caller::PHONE_ALLOWED`) and `attach <session>`. **A phone's terminal is view
+only**: `sessions.attach` gives a phone tmux's read-only client (`attach-session -r`, which
+drops what is typed in it; only detaching works), and the gate runs no other attach for a phone.
+A phone types only through `sessions.send`, `sessions.keys` and `sessions.answer`, which reach an
+agent's session only and refuse a shell, the agent's `!`, `BTab`, keys while it asks something
+and an answer that allows for good (`daemon::phone_session_refusal`).
+
 - **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
   added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
   allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
@@ -1362,9 +1380,17 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
   `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
   it forwards anything, and each of the Mac's connections declares its `MachineId`
-  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
-  may not call `restart`, `shutdown`, `phones.add` or `caller.declare`, and only a machine may
-  call `owners.*` (`glasscode_core::caller::daemon_refusal`).
+  (`authority/machine.json`). A connection that declares nothing is the app, as before; the gate
+  never forwards a phone on one (a daemon that refuses the declaration serves the phone nothing).
+  A phone may call only `caller::PHONE_ALLOWED` (the server-sync plan's phase 0b): `hello`,
+  `state`, `sessions.transcript` and `sessions.peek`; `sessions.send`, `sessions.keys`,
+  `sessions.answer` and `sessions.attach` (view only) for an agent's session only (never a shell's; no text
+  starting with the agent's `!`, no `BTab`, no keys while the session asks something, no answer
+  that allows for good: `daemon::phone_session_refusal`); `today.get`, `today.op` (the board, and
+  approvals answered with the phone's signature, checked on the Mac); and `phones.push_token`. It
+  starts no session. Only a machine may call `owners.*` (`glasscode_core::caller::daemon_refusal`).
+  The manager's stores in a `mirror.sync` are taken only from a machine's connection, as the
+  machine it declared.
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

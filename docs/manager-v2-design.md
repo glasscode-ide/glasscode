@@ -233,14 +233,14 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 | `server.json`, `glasscoded.json`, `glasscoded.sock`, `cli-versions.json`, `clis.json`, `control.key` (glasscoded's session-signing key), `push.json`, `push-devices.json`, `relay.json`, `auto-review.json`, `ci-fix.json`, `tmux.conf`, `review-prompt.md`, `device/`, `machine-id`, `board.json`, `activity.json` | Authority | deny | deny | the app and glasscoded (`review-prompt.md` and `push.json`: the person) |
 | `words/<machine>/` | Words | deny | deny | the app and glasscoded |
 | `effects/`, `journal/`, `agent-log.jsonl`, `glasscoded.log`, `manager/` (all but `manager/work/`) | Ledger | deny | deny | the app and glasscoded |
-| `memory/` (git) | Trusted memory | read: per proof P07 (owner); write: deny | deny | `glasscode memory …` only |
+| `memory/` (git) | Trusted memory | person profile: read (P07); automation and quarantine profiles: deny (lead decision, 2026-11-21: the files hold every project's and employer's memory, and those sessions read their own project's through `glasscode memory`); write: deny | person profile: read (P07); automation and quarantine profiles: deny (the same decision) | `glasscode memory …` only |
 | `agent-notes/<key>/<agent>/` | Agent notes | read and write for that project's sessions | read and write for that project's sessions | sessions, and Claude's redirected auto-memory |
 | `handoff/` | Handoff | person profile: read, as today; automation and quarantine profiles: deny (a note can hold another project's diff) | same | the app, one note per handoff |
 | `worktrees/<project>/<branch>/` | Worktree | the session's own one read and write; others denied for automation and quarantine sessions | same | sessions |
 | `accounts/<id>/`, `~/.claude`, `~/.claude.json`, `~/.codex` | Accounts | deny (the agent process reads its own folder directly, outside the tools) | deny | the vendor CLI |
 | `events/`, `settings/` | Hook IO | deny | deny | hooks, which run outside the sandbox |
 | `manager/work/` | Brain work folder | the brain only | none (the brain has no shell) | the brain |
-| `bin/` (the `glasscode` command), `agent/` (Claude's plugin, `--plugin-dir`), `pasted/` (files pasted into a terminal), `control.sock` | Session tools | read, never write | read and run, never write; `control.sock`: connect only | the app |
+| `bin/` (the `glasscode` command), `agent/` (Claude's plugin, `--plugin-dir`), `pasted/` (files pasted into a terminal), `control.sock` | Session tools | read, never write | read and run, never write; `control.sock`: connect only, for the person profile (automation and quarantine sessions reach none: their commands go as request files in their worktree, which the app attributes to that worktree's session; lead decision, 2026-11-21) | the app |
 | `cache/`, `github-cache.json`, `usage-cache.json`, `linear.json`, `browser/`, `mirrors/`, `usage/`, `updates/` | Cache | deny | deny | the app, or glasscoded (`mirrors/`) |
 | `unsaved/` | Cache | deny | deny | the app (editor text it could not save when quitting; it has a data-map row, as it is not rebuilt) |
 | `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc` (and `~/.netrc.gpg`, `~/.authinfo`, `~/.authinfo.gpg`, `~/.git-credentials`), `~/.gnupg`, keychain files (`~/Library/Keychains`, `~/.local/share/keyrings`, Windows' `Microsoft/Credentials` and `Microsoft/Protect` folders), a file (never a folder) whose name starts with `.env` anywhere: `.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc` | Credentials | deny read | deny read | not Glasscode |
@@ -248,7 +248,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 The table is `paths::layout()`, and `paths::class_of` reads a path by it (M10):
 - **No class means denied.** A path inside the Glasscode folder with no row (`class_of` returns `Classified::InsideUnlisted`) is denied to sessions. M22 relies on this. A path outside it with no row is `Classified::Outside`.
 - **The longest entry decides.** `manager/work/` is Brain work; `manager/work.json` and the rest of `manager/` are Ledger.
-- **`control.sock`** is Session tools because sessions connect to it (the `glasscode` command). There is nothing to read or write in it. M22 allows only the connection (the sandbox's `allowUnixSockets`), not file access.
+- **`control.sock`** is Session tools because sessions connect to it (the `glasscode` command). There is nothing to read or write in it. M22 allows only the connection (the sandbox's `allowUnixSockets`), not file access, and only to the person profile: on the socket any program can leave out a session's signature and pass for one outside Glasscode, so an automation or quarantine session's sandbox reaches no socket, and its commands go as request files that the app knows as that session's (`caller::by_channel_proven`). Its MCP server and hooks run outside the sandbox and keep the socket.
 - **Siblings.** A file's siblings with a suffix (`.broken`, `.prev`, `.lock`, `.tmp`) have the file's class.
 - **`.env`.** A file whose name starts with `.env` (`.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc`) is Credentials wherever sessions could otherwise read it, below its folder. A folder never is (`.envs/`, `.envoy/`, `.env.d/`); a name that only ends like it (`prod.env`) is not either. `class_of` reads the disk to tell the folder from the file; a name that is not there yet counts as a file.
 - **Links.** The path is read as written: letter case ignored, `.` and `..` taken back, and Windows' `\\?\` prefixes folded. It matches the Glasscode and home folders both as they are named and with their links resolved, so a canonical path (`/private/var/…` on macOS) has its class too. A folder that does not exist yet is resolved by its nearest ancestor that exists, with the rest after it. When not even that resolves, everything under the Glasscode folder as written is `InsideUnlisted`, which is denied. Links inside the path itself are not resolved. `class_of` reads the disk, so `decide()` (M21: no IO) must not call it.
@@ -362,7 +362,8 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | Only one home acts at a time | enforced by the server's lease and generation, with outward claims registered there | M58 partition and sleep tests |
 
 **Not protected**, said plainly:
-- a program running as the person, such as malware, can do anything the person can;
+- a session's program that leaves its session's process tree (a double fork, which hands it to launchd) is no longer known as that session on the control socket: attribution by process (the socket peer's parent chain) is guarded, not a wall. With session profiles on, an automation or quarantine session's sandbox reaches no socket at all, and its request files are its own;
+- a program running as the person, such as malware, can do anything the person can. It can also act as the manager: the brain's MCP server reads its signature from a 0600 file in the manager's run folder (never from a command line, which any process can list), and anything running as the person, outside a sandbox, can read that file too;
 - a session in the person profile, fooled by planted text, can act within the person's own permissions until a hook or the forge stops it;
 - native Windows has no Claude sandbox;
 - on native Windows, a store's save is atomic but is not proven to last a power cut at the moment it returns:
@@ -581,7 +582,7 @@ pub fn runs_glasscode(line: &str) -> bool;                                    //
 pub const DAEMON_FEATURE: &str = "caller"; pub const DECLARE_METHOD: &str = "caller.declare";  // params: the Caller JSON
 pub struct DaemonConnection;          // undeclared is Ui; the first declaration wins; only machine, phone and ui are declared
 impl DaemonConnection { pub fn caller(&self) -> Caller; pub fn declare(&mut self, params: &Value) -> Result<Caller, String>; }
-pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: restart, shutdown, phones.add, caller.declare; owners.*: Machine only
+pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: only PHONE_ALLOWED (phase 0b); owners.*: Machine only
 pub fn device_id_for_key(blob: &str) -> String; pub fn device_id_ok(id: &str) -> bool;  // gate --device <id>; "unknown" for older lines
 
 // glasscode_core::words

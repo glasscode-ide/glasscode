@@ -38,10 +38,11 @@ impl Sink {
             Sink::Socket(tx) => {
                 let _ = tx.send(reply.clone());
             }
+            // Never through a link a session planted there (`control::append_answer`).
             Sink::File(path) => {
                 let Ok(line) = serde_json::to_string(reply) else { return };
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(file, "{line}");
+                if let Err(err) = control::append_answer(path, &line) {
+                    log::warn!("a request's answer was not written: {err}");
                 }
             }
             Sink::Remote(id, out) => {
@@ -54,12 +55,14 @@ impl Sink {
 }
 
 /// How a request reached the app, for deciding who is asking.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Source {
-    /// A socket connection, and the process on the other end.
-    Socket(Option<u32>),
-    /// A request file dropped in a worktree (anyone may drop one, so never the person).
-    File,
+    /// A socket connection: the process on the other end when the system says which, and that
+    /// process with the programs above it (`sys::lineage`), None when they could not be read.
+    Socket { pid: Option<u32>, lineage: Option<Vec<u32>> },
+    /// A request file dropped in this worktree (anyone may drop one, so never the person; and
+    /// whatever it says, the request of a session in that worktree, when there is one).
+    File(PathBuf),
 }
 
 /// Who asks, as the app shows and the gate decides: who it is by the channel it came in on (the
@@ -230,6 +233,7 @@ impl Responder {
 pub(crate) struct Running {
     pub what: String,
     pub op: &'static str,
+    /// Whose it is (`Caller::follower`): only it, or the person, waits for it or stops it.
     pub origin: String,
     pub job: std::sync::Arc<ops::job::Job>,
 }
@@ -336,8 +340,9 @@ pub struct ControlUi {
     pub launch: String,
     pub approvals: Vec<Approval>,
     next_approval: u64,
-    /// Answers to requests that waited (for `glasscode wait`).
-    results: HashMap<u64, Reply>,
+    /// Answers to requests that waited (for `glasscode wait`), with whose request it was
+    /// (`Caller::follower`): only it, or the person, reads one.
+    results: HashMap<u64, (String, Reply)>,
     /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
     /// same count as approvals) and what they do, until their result is in `results`.
     running: HashMap<u64, Running>,
@@ -392,6 +397,12 @@ pub struct ControlUi {
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
     pub profiles: bool,
+    /// The engine switch and the approved authority (who started which session) are read: at the
+    /// start that happens in the background, and an agent's start waits for it, so a session
+    /// restored at the start never runs without its profile (the live checks found one that did).
+    pub engine_read: bool,
+    /// The agent sessions whose start waited for that read, started once it is done.
+    pub held_starts: Vec<String>,
     /// The v2 features of the engine switch as saved (`authority/engine.json`'s `switches`): what
     /// Settings › Manager shows; a change takes effect from the next start.
     pub engine_features: std::collections::BTreeMap<String, bool>,
@@ -437,6 +448,8 @@ impl ControlUi {
             machine: None,
             expanded: HashSet::new(),
             profiles: false,
+            engine_read: false,
+            held_starts: Vec::new(),
             engine_features: Default::default(),
             profile_running: HashMap::new(),
         }
@@ -588,6 +601,55 @@ fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
     glasscode_core::git::is_tracked(worktree, path)
 }
 
+/// One worktree's request files (`Workspace::control_scan`): each plain request nobody committed
+/// goes to the app; anything else in the folder that is not a plain file is cleared away, and an
+/// answer nobody collected goes after a day. False when the worktree has no such folder of its
+/// own: a link in place of the folder (or of `.glasscode`) is never followed
+/// (`control::own_drop_dir`), as the app clears and writes there outside any sandbox.
+fn scan_drop_dir(worktree: &std::path::Path, tx: &async_channel::Sender<(Request, Source, Sink)>) -> bool {
+    let Some(dir) = control::own_drop_dir(worktree) else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // A real request we would answer is a plain file nobody committed. A symlink or
+        // a tracked file is someone trying to make us read or write somewhere else.
+        let plain = entry.file_type().is_ok_and(|t| t.is_file());
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("req") if plain && !tracked(worktree, &path) => {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let out = path.with_extension("out");
+                // Make the answer file ourselves (never follow a symlink or append to a
+                // file that is already there).
+                let _ = std::fs::remove_file(&out);
+                match serde_json::from_str::<Request>(text.trim()) {
+                    Ok(request) => {
+                        let _ = tx.try_send((request, Source::File(worktree.to_path_buf()), Sink::File(out)));
+                    }
+                    Err(e) => Sink::File(out).send(&Reply::fail(code::USAGE, format!("Glasscode could not read the request: {e}"))),
+                }
+            }
+            Some("req") if plain => {
+                // A committed or linked request: refuse it, do not run it.
+                let _ = std::fs::remove_file(&path);
+            }
+            // Answers nobody collected.
+            Some("out" | "tmp") if plain => {
+                if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            _ => {
+                // Not a plain file we wrote: get it out of the way.
+                if !plain {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    true
+}
+
 /// One connection: a request line in, answer lines out.
 fn serve(stream: sys::control::Stream, tx: async_channel::Sender<(Request, Source, Sink)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -607,8 +669,12 @@ fn serve(stream: sys::control::Stream, tx: async_channel::Sender<(Request, Sourc
             return;
         }
     };
+    // Which programs the peer runs under: a session's, when one of them is its program
+    // (`Workspace::control_caller`). Read here, off the main thread; a brain's server is known by
+    // its token instead.
+    let lineage = if request.brain.is_some() { None } else { peer.and_then(glasscode_core::sys::lineage) };
     let (reply_tx, reply_rx) = mpsc::channel::<Reply>();
-    if tx.send_blocking((request, Source::Socket(peer), Sink::Socket(reply_tx))).is_err() {
+    if tx.send_blocking((request, Source::Socket { pid: peer, lineage }, Sink::Socket(reply_tx))).is_err() {
         return;
     }
     while let Ok(reply) = reply_rx.recv() {
@@ -634,8 +700,8 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
             // was).
             let Some((agent, title)) = session else {
                 let pid = match source {
-                    Source::Socket(pid) => pid,
-                    Source::File => None,
+                    Source::Socket { pid, .. } => pid,
+                    Source::File(_) => None,
                 };
                 return outside("A program outside Glasscode", caller::Caller::Terminal { pid });
             };
@@ -656,6 +722,13 @@ fn caller_of(found: caller::Caller, source: Source, session: Option<(AgentKind, 
     }
 }
 
+/// The heading of a card that waits for the person: who asks ("A program outside Glasscode asks
+/// you"), or, for what the person asked themselves (a `glasscode` line in a shell tab), a check of
+/// their own request, never "You asks you".
+pub(crate) fn card_title(caller: &Caller) -> String {
+    if caller.is_person() { "Confirm your request".to_string() } else { format!("{} asks you", caller.who) }
+}
+
 fn shell_line(args: &[String]) -> String {
     let words: Vec<String> = args
         .iter()
@@ -665,6 +738,21 @@ fn shell_line(args: &[String]) -> String {
 }
 
 impl Workspace {
+    /// The engine switch is read (or, with no socket, will not be: a second copy of Glasscode, a
+    /// socket that cannot be made, and its agents start as before): the held agents start, and
+    /// the one on screen takes the keys as it would have at the start (unless the person is in
+    /// something else by now).
+    fn control_engine_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.control.engine_read = true;
+        let held = std::mem::take(&mut self.control.held_starts);
+        for id in &held {
+            self.ensure_terminal(id, window, cx);
+        }
+        if self.state.active_session.as_ref().is_some_and(|active| held.contains(active)) {
+            self.focus_active_if_watching(window, cx);
+        }
+    }
+
     /// Open the socket (a named pipe on Windows), write the `glasscode` command and what tells
     /// agents about it.
     pub fn control_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -672,11 +760,13 @@ impl Workspace {
         // Another Glasscode already answers there (a second copy): leave it be.
         if sys::control::connect(&path).is_ok() {
             self.control.error = Some("Another Glasscode is running; the glasscode command talks to that one.".into());
+            self.control_engine_read(window, cx);
             return;
         }
         if let Err(e) = control::prepare_socket_dir(&path) {
             self.control.error = Some(format!("The glasscode command cannot reach this app ({e})."));
             log::warn!("control socket folder {}: {e}", path.display());
+            self.control_engine_read(window, cx);
             return;
         }
         let listener = match sys::control::listen(&path) {
@@ -684,6 +774,7 @@ impl Workspace {
             Err(e) => {
                 self.control.error = Some(format!("The glasscode command cannot reach this app ({e})."));
                 log::warn!("control socket {}: {e}", path.display());
+                self.control_engine_read(window, cx);
                 return;
             }
         };
@@ -738,6 +829,8 @@ impl Workspace {
                 this.control_set_authority(authority, cx);
                 this.control_restore_pending(pending, cx);
                 this.control_watch_authority(cx);
+                // The agents that waited for the profiles start now, each under its own.
+                this.control_engine_read(window, cx);
                 // The manager's wake lane, with the v2 engine (M51), and its chat's conversation
                 // (M52.1).
                 this.lanes_refresh();
@@ -798,51 +891,14 @@ impl Workspace {
         let Some(tx) = self.control.tx.clone() else { return };
         let worktrees: HashSet<PathBuf> = self.state.sessions.iter().filter(|s| self.terminals.contains_key(&s.id)).map(|s| s.worktree.clone()).collect();
         for worktree in worktrees {
-            let dir = control::drop_dir(&worktree);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            if !scan_drop_dir(&worktree, &tx) {
+                continue;
+            }
             if self.control.excluded.insert(worktree.clone()) {
                 let path = worktree.clone();
                 std::thread::spawn(move || {
                     let _ = glasscode_core::git::exclude(&path, ".glasscode/");
                 });
-            }
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // A real request we would answer is a plain file nobody committed. A symlink or
-                // a tracked file is someone trying to make us read or write somewhere else.
-                let plain = entry.file_type().is_ok_and(|t| t.is_file());
-                match path.extension().and_then(|e| e.to_str()) {
-                    Some("req") if plain && !tracked(&worktree, &path) => {
-                        let text = std::fs::read_to_string(&path).unwrap_or_default();
-                        let _ = std::fs::remove_file(&path);
-                        let out = path.with_extension("out");
-                        // Make the answer file ourselves (never follow a symlink or append to a
-                        // file that is already there).
-                        let _ = std::fs::remove_file(&out);
-                        match serde_json::from_str::<Request>(text.trim()) {
-                            Ok(request) => {
-                                let _ = tx.try_send((request, Source::File, Sink::File(out)));
-                            }
-                            Err(e) => Sink::File(out).send(&Reply::fail(code::USAGE, format!("Glasscode could not read the request: {e}"))),
-                        }
-                    }
-                    Some("req") if plain => {
-                        // A committed or linked request: refuse it, do not run it.
-                        let _ = std::fs::remove_file(&path);
-                    }
-                    // Answers nobody collected.
-                    Some("out" | "tmp") if plain => {
-                        if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                    _ => {
-                        // Not a plain file we wrote: get it out of the way.
-                        if !plain {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                }
             }
         }
     }
@@ -853,20 +909,52 @@ impl Workspace {
     /// which may read and asks for the rest. The request's `interactive` flag decides nothing (it
     /// only names a terminal; v1's rule that took it at its word, owner decision O13, went with
     /// M56 row 7).
-    pub fn control_caller(&self, request: &Request, source: Source) -> Caller {
+    ///
+    /// The channel proves a session too, signed or not (`caller::by_channel_proven`): a request
+    /// file is the request of a session in the worktree it was found in; a socket's peer that runs
+    /// under a session's program (`session_pids`: each session's terminal process) is that
+    /// session's. Only a peer under no session's program may be a program outside Glasscode, and a
+    /// peer whose programs cannot be read is refused unless its signature or token says who it is.
+    pub fn control_caller(&self, request: &Request, source: Source, session_pids: &[(String, u32)]) -> Result<Caller, Reply> {
         let cwd = request.cwd.as_ref().map(PathBuf::from);
-        let channel = match source {
-            Source::Socket(pid) => Channel::Socket { pid },
-            Source::File => Channel::RequestFile,
-        };
         let signed = |id: &str, sig: &str| (sig == self.control.signature(id)).then(|| self.state.session(id)).flatten().map(|session| Signed { shell: session.agent == AgentKind::Shell });
+        let brain = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text));
+        let (channel, proven) = match &source {
+            Source::Socket { pid, lineage: Some(lineage) } => (Channel::Socket { pid: *pid }, self.control_rank(caller::sessions_over(lineage, session_pids))),
+            Source::Socket { pid, lineage: None } => {
+                let says_who = brain.is_some() || request.session.as_deref().zip(request.sig.as_deref()).is_some_and(|(id, sig)| signed(id, sig).is_some());
+                if !says_who {
+                    return Err(Reply::fail(code::DENIED, "Glasscode cannot tell which program asks (the system did not say which process is on the other end), so it does nothing for it."));
+                }
+                (Channel::Socket { pid: *pid }, Vec::new())
+            }
+            // A request file is the request of a session in the worktree it was found in.
+            Source::File(worktree) => (Channel::RequestFile, self.control_sessions_in(worktree)),
+        };
         // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
-        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, caller::typed_command_recently));
+        let found = brain.unwrap_or_else(|| caller::by_channel_proven(request, &channel, signed, caller::typed_command_recently, &proven));
         let session = match &found {
             caller::Caller::Session { id, .. } | caller::Caller::ShellTab { session: id, .. } => self.state.session(id).map(|s| (s.agent, self.session_title(s))),
             _ => None,
         };
-        caller_of(found, source, session, (&self.state.manager.name, self.state.manager.brain), request.interactive, cwd)
+        Ok(caller_of(found, source, session, (&self.state.manager.name, self.state.manager.brain), request.interactive, cwd))
+    }
+
+    /// The sessions of a worktree, the strictest origin first (quarantine, then automation, then
+    /// the person's): whose request a file found there is (`caller::by_channel_proven`).
+    pub(crate) fn control_sessions_in(&self, worktree: &std::path::Path) -> Vec<String> {
+        self.control_rank(self.state.sessions.iter().filter(|s| s.worktree == worktree).map(|s| s.id.clone()).collect())
+    }
+
+    /// Sessions, the strictest origin first: quarantine, then automation, then the person's.
+    fn control_rank(&self, mut ids: Vec<String>) -> Vec<String> {
+        let rank = |id: &str| match self.control.authority.origin(id) {
+            gate::SessionOrigin::Quarantine => 0,
+            gate::SessionOrigin::Automation => 1,
+            gate::SessionOrigin::Person => 2,
+        };
+        ids.sort_by_key(|id| rank(id));
+        ids
     }
 
     /// The first prompt of `session`, as the agent is started with it: the person's, when they
@@ -1062,6 +1150,40 @@ impl Workspace {
 
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
+    /// Mark a session quarantined before its agent first starts (D27): it was started for a
+    /// pull request's text by an author who is not trusted, so it runs under the quarantine profile
+    /// for its whole life, whoever started it.
+    pub(crate) fn control_mark_quarantined(&mut self, id: &str, by: &str) {
+        let now = glasscode_core::clock::now_ms();
+        let origins = self.control.authority.origins.get_or_insert_with(Default::default);
+        if !origins.mark(id, gate::SessionOrigin::Quarantine, by, now) {
+            return;
+        }
+        let (id, by) = (id.to_string(), by.to_string());
+        std::thread::spawn(move || {
+            if let Err(err) = gate::mark_session(&id, gate::SessionOrigin::Quarantine, &by) {
+                log::warn!("gate: could not record {id} as quarantined: {err}");
+            }
+        });
+    }
+
+    /// The person's own GitHub logins, and the teammates they confirmed: whose text is trusted
+    /// (`gate::trusted_author`, D27).
+    pub(crate) fn control_trusted_logins(&self) -> (Vec<String>, Vec<String>) {
+        let mut me: Vec<String> = self.manager.me.iter().cloned().collect();
+        me.extend(self.github.list.iter().flatten().map(|a| a.login.clone()));
+        let confirmed = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+        (me, confirmed)
+    }
+
+    /// Quarantine `id` when it was started for a pull request by an author who is not trusted.
+    pub(crate) fn control_quarantine_for(&mut self, id: &str, author: &str, association: Option<&str>) {
+        let (me, confirmed) = self.control_trusted_logins();
+        if glasscode_core::gate::origin_for_input(gate::SessionOrigin::Person, author, association, &me, &confirmed) == gate::SessionOrigin::Quarantine {
+            self.control_mark_quarantined(id, &format!("untrusted:{author}"));
+        }
+    }
+
     pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
         if caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
             return;
@@ -1181,6 +1303,9 @@ impl Workspace {
         let session_title = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
         let agent = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| s.agent);
         let who = action.who.split(" in “").next().unwrap_or(&action.who).to_string();
+        // A card asked on the server: its words are the server's, and the card says so.
+        let server = self.control.machine.as_ref().is_some_and(|here| action.asked_elsewhere(here)).then(|| self.server.name());
+        let who = card_who(&who, server.as_deref());
         Caller { who, channel, session: action.session.clone(), session_title, agent, cwd: None, project: None, drive: None }
     }
 
@@ -1395,7 +1520,12 @@ impl Workspace {
     }
 
     fn control_handle(&mut self, request: Request, source: Source, sink: Sink, window: &mut Window, cx: &mut Context<Self>) {
-        let caller = self.control_caller(&request, source);
+        // Each session's terminal process: a socket peer under one of them is that session.
+        let session_pids: Vec<(String, u32)> = self.terminals.iter().filter_map(|(id, terminal)| terminal.read(cx).child_pid().map(|pid| (id.clone(), pid))).collect();
+        let caller = match self.control_caller(&request, source, &session_pids) {
+            Ok(caller) => caller,
+            Err(refusal) => return sink.send(&refusal),
+        };
         // A brain's calls wait until the app has checked the tools of its first turn (brain-m5).
         if let Some(refusal) = glasscode_core::mcp::unchecked_brain(&caller.channel, request.brain.is_some(), &self.control.brains_checked) {
             sink.send(&refusal);
@@ -1679,7 +1809,7 @@ impl Workspace {
                     let id = ws.control.next_approval;
                     ws.control.next_approval += 1;
                     let job = ops::job::Job::new();
-                    ws.control.running.insert(id, Running { what: plan.what.clone(), op: name, origin: responder.caller.channel.origin(), job: job.clone() });
+                    ws.control.running.insert(id, Running { what: plan.what.clone(), op: name, origin: responder.caller.channel.follower(), job: job.clone() });
                     let cancel = if ops::job::CANCELLABLE.contains(&name) { format!(", and `cancel {id}` stops it") } else { String::new() };
                     let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result{cancel}.", plan.what), serde_json::json!({ "status": "started", "id": id, "cancellable": ops::job::CANCELLABLE.contains(&name) }));
                     for sink in std::mem::take(&mut responder.sinks) {
@@ -1732,7 +1862,7 @@ impl Workspace {
             sink.send(&Reply::Waiting { approval: id, summary: summary.clone() });
         }
         let agent = approval.caller.agent.unwrap_or(AgentKind::Claude);
-        let title = format!("{} asks you", approval.caller.who);
+        let title = card_title(&approval.caller);
         let body = match &approval.why {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
@@ -1868,7 +1998,7 @@ impl Workspace {
             sink.send(&reply);
         }
         if let Some(id) = responder.approval {
-            self.control.results.insert(id, reply.clone());
+            self.control.results.insert(id, (responder.caller.channel.follower(), reply.clone()));
             self.control.running.remove(&id);
         }
         if let (Some(key), Reply::Done { .. }) = (responder.op_id.take(), &reply) {
@@ -1924,12 +2054,12 @@ impl Workspace {
             Called::Done(reply) => Again::Answer(repeated(reply)),
             Called::Waiting(number) if self.control.approvals.iter().any(|a| a.id == *number) => Again::Join(*number),
             Called::Waiting(number) => match self.control.results.get(number) {
-                Some(reply) => Again::Answer(repeated(reply)),
+                Some((_, reply)) => Again::Answer(repeated(reply)),
                 None => Again::Join(*number),
             },
             Called::Running(id) => match self.control.running.get(id) {
                 Some(running) => Again::Answer(running_reply(*id, running)),
-                None => Again::Answer(self.control.results.get(id).map(repeated).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
+                None => Again::Answer(self.control.results.get(id).map(|(_, reply)| repeated(reply)).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
             },
             Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op))),
         })
@@ -1941,7 +2071,7 @@ impl Workspace {
 
     /// Wait along with the request `number` that waits for the person: its answer when it has one.
     fn control_join(&mut self, number: u64, mut sinks: Vec<Sink>) {
-        if let Some(reply) = self.control.results.get(&number).cloned() {
+        if let Some((_, reply)) = self.control.results.get(&number).cloned() {
             for sink in &sinks {
                 sink.send(&reply);
             }
@@ -1965,7 +2095,7 @@ impl Workspace {
     /// `cancel <id>` (M33.2, ops-10): a long op its caller started stops at its next step; a
     /// request that waits for the person is taken back. The caller's own, or any for the person.
     pub(crate) fn control_cancel(&mut self, id: u64, caller: &Caller, cx: &mut Context<Self>) -> Reply {
-        let mine = |origin: &str| caller.channel.is_person() || caller.channel.origin() == origin;
+        let mine = |origin: &str| caller.channel.may_follow(origin);
         if let Some(running) = self.control.running.get(&id) {
             if !mine(&running.origin) {
                 return Reply::fail(code::DENIED, format!("#{id} is another caller's: only it, or the person, may stop it."));
@@ -1977,7 +2107,7 @@ impl Workspace {
             return Reply::ok(format!("Asked #{id} to stop ({}): it stops at its next step. `wait {id}` says what came of it.", running.what), serde_json::json!({ "id": id, "status": "cancelling" }));
         }
         if let Some(index) = self.control.approvals.iter().position(|a| a.id == id) {
-            let origin = self.control.approvals[index].caller.channel.origin();
+            let origin = self.control.approvals[index].caller.channel.follower();
             if !mine(&origin) {
                 return Reply::fail(code::DENIED, format!("#{id} is another caller's request: only it, or the person, may take it back."));
             }
@@ -2030,7 +2160,18 @@ impl Workspace {
 
     /// `glasscode wait <id>`: the answer, or wait along.
     pub fn control_wait(&mut self, id: u64, mut responder: Responder) {
-        if let Some(reply) = self.control.results.get(&id).cloned() {
+        // Only the caller that asked (or the person) follows an op: anyone else is told nothing
+        // waits as that number, as if there were none (`Caller::may_follow`).
+        let asker = responder.caller.channel.clone();
+        let nothing = |responder: &Responder| {
+            for sink in &responder.sinks {
+                sink.send(&Reply::fail(code::FAILED, format!("Nothing is waiting as #{id} (Glasscode forgets answers when it quits).")));
+            }
+        };
+        if let Some((whose, reply)) = self.control.results.get(&id).cloned() {
+            if !asker.may_follow(&whose) {
+                return nothing(&responder);
+            }
             for sink in &responder.sinks {
                 sink.send(&reply);
             }
@@ -2039,17 +2180,17 @@ impl Workspace {
         // Started without waiting, and not done yet: how far it got; ask again later. Not
         // "waiting", which callers read as waiting for the person.
         if let Some(running) = self.control.running.get(&id) {
+            if !asker.may_follow(&running.origin) {
+                return nothing(&responder);
+            }
             let still = running_reply(id, running);
             for sink in &responder.sinks {
                 sink.send(&still);
             }
             return;
         }
-        let Some(approval) = self.control.approvals.iter_mut().find(|a| a.id == id) else {
-            for sink in &responder.sinks {
-                sink.send(&Reply::fail(code::FAILED, format!("Nothing is waiting as #{id} (Glasscode forgets answers when it quits).")));
-            }
-            return;
+        let Some(approval) = self.control.approvals.iter_mut().find(|a| a.id == id && asker.may_follow(&a.caller.channel.follower())) else {
+            return nothing(&responder);
         };
         let summary = approval.summary();
         for sink in &responder.sinks {
@@ -2060,15 +2201,25 @@ impl Workspace {
         }
     }
 
-    pub fn control_approvals_json(&self) -> serde_json::Value {
+    /// What waits for the person, as `app.approvals` lists it for `viewer`: every card for the
+    /// person and the manager (whose job the cards are); a session's or a program's own only.
+    pub fn control_approvals_json(&self, viewer: &caller::Caller) -> serde_json::Value {
         serde_json::Value::Array(
             self.control
                 .approvals
                 .iter()
+                .filter(|a| sees_approval(viewer, a))
                 .map(|a| serde_json::json!({ "id": a.id, "who": a.caller.who, "session": a.caller.session, "session_title": a.caller.session_title, "what": a.what, "command": a.command, "kind": a.kind.key(), "created": a.created }))
                 .collect(),
         )
     }
+}
+
+/// Whether `viewer` sees the card `approval` in `app.approvals`: the person and the manager every
+/// one; anyone else only its own (`Caller::may_follow`), so a session never reads what another
+/// session or the manager asked (a message's text, a command line).
+pub(crate) fn sees_approval(viewer: &caller::Caller, approval: &Approval) -> bool {
+    matches!(viewer, caller::Caller::Manager { .. }) || viewer.may_follow(&approval.caller.channel.follower())
 }
 
 /// What a call with an op id that came again gets: an answer, or to wait along (`control_called`).
@@ -2137,9 +2288,35 @@ pub fn capitalize(text: &str) -> String {
     }
 }
 
+/// Who a card says asked: one asked on another machine (`server`) is labelled as that machine's,
+/// as it wrote the card's words (who, what and why).
+fn card_who(who: &str, server: Option<&str>) -> String {
+    match server {
+        Some(server) => format!("{who}, from {server}"),
+        None => who.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card the server asked says it is the server's: its words (who, what, why) are the
+    /// server's to write, so the person knows whose they read. One asked here is as it says.
+    /// The person's own request (a `glasscode` line in a shell tab) is never "You asks you"; a
+    /// program's says who asks.
+    #[test]
+    fn a_card_of_the_persons_own_request_is_worded_for_them() {
+        assert_eq!(card_title(&Caller::you()), "Confirm your request");
+        let program = Caller { who: "A program outside Glasscode".into(), channel: caller::Caller::Terminal { pid: Some(1) }, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None };
+        assert_eq!(card_title(&program), "A program outside Glasscode asks you");
+    }
+
+    #[test]
+    fn a_server_card_says_it_is_from_the_server() {
+        assert_eq!(card_who("The manager on the server", Some("devbox")), "The manager on the server, from devbox");
+        assert_eq!(card_who("Claude", None), "Claude");
+    }
 
     /// A wake acts only under the playbook that fired it (M51): its proposals, and any other op of
     /// its tools past a read, are cards whatever the gate would allow; a "never" stays never.
@@ -2152,23 +2329,93 @@ mod tests {
     fn who_a_request_is_comes_from_its_channel() {
         let manager = ("Robin's manager", AgentKind::Claude);
         let tab = caller::Caller::ShellTab { session: "s1".into(), project: None };
-        let you = caller_of(tab.clone(), Source::Socket(Some(42)), Some((AgentKind::Shell, "Shell".into())), manager, true, None);
+        let you = caller_of(tab.clone(), Source::Socket { pid: Some(42), lineage: None }, Some((AgentKind::Shell, "Shell".into())), manager, true, None);
         assert!(you.is_person() && !you.is_agent());
         assert_eq!((you.who.as_str(), you.journal_word()), ("You", "you"));
-        let gone = caller_of(tab, Source::Socket(Some(42)), None, manager, true, None);
+        let gone = caller_of(tab, Source::Socket { pid: Some(42), lineage: None }, None, manager, true, None);
         assert!(!gone.is_person() && !gone.is_agent(), "{:?}", gone.channel);
         assert_eq!((gone.who.as_str(), gone.journal_word(), gone.channel), ("A program outside Glasscode", "outside", caller::Caller::Terminal { pid: Some(42) }));
-        let agent = caller_of(caller::Caller::Session { id: "s2".into(), project: None }, Source::Socket(None), Some((AgentKind::Codex, "API".into())), manager, true, None);
+        let agent = caller_of(caller::Caller::Session { id: "s2".into(), project: None }, Source::Socket { pid: None, lineage: None }, Some((AgentKind::Codex, "API".into())), manager, true, None);
         assert!(agent.is_agent() && !agent.is_person() && !agent.is_manager());
         assert_eq!((agent.describe(), agent.journal_word()), ("Codex in “API”".to_string(), "session"));
-        let brain = caller_of(caller::Caller::Manager { lane: caller::Lane::Chat, wake: None, project: None }, Source::Socket(None), None, manager, false, None);
+        let brain = caller_of(caller::Caller::Manager { lane: caller::Lane::Chat, wake: None, project: None }, Source::Socket { pid: None, lineage: None }, None, manager, false, None);
         assert!(brain.is_agent() && brain.is_manager() && !brain.is_person());
         assert_eq!(brain.journal_word(), "manager");
-        let terminal = caller_of(caller::Caller::Terminal { pid: Some(7) }, Source::Socket(Some(7)), None, manager, true, None);
+        let terminal = caller_of(caller::Caller::Terminal { pid: Some(7) }, Source::Socket { pid: Some(7), lineage: None }, None, manager, true, None);
         assert!(!terminal.is_person() && !terminal.is_agent(), "typed at a terminal is nobody's word");
         assert_eq!((terminal.who.as_str(), terminal.journal_word()), ("A terminal outside Glasscode", "outside"));
-        let file = caller_of(caller::Caller::Terminal { pid: None }, Source::File, None, manager, false, None);
+        let file = caller_of(caller::Caller::Terminal { pid: None }, Source::File(PathBuf::new()), None, manager, false, None);
         assert_eq!(file.who, "A program outside Glasscode");
+    }
+
+    /// A scratch folder of this test run, removed afterwards.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("glasscode-control-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A sandboxed session writes its worktree only, but the app answers its request files, outside
+    /// the sandbox: a link it plants where the answer goes (minutes after the request, when the
+    /// person is asked) must not make the app append to a file elsewhere, such as `~/.zshrc`,
+    /// where a `$(…)` of the request's words would run.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_files_answer_never_follows_a_link() {
+        let scratch = Scratch::new("answer-link");
+        let dir = control::drop_dir(&scratch.path().join("wt"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = scratch.path().join("zshrc");
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        std::os::unix::fs::symlink(&rc, dir.join("x.out")).unwrap();
+        Sink::File(dir.join("x.out")).send(&Reply::fail(code::USAGE, "No project “$(touch pwned)”."));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n", "the answer went through the link");
+        // Nor through a link in place of the folder.
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        Sink::File(dir.join("y.out")).send(&Reply::fail(code::USAGE, "x"));
+        assert!(!elsewhere.join("y.out").exists(), "the answer went into the linked folder");
+    }
+
+    /// The scan clears away whatever in the request folder is not a plain file. A sandboxed session
+    /// that makes the folder itself a link (to `/opt/homebrew/bin`, to the home folder) must not have
+    /// the app clear that folder's links, or answer requests there.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_request_folder_is_not_scanned() {
+        let scratch = Scratch::new("linked-folder");
+        let worktree = scratch.path().join("wt");
+        let victim = scratch.path().join("bin");
+        std::fs::create_dir_all(worktree.join(".glasscode")).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::os::unix::fs::symlink("/bin/ls", victim.join("tool")).unwrap();
+        std::os::unix::fs::symlink(&victim, control::drop_dir(&worktree)).unwrap();
+        let (tx, _rx) = async_channel::unbounded();
+        scan_drop_dir(&worktree, &tx);
+        assert!(std::fs::symlink_metadata(victim.join("tool")).is_ok(), "the scan removed a link in the folder the request folder points at");
+        // A request folder of its own is scanned as before: a link in it goes.
+        std::fs::remove_file(control::drop_dir(&worktree)).unwrap();
+        std::fs::create_dir_all(control::drop_dir(&worktree)).unwrap();
+        std::os::unix::fs::symlink(&victim, control::drop_dir(&worktree).join("planted")).unwrap();
+        assert!(scan_drop_dir(&worktree, &tx));
+        assert!(std::fs::symlink_metadata(control::drop_dir(&worktree).join("planted")).is_err());
     }
 
     #[test]

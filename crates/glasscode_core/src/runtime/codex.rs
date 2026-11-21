@@ -26,13 +26,28 @@ pub fn args(spec: &BrainSpec, instructions: &std::path::Path, thread: Option<&st
         set("model_reasoning_effort", serde_json::to_string(effort).unwrap_or_default());
     }
     args.extend(["-m".into(), spec.model.clone()]);
-    args.extend(crate::mcp::codex_flags(&spec.glasscode, &spec.brain_env));
+    args.extend(crate::mcp::codex_flags(&spec.glasscode, &server_env(spec)));
     // `exec`'s options come before its `resume` (as P02 ran it); the prompt is on stdin.
     if let Some(thread) = thread {
         args.extend(["resume".into(), thread.to_string()]);
     }
     args.push("-".into());
     args
+}
+
+/// The brain's MCP server environment as it goes on Codex's command line: its signature not
+/// there, where any process of the machine can list it, but in a file only this user reads
+/// ([`sig_file`], written before each turn), whose path is.
+fn server_env(spec: &BrainSpec) -> Vec<(String, String)> {
+    spec.brain_env
+        .iter()
+        .map(|(key, value)| if key == crate::mcp::BRAIN_SIG { (crate::mcp::BRAIN_SIG_FILE.to_string(), sig_file(spec).display().to_string()) } else { (key.clone(), value.clone()) })
+        .collect()
+}
+
+/// Where a Codex brain's signature is kept for its MCP server: the run folder (`paths::manager_run_dir`).
+fn sig_file(spec: &BrainSpec) -> std::path::PathBuf {
+    spec.run_dir.join(crate::mcp::brain_sig_file_name(spec.lane, spec.wake.as_deref()))
 }
 
 /// The updates one line of `codex exec --json` gives.
@@ -62,10 +77,31 @@ pub fn parse_line(line: &str, said: &mut String) -> Vec<Update> {
     }
 }
 
+/// What Settings › Manager says of Codex as the manager's brain, and why choosing it is refused,
+/// when this Codex shows the brain tools Glasscode cannot switch off.
+pub const BRAIN_BLOCKED: &str = "Codex can't be the manager's brain with this Codex (it has tools Glasscode can't switch off).";
+
+/// The Codex versions whose brain keeps tools that no flag turns off. Codex 0.167.0 keeps its five
+/// `multi_agent_v1__*` sub-agent tools under `--disable multi_agent`, `-c features.multi_agent=false`,
+/// `--disable multi_agent_v2`, `--disable collaboration_modes` and `--disable
+/// deferred_tool_world_state` (`--disable multi_agent_v1` is no feature): the live checks of
+/// 2026-11-20 and 21, `ALL_TOOLS` read in a live run.
+const BLOCKED_VERSIONS: &[&str] = &["0.167.0"];
+
+/// Whether this Codex (its version as `codex --version` says it, "codex-cli 0.167.0" or "0.167.0")
+/// is known to keep tools the brain's check refuses: it fails closed at its first question, so
+/// Settings says so before the person picks it.
+pub fn brain_blocked(version: Option<&str>) -> bool {
+    version.and_then(|v| v.split_whitespace().last()).is_some_and(|v| BLOCKED_VERSIONS.contains(&v))
+}
+
 /// The tools Codex's code mode shows the model besides Glasscode's: `exec` (a JavaScript isolate
 /// with no file system or network of its own), `wait`, `request_user_input`, and `apply_patch` and
-/// `view_image`, which the read-only sandbox keeps from writing (P02).
-pub const CODE_MODE_TOOLS: &[&str] = &["exec", "wait", "request_user_input", "apply_patch", "view_image"];
+/// `view_image`, which the read-only sandbox keeps from writing (P02); and Codex's readers of MCP
+/// resources, there whenever a server is configured and no feature turns them off (P02's table):
+/// the brain ignores the account's config, so its only server is Glasscode's, which serves no
+/// resource (it answers `resources/list` with "no such method").
+pub const CODE_MODE_TOOLS: &[&str] = &["exec", "wait", "request_user_input", "apply_patch", "view_image", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
 
 /// What the brain's first turn asks, to read its whole tool list (prompt-input leaves out the
 /// deferred ones, P02).
@@ -118,6 +154,11 @@ impl BrainDriver for CodexDriver {
 
     fn prompt(&mut self, text: &str) -> Result<(), String> {
         let instructions = self.instructions()?;
+        // The MCP server's signature, in its file (mode 0600) before the turn starts it.
+        if let Some((_, sig)) = self.spec.brain_env.iter().find(|(key, _)| key == crate::mcp::BRAIN_SIG) {
+            let name = crate::mcp::brain_sig_file_name(self.spec.lane, self.spec.wake.as_deref());
+            super::driver::private_file(&self.spec.run_dir, &name, sig)?;
+        }
         let cmd = super::driver::command(&self.spec, args(&self.spec, &instructions, self.thread.as_deref()))?;
         let mut proc = Proc::spawn(cmd)?;
         proc.send(text)?;
@@ -222,6 +263,10 @@ mod tests {
             &["--disable", "memories"],
             &["--disable", "browser_use"],
             &["--disable", "computer_use"],
+            &["--disable", "goals"],
+            &["--disable", "image_generation"],
+            &["-c", r#"web_search="disabled""#],
+            &["-c", "check_for_update_on_startup=false"],
             &["-c", "skills.include_instructions=false"],
             &["-c", "skills.bundled.enabled=false"],
             &["-c", "sandbox_workspace_write.network_access=false"],
@@ -239,6 +284,34 @@ mod tests {
         assert_eq!((resumed[0].as_str(), &resumed[resumed.len() - 3..]), ("exec", &["resume".to_string(), "t-1".to_string(), "-".to_string()][..]));
         assert_eq!(resumed.iter().filter(|a| *a == "resume").count(), 1);
         assert!(!first.contains(&"--ephemeral".to_string()), "the chat's thread is kept, to resume");
+    }
+
+    /// The brain's signature is the manager's identity (`mcp::brain_caller`): it never goes on
+    /// Codex's command line, which any process of the machine can list (`ps`), but into a file of
+    /// the run folder only this user reads, whose path the MCP server reads it from.
+    #[test]
+    fn the_codex_brains_signature_is_not_on_its_command_line() {
+        let spec = spec();
+        let sig = spec.brain_env.iter().find(|(k, _)| k == crate::mcp::BRAIN_SIG).map(|(_, v)| v.clone()).unwrap();
+        for thread in [None, Some("t-1")] {
+            let argv = args(&spec, std::path::Path::new("/g/manager/run/i.md"), thread);
+            assert!(!argv.iter().any(|a| a.contains(&sig)), "the signature is on the command line: {argv:?}");
+            let file = format!("mcp_servers.glasscode.env.{}={}", crate::mcp::BRAIN_SIG_FILE, serde_json::to_string(&sig_file(&spec).display().to_string()).unwrap());
+            assert!(argv.contains(&file), "{argv:?}");
+        }
+        // The server reads it from there, as it would from its environment.
+        let run = tempfile::tempdir().unwrap();
+        let spec = BrainSpec { run_dir: run.path().into(), ..spec };
+        let path = super::super::driver::private_file(&spec.run_dir, &crate::mcp::brain_sig_file_name(spec.lane, None), &sig).unwrap();
+        assert_eq!(path, sig_file(&spec));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let env: std::collections::HashMap<String, String> = server_env(&spec).into_iter().collect();
+        let brain = crate::mcp::Brain::from_env(|name| env.get(name).cloned()).unwrap();
+        assert_eq!((brain.lane, brain.sig), (Lane::Chat, sig));
     }
 
     /// exec-24 for Codex: every turn's process runs in the manager's work folder, read-only, and a
@@ -274,6 +347,12 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_known_to_keep_agent_tools_cannot_be_the_brain() {
+        assert!(brain_blocked(Some("0.167.0")) && brain_blocked(Some("codex-cli 0.167.0")));
+        assert!(!brain_blocked(Some("0.171.0")) && !brain_blocked(None), "a version not known to keep them is checked at its first question");
+    }
+
+    #[test]
     fn all_tools_are_checked() {
         let glasscode: Vec<String> = ["ui_state", "session_list"].map(String::from).to_vec();
         let answer = "```json\n[\"exec\",\"wait\",\"apply_patch\",\"view_image\",\"mcp__glasscode__ui_state\",\"mcp__glasscode__session_list\"]\n```";
@@ -285,5 +364,13 @@ mod tests {
         assert_eq!(check_all_tools(&with_shell, &glasscode), Err((vec!["exec_command".into(), "spawn_agent".into()], vec![])));
         assert_eq!(check_all_tools(&tools[..4], &glasscode), Err((vec![], glasscode.clone())), "Glasscode's tools missing");
         assert!(all_tools_of("no list").is_none());
+        // Codex 0.167's own tools under the brain's flags (the live checks, 2026-11-20): the MCP
+        // resource readers pass; its sub-agent tools, which no flag turns off, do not.
+        let live: Vec<String> = ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource", "view_image", "multi_agent_v1__spawn_agent", "multi_agent_v1__send_input"].map(String::from).to_vec();
+        let mut with_ours = live.clone();
+        with_ours.extend(glasscode.iter().map(|g| format!("mcp__glasscode__{g}")));
+        assert_eq!(check_all_tools(&with_ours, &glasscode), Err((vec!["multi_agent_v1__spawn_agent".into(), "multi_agent_v1__send_input".into()], vec![])));
+        let without_agents: Vec<String> = with_ours.into_iter().filter(|t| !t.starts_with("multi_agent")).collect();
+        assert_eq!(check_all_tools(&without_agents, &glasscode), Ok(()));
     }
 }

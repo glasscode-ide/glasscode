@@ -256,9 +256,13 @@ impl Index {
                 break;
             }
             let section = &self.sections[n as usize];
-            let entries: Vec<Entry> = section.entries.iter().filter(|e| (scope.history || e.header.status != Status::LetGo) && super::visible(e, scope.employer.as_ref())).cloned().collect();
-            if !entries.is_empty() || !section.prose.is_empty() {
-                hits.push(Hit { section: section.id(), file: section.file.clone(), score, entries, prose: section.prose.clone() });
+            if scope.names_hidden(&section.id()) {
+                continue;
+            }
+            let entries: Vec<Entry> = section.entries.iter().filter(|e| (scope.history || e.header.status != Status::LetGo) && super::visible(e, scope.employer.as_ref()) && !scope.hides_entry(e)).cloned().collect();
+            let prose: Vec<String> = section.prose.iter().filter(|line| !scope.names_hidden(line)).cloned().collect();
+            if !entries.is_empty() || !prose.is_empty() {
+                hits.push(Hit { section: section.id(), file: section.file.clone(), score, entries, prose });
             }
         }
         hits
@@ -275,12 +279,24 @@ pub struct Scope {
     pub work: Option<MemFile>,
     /// Let-go entries too.
     pub history: bool,
+    /// Projects this caller may not read at all (D17: the manager, for a project bound to another
+    /// account): their files, the proposals for them and every line that names them are left out.
+    pub hidden: Vec<ProjectKey>,
 }
 
 impl Scope {
+    /// Whether `text` names a project this caller may not read.
+    pub fn names_hidden(&self, text: &str) -> bool {
+        self.hidden.iter().any(|key| text.contains(key.as_str()))
+    }
+
+    fn hides_entry(&self, entry: &Entry) -> bool {
+        entry.header.to.as_deref().and_then(MemFile::parse).is_some_and(|to| to.project().is_some_and(|key| self.hidden.contains(key))) || self.names_hidden(&entry.text)
+    }
+
     /// How much a file's sections weigh for this caller; None when it may not read the file.
     fn boost(&self, file: &MemFile) -> Option<f32> {
-        if !super::readable(file, self.project.as_ref(), self.employer.as_ref()) {
+        if !super::readable(file, self.project.as_ref(), self.employer.as_ref()) || file.project().is_some_and(|key| self.hidden.contains(key)) {
             return None;
         }
         Some(match file {
@@ -343,7 +359,7 @@ pub fn scope_for(snap: &Snapshot, project: Option<&ProjectKey>, work: Option<&Wo
         Some(work) => snap.work_file(work)?,
         None => None,
     };
-    Ok(Scope { project: project.cloned(), employer, work, history: false })
+    Ok(Scope { project: project.cloned(), employer, work, history: false, hidden: Vec::new() })
 }
 
 /// Results as data for an agent (D20, trust-7): a block that says it holds notes from memory, not

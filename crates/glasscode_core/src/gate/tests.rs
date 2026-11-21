@@ -402,6 +402,38 @@ fn only_the_projects_account_reads_it() {
     assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Allow);
 }
 
+/// D17 holds for a program outside Glasscode too. Any session can be one: it connects to the
+/// control socket without its signature (it is "anyone who says so"). So a terminal does not
+/// pass for the project's account: it asks, and the person answers in the app.
+#[test]
+fn a_terminal_is_not_the_projects_account() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = Some("work".into());
+    let list = op(&SESSION_LIST, json!({}));
+    let terminal = Caller::Terminal { pid: Some(4242) };
+    assert_eq!(rule(&terminal, &list, &on(&[careful()]), &set), Rule::Ask);
+    // A project kept to no account reads as before.
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = None;
+    assert_eq!(rule(&terminal, &list, &on(&[careful()]), &set), Rule::Allow);
+}
+
+/// D17 for the manager's reads that name no project (`memory.search`, `memory.show`,
+/// `journal.events`, its brief): a project bound to another account is left out of them, as the
+/// gate refuses it when named.
+#[test]
+fn the_manager_reads_no_project_of_another_account() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = Some("work".into());
+    let keys = [careful(), autopilot()];
+    set.manager_account = Some("personal".into());
+    assert!(!set.manager_may_read(&careful()) && set.manager_may_read(&autopilot()));
+    assert_eq!(set.hidden_from_manager(&keys), [careful()]);
+    set.manager_account = None;
+    assert_eq!(set.hidden_from_manager(&keys), [careful()], "no account of its own: not one bound to an account");
+    set.manager_account = Some("work".into());
+    assert!(set.hidden_from_manager(&keys).is_empty());
+}
+
 #[test]
 fn unknown_policy_names_are_found() {
     let policy = ProjectPolicy { never: vec!["board.add".into(), "session_start".into(), "push_default_branch".into()], ask: vec!["forge_write".into(), "pr.merge".into()], ..ProjectPolicy::default() };
@@ -1067,4 +1099,21 @@ fn the_server_cannot_approve_a_card_on_the_mac() {
     collided.state = PendingState::Approved;
     assert_eq!(on_server.merge_theirs(&[collided], &mac, &server, true, now + 7), 0, "the server's card, said to be the Mac's");
     assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Waiting);
+}
+
+/// D27: a session started for a pull request by a stranger is quarantined, whoever starts it; one
+/// by the person, a confirmed teammate or the repository's own people keeps its origin.
+#[test]
+fn a_session_for_a_strangers_pull_request_is_quarantined() {
+    let (me, team) = (vec!["alex-dev".to_string()], vec!["jordan".to_string()]);
+    for association in [None, Some("NONE"), Some("CONTRIBUTOR"), Some("FIRST_TIME_CONTRIBUTOR")] {
+        for started in [SessionOrigin::Person, SessionOrigin::Automation] {
+            assert_eq!(origin_for_input(started, "drive-by", association, &me, &team), SessionOrigin::Quarantine, "{association:?} {started:?}");
+        }
+    }
+    assert_eq!(origin_for_input(SessionOrigin::Person, "Alex-Dev", None, &me, &team), SessionOrigin::Person);
+    assert_eq!(origin_for_input(SessionOrigin::Automation, "jordan", Some("NONE"), &me, &team), SessionOrigin::Automation);
+    assert_eq!(origin_for_input(SessionOrigin::Person, "maintainer", Some("MEMBER"), &me, &team), SessionOrigin::Person);
+    // Already quarantined: never lowered.
+    assert_eq!(origin_for_input(SessionOrigin::Quarantine, "alex-dev", None, &me, &team), SessionOrigin::Quarantine);
 }

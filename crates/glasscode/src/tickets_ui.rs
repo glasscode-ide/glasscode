@@ -1078,8 +1078,9 @@ impl Workspace {
                 let review = glasscode_core::model::ReviewRef { repo: repo.clone(), number: hit.number, title: hit.title.clone(), author: hit.author.clone(), url: hit.url.clone(), head: hit.head.clone(), base: hit.base.clone(), private_review: None };
                 git::fetch_branch(&root, &hit.base);
                 let checkout = git::checkout_review(&root, &project_name, hit.number)?;
-                let _ = &env;
-                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), Some(review)));
+                // Its author's association decides whether the review is quarantined (D27).
+                let association = glasscode_core::github_api::pr_association(&repo, hit.number, &env);
+                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), Some((review, association))));
             }
             if let Some((path, branch)) = existing {
                 return Ok((path, branch, None, None));
@@ -1092,7 +1093,11 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((worktree, branch, note, review)) => {
+                Ok((worktree, branch, note, reviewed)) => {
+                    let (review, association) = match reviewed {
+                        Some((review, association)) => (Some(review), association),
+                        None => (None, None),
+                    };
                     let title = match (&review, &ticket) {
                         (Some(r), _) => format!("#{} {}", r.number, r.title.chars().take(56).collect::<String>()),
                         (None, Some(t)) => linear::short_title(&t.title, 46),
@@ -1130,6 +1135,10 @@ impl Workspace {
                     }
                     this.modal = None;
                     this.center = crate::center::Center::Session;
+                    // A stranger's pull request is reviewed quarantined (D27): before it starts.
+                    if let Some(r) = &review {
+                        this.control_quarantine_for(&session.id, &r.author, association.as_deref());
+                    }
                     this.add_and_open_session(session, window, cx);
                     this.save();
                     this.refresh_worktrees(cx);

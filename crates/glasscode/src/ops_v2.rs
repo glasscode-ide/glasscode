@@ -1012,13 +1012,20 @@ fn session_keys(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         keys.push(bytes);
     }
     let shown = words.join(" ");
-    // On an open question, a caller that is not the person may only dismiss it (Esc): an answer
-    // names the prompt it was decided on (`session.answer`), and keys alone could choose an option
-    // that allows something for good.
-    let only_esc = !person(caller) && words.iter().any(|w| !matches!(w.to_lowercase().as_str(), "esc" | "escape"));
+    // On a question on screen, a caller that is not the person may only dismiss it (Esc): one
+    // Glasscode reads is answered by its prompt id (`session.answer`), and keys alone could choose
+    // an option that allows something for good; one it cannot read is the person's to answer.
+    let checked = !person(caller);
     plan(Kind::Send, format!("press {shown} in “{title}”"), move |ws, r, _, cx| {
-        if only_esc && prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-            return ws.reply(r, error(ErrorCode::NeedsPerson, format!("“{title}” is asking something: answer it with session answer and its prompt id, or let the person; only esc is pressed on an open question.")));
+        let keys_words: Vec<&str> = words.iter().map(String::as_str).collect();
+        match prompt::keys_refused(&terminal.read(cx).text_tail(60), &keys_words).filter(|_| checked) {
+            Some(prompt::KeysRefused::Readable) => {
+                return ws.reply(r, error(ErrorCode::NeedsPerson, format!("“{title}” is asking something: answer it with session answer and its prompt id, or let the person; only esc is pressed on an open question.")));
+            }
+            Some(prompt::KeysRefused::Unreadable) => {
+                return ws.reply(r, error(ErrorCode::NeedsPerson, format!("The screen of “{title}” shows a prompt Glasscode can't read; the person answers it. Only esc is pressed there.")));
+            }
+            None => {}
         }
         cx.spawn(async move |this, cx| {
             for bytes in keys {
@@ -1190,8 +1197,22 @@ fn file_read(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     // The managed projects' folders and their worktrees; a hidden project's are not.
     let mut roots: Vec<PathBuf> = ws.state.projects.iter().filter(|p| !ws.state.is_hidden(&p.id)).map(|p| p.root.clone()).collect();
     roots.extend(ws.worktrees.iter().filter(|(project, _)| !ws.state.is_hidden(project)).flat_map(|(_, list)| list.iter().map(|w| w.path.clone())));
+    // A session the person does not drive reads as its sandbox does: its own worktree and its
+    // project's folder, never another worktree. One the app has no record of reads nothing.
+    let mut kept_out: Vec<PathBuf> = Vec::new();
+    if let glasscode_core::caller::Caller::Session { id, .. } = &caller.channel {
+        let known = ws.state.session(id).cloned();
+        if known.is_none() || ws.control.authority.origin(id) != glasscode_core::gate::SessionOrigin::Person {
+            let mut worktrees: Vec<PathBuf> = ws.worktrees.values().flat_map(|list| list.iter().map(|w| w.path.clone())).collect();
+            worktrees.extend(ws.state.sessions.iter().map(|s| s.worktree.clone()));
+            (roots, kept_out) = match &known {
+                Some(session) => reads::session_reach(&session.worktree, ws.state.project(&session.project_id).map(|p| p.root.as_path()), &worktrees),
+                None => (Vec::new(), Vec::new()),
+            };
+        }
+    }
     read_off_main("read".into(), move || {
-        let text = reads::file_read(&path, &roots)?;
+        let text = reads::file_read_kept(&path, &roots, &kept_out)?;
         Ok((reads::as_data(&format!("The file {}", path.display()), &text), json!({ "path": path, "text": text })))
     })
 }

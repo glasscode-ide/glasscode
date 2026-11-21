@@ -170,6 +170,13 @@ impl Event {
     pub fn at_ms(&self) -> u64 {
         self.at.wall_ms
     }
+
+    /// When it happened: its stamp, or now for an event the writer has not stamped yet. The app's
+    /// observers (the work ledger, the reconciler) see each event before `append` hands it to the
+    /// writer, which stamps it; its `at_ms` is still 0 then.
+    pub fn at_or_now(&self) -> u64 {
+        if self.at.wall_ms == 0 { crate::clock::now_ms() } else { self.at.wall_ms }
+    }
 }
 
 fn new_id() -> String {
@@ -729,6 +736,13 @@ impl Scope {
         }
     }
 
+    /// The manager's reach with no project named: of `projects` (the app's project id to its key),
+    /// those the person has not turned off for the manager (`off`, by id) and that its account may
+    /// read (D17).
+    pub fn manager(projects: &BTreeMap<String, ProjectKey>, off: &BTreeSet<String>, set: &crate::gate::PolicySet) -> Scope {
+        Scope::Projects(projects.iter().filter(|(id, key)| !off.contains(*id) && set.manager_may_read(key)).map(|(_, key)| key.clone()).collect())
+    }
+
     pub fn sees(&self, event: &Event) -> bool {
         match self {
             Scope::All => true,
@@ -1191,6 +1205,22 @@ pub fn reset() {
 
 #[cfg(test)]
 mod tests {
+    /// The manager's journal with no project named: not a project the person turned off for it,
+    /// nor one bound to another account (D17); the rest it manages.
+    #[test]
+    fn the_managers_journal_leaves_out_projects_turned_off_for_it() {
+        use super::*;
+        let key = |text: &str| ProjectKey::parse(text).unwrap();
+        let projects: BTreeMap<String, ProjectKey> = [("p-app", "app-3f9a1c"), ("p-off", "off-4b8e2d"), ("p-work", "work-5c9f3e")].into_iter().map(|(id, k)| (id.to_string(), key(k))).collect();
+        let off: BTreeSet<String> = ["p-off".to_string()].into();
+        let mut set = crate::gate::PolicySet::default();
+        set.policy.projects.insert(key("work-5c9f3e"), crate::gate::ProjectPolicy { model_account: Some("work".into()), ..Default::default() });
+        set.manager_account = Some("personal".into());
+        let scope = Scope::manager(&projects, &off, &set);
+        assert_eq!(scope, Scope::Projects(vec![key("app-3f9a1c")]));
+        let event = |project: &str| Event::new(kinds::SESSION_REPORTED, Source::App, "x").project(Some(&key(project)));
+        assert!(scope.sees(&event("app-3f9a1c")) && !scope.sees(&event("off-4b8e2d")) && !scope.sees(&event("work-5c9f3e")));
+    }
     use std::ffi::OsString;
 
     use super::*;

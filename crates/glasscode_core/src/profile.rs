@@ -193,11 +193,16 @@ fn is_folder(path: &Path) -> bool {
 pub fn session_profile(origin: SessionOrigin, agent: AgentKind, policy: &ProjectPolicy, facts: &ProfileFacts) -> SessionProfile {
     let restricted = origin != SessionOrigin::Person;
     let mut denied = class_paths(&DENIED);
+    let mut read_only_classes = READ_ONLY.to_vec();
     if restricted {
-        denied.extend(class_paths(&[PathClass::Handoff]));
+        // Trusted memory too (lead decision, 2026-11-21): the files hold every project's, and
+        // employer's, memory; an automation or quarantine session reads its own project's
+        // through `glasscode memory`, which keeps it to that project.
+        denied.extend(class_paths(&[PathClass::Handoff, PathClass::TrustedMemory]));
+        read_only_classes.retain(|class| *class != PathClass::TrustedMemory);
         denied.extend(facts.other_worktrees.iter().cloned());
     }
-    let read_only = class_paths(&READ_ONLY);
+    let read_only = class_paths(&read_only_classes);
     let label = match origin {
         SessionOrigin::Person => "person",
         SessionOrigin::Automation => "automation",
@@ -238,17 +243,19 @@ fn claude_settings(origin: SessionOrigin, policy: &ProjectPolicy, facts: &Profil
     let restricted = origin != SessionOrigin::Person;
     let mut deny_read: Vec<PathBuf> = denied.to_vec();
     deny_read.extend(facts.env_files.iter().cloned());
+    // `Edit(...)` covers every tool that writes a file (Write too): Claude 2.1.328 warns at the
+    // start of each session that a `Write(...)` rule "never matches · use Edit(...)", once a rule,
+    // about sixty lines over the prompt (the live checks). The gate hook still checks `Write`'s
+    // path itself (`gate_tool`).
     let mut deny = Vec::new();
     for path in &deny_read {
         let folder = is_folder(path) && !facts.env_files.contains(path);
-        for tool in ["Read", "Edit", "Write"] {
+        for tool in ["Read", "Edit"] {
             deny.push(rule(tool, path, folder));
         }
     }
     for path in read_only {
-        for tool in ["Edit", "Write"] {
-            deny.push(rule(tool, path, is_folder(path)));
-        }
+        deny.push(rule("Edit", path, is_folder(path)));
     }
     if restricted {
         deny.extend(["WebFetch".to_string(), "WebSearch".to_string()]);
@@ -268,7 +275,12 @@ fn claude_settings(origin: SessionOrigin, policy: &ProjectPolicy, facts: &Profil
         "enabled": true,
         "autoAllowBashIfSandboxed": true,
         "filesystem": { "denyRead": deny_read.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), "allowWrite": allow_write },
-        "network": { "allowedDomains": domains, "allowUnixSockets": [facts.socket.to_string_lossy()] },
+        // The control socket is the person's sessions' only: a session the manager drives sends
+        // its `glasscode` commands as request files in its own worktree, which the app knows as
+        // that session's whatever they say (`caller::by_channel_proven`), so it never passes for a
+        // program outside Glasscode by leaving its signature out. Its MCP server and hooks run
+        // outside the sandbox, and keep the socket.
+        "network": { "allowedDomains": domains, "allowUnixSockets": if restricted { Vec::new() } else { vec![facts.socket.to_string_lossy().into_owned()] } },
     });
     if restricted {
         sandbox["allowUnsandboxedCommands"] = json!(false);
@@ -376,7 +388,8 @@ fn codex_permissions(origin: SessionOrigin, facts: &ProfileFacts, denied: &[Path
     // Quarantine has no network; automation neither (Codex has no domain list): its forge work
     // is Glasscode's ops (D13), and its builds use what the worktree has.
     let _ = origin;
-    let network = format!("{{\"enabled\"=false, \"unix_sockets\"={{{}=\"allow\"}}}}", json!(facts.socket.to_string_lossy()));
+    // No control socket either (`claude_settings`): its commands go as request files.
+    let network = "{\"enabled\"=false}".to_string();
     ["-c".into(), r#"default_permissions="glasscode""#.into(), "-c".into(), r#"permissions.glasscode.extends=":workspace""#.into(), "-c".into(), format!("permissions.glasscode.filesystem={}", table(&fs)), "-c".into(), format!("permissions.glasscode.network={network}")].to_vec()
 }
 
@@ -424,11 +437,12 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
     .map(|a| a.to_string())
     .chain(std::iter::once(schema.to_string()))
     .collect();
-    let codex_args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never", "-c", "features.memories=false", "--output-schema"]
-        .iter()
-        .map(|a| a.to_string())
-        .chain([schema_file.to_string_lossy().into_owned(), "-o".to_string(), answer_file.to_string_lossy().into_owned(), "-".to_string()])
-        .collect();
+    // Codex: the brain's wall without its door (no shell, apps, plugins, agents, memories,
+    // browser or computer use, none of the account's configuration or rules, no skills), so the
+    // text it reads cannot have it run a command: its read-only sandbox reads the whole disk.
+    let mut codex_args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never"].map(String::from).to_vec();
+    codex_args.extend(codex_no_tools());
+    codex_args.extend(["--output-schema".to_string(), schema_file.to_string_lossy().into_owned(), "-o".to_string(), answer_file.to_string_lossy().into_owned(), "-".to_string()]);
     let _ = agent;
     SessionProfile {
         origin: SessionOrigin::Quarantine,
@@ -442,6 +456,28 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
         pretrust: false,
         browser_hosts: Vec::new(),
     }
+}
+
+/// The Codex features every run that reads outside text turns off ([`codex_no_tools`]).
+pub(crate) const CODEX_FEATURES_OFF: &[&str] = &["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use", "goals", "image_generation"];
+
+/// What turns off every tool and outside configuration of a Codex run that reads outside text
+/// (D4, P02): the shell, apps, plugins, agents, memories, browser and computer use, goals, image
+/// generation and web search; the account's `config.toml` (its MCP servers, its model, its
+/// approvals) and rules; the person's skills, which `~/.agents/skills` lists whatever
+/// `CODEX_HOME` is; the network, and notifications. The brain's run and every headless run take
+/// the same list. Codex 0.167 showed the brain `create_goal`/`get_goal`/`update_goal`,
+/// `image_gen__imagegen` and `web__run` without the last three (the live checks' `ALL_TOOLS`).
+fn codex_no_tools() -> Vec<String> {
+    let mut args: Vec<String> = ["--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
+    for feature in CODEX_FEATURES_OFF {
+        args.extend(["--disable".to_string(), feature.to_string()]);
+    }
+    // Its own update check too: versions are Glasscode's, and a run asks no release server.
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#, crate::agents::CODEX_NO_UPDATE_CHECK] {
+        args.extend(["-c".to_string(), setting.to_string()]);
+    }
+    args
 }
 
 /// The manager's brain (D4, P01, P02; M50): no shell and no built-in tool but Claude's tool search,
@@ -477,11 +513,9 @@ pub fn brain_profile(wake: bool) -> SessionProfile {
     if wake {
         claude_args.push("--no-session-persistence".into());
     }
-    let mut codex_args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-s", "read-only", "--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
-    for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
-        codex_args.extend(["--disable".to_string(), feature.to_string()]);
-    }
-    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", "include_permissions_instructions=false", "include_environment_context=false"] {
+    let mut codex_args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-s", "read-only"].map(String::from).to_vec();
+    codex_args.extend(codex_no_tools());
+    for setting in ["include_permissions_instructions=false", "include_environment_context=false"] {
         codex_args.extend(["-c".to_string(), setting.to_string()]);
     }
     if wake {
@@ -591,9 +625,30 @@ fn expand(path: &str, cwd: &Path) -> PathBuf {
     } else if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("$HOME/")) {
         home.join(rest)
     } else {
-        PathBuf::from(path)
+        PathBuf::from(windows_form(path))
     };
     if path.is_relative() { cwd.join(path) } else { path }
+}
+
+/// Windows: a path as Git's shell writes it (`/c/Users/sam/x`, which is what Claude Code's Bash
+/// tool runs in) is the path `C:/Users/sam/x`. Elsewhere, and for every other path, as given.
+fn windows_form(path: &str) -> String {
+    if cfg!(windows) {
+        let mut letters = path.chars();
+        if let (Some('/'), Some(drive), Some('/') | None) = (letters.next(), letters.next(), letters.next())
+            && drive.is_ascii_alphabetic()
+        {
+            return format!("{}:/{}", drive.to_ascii_uppercase(), path.get(3..).unwrap_or_default());
+        }
+    }
+    path.to_string()
+}
+
+/// Whether a word of a command names a path: with a slash of either kind, from the home or the
+/// folder, or (Windows) from a drive.
+fn looks_like_path(word: &str) -> bool {
+    let drive = word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && word.as_bytes().get(1) == Some(&b':');
+    word.starts_with("~/") || word.starts_with("$HOME") || word.contains('/') || word.contains('\\') || (cfg!(windows) && drive)
 }
 
 /// A path a tool or a command touches: refused when sessions may not read it (or not write it).
@@ -601,6 +656,8 @@ fn gate_path(ctx: &GateCtx, path: &Path, writes: bool) -> Result<(), String> {
     let _ = ctx;
     match paths::class_of(path) {
         Classified::Class(class) if DENIED.contains(&class) => Err(format!("{} is Glasscode's or a credential: sessions do not read it", path.display())),
+        // The gate guards only the sessions the person does not drive (`gate_tool`).
+        Classified::Class(PathClass::TrustedMemory) => Err(format!("{} is Glasscode's memory: a session the manager drives reads its project's with `glasscode memory search`", path.display())),
         Classified::Class(PathClass::Handoff) => Err(format!("{} holds other work's handoffs", path.display())),
         Classified::Class(class) if writes && READ_ONLY.contains(&class) => Err(format!("{} is read-only for sessions", path.display())),
         Classified::InsideUnlisted => Err(format!("{} is Glasscode's own: sessions do not touch it", path.display())),
@@ -651,8 +708,11 @@ fn commands(command: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The program of a command, without its folder and (Windows) without `.exe` or `.cmd`:
+/// `C:/tools/claude.exe` is `claude`.
 fn program(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    if cfg!(windows) { name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(name) } else { name }
 }
 
 fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
@@ -693,8 +753,7 @@ fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
             _ => {}
         }
         for word in &rest {
-            let looks_like_path = word.starts_with('/') || word.starts_with("~/") || word.starts_with("$HOME") || word.starts_with("./") || word.starts_with("../") || word.contains('/');
-            if looks_like_path && !word.starts_with('-') {
+            if looks_like_path(word) && !word.starts_with('-') {
                 gate_path(ctx, &expand(word, &ctx.worktree), false)?;
             }
         }

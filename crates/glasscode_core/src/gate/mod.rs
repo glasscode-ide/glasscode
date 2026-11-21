@@ -188,6 +188,13 @@ pub fn trusted_author(login: &str, association: Option<&str>, person: &[String],
     matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
 }
 
+/// The origin of a session started for a pull request's text by `author` (D27): quarantine when
+/// the author is not trusted ([`trusted_author`]), whoever starts it, the person included, as its
+/// text is a stranger's; else `started`. An origin is never lowered.
+pub fn origin_for_input(started: SessionOrigin, author: &str, association: Option<&str>, person: &[String], confirmed: &[String]) -> SessionOrigin {
+    if trusted_author(author, association, person, confirmed) { started } else { SessionOrigin::Quarantine }
+}
+
 /// An op group's key in a policy: `session_start`.
 pub fn group_key(group: OpGroup) -> &'static str {
     match group {
@@ -325,6 +332,28 @@ impl PolicySet {
     /// What the gate reads when nothing could be read: every project Careful, the manager paused.
     pub fn fail_closed() -> PolicySet {
         PolicySet { live_differs: true, pause: Pause::everything(), ..PolicySet::default() }
+    }
+
+    /// D17: whether the manager's brain may read `key`. A project bound to one account
+    /// (`model_account`) only when that is the manager's account (`manager_account`).
+    pub fn manager_may_read(&self, key: &ProjectKey) -> bool {
+        self.account_may_read(key, self.manager_account.as_deref())
+    }
+
+    /// D17: whether a model on `account` may read `key` (a headless run of Glasscode's own, such as
+    /// moving in's study): a project bound to one account only on that account.
+    pub fn account_may_read(&self, key: &ProjectKey, account: Option<&str>) -> bool {
+        self.policy.of(key).model_account.as_deref().is_none_or(|only| account == Some(only))
+    }
+
+    /// Of `keys`, the projects the manager's brain may not read (D17): what its reads with no
+    /// project named (`memory.search`, `memory.show`, `journal.events`, the manager's brief) leave
+    /// out, as the gate refuses them when named.
+    pub fn hidden_from_manager<'a>(&self, keys: impl IntoIterator<Item = &'a ProjectKey>) -> Vec<ProjectKey> {
+        let mut hidden: Vec<ProjectKey> = keys.into_iter().filter(|key| !self.manager_may_read(key)).cloned().collect();
+        hidden.sort();
+        hidden.dedup();
+        hidden
     }
 }
 
@@ -637,8 +666,24 @@ fn mode_raised(class: Class, op: &Op, targets: &Targets, policy: &PolicySet, pla
     (rank > limit.min(3)).then(|| format!("{who} may not raise a session's mode to {wanted}: only you can"))
 }
 
+/// [`decide_place`], and D17 for a program outside Glasscode: it runs on no account Glasscode
+/// knows, and any session can be one (it connects to the control socket without its signature),
+/// so what it would be allowed in a project kept to one account asks, and the person answers.
 #[allow(clippy::too_many_arguments)]
 fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet, grant: Option<&Grant>, place: &Place, branches: &[String], local_minutes: Option<i64>) -> Decision {
+    let decision = decide_place(class, caller, op, targets, set, grant, place, branches, local_minutes);
+    let policy = place.key.map(|key| set.policy.of(key)).unwrap_or(&set.policy.default);
+    match (&decision, class, &policy.model_account) {
+        (Decision::Allow, Class::Terminal, Some(account)) => {
+            let at = place.key.map(|key| key.as_str()).unwrap_or("Glasscode");
+            Decision::ask(format!("only the account {account} may read {at}: a program outside Glasscode asks you first"))
+        }
+        _ => decision,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_place(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet, grant: Option<&Grant>, place: &Place, branches: &[String], local_minutes: Option<i64>) -> Decision {
     let policy = place.key.map(|key| set.policy.of(key)).unwrap_or(&set.policy.default);
     let at = place.key.map(|key| key.as_str()).unwrap_or("Glasscode");
     let who = class.who();
@@ -657,6 +702,7 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
                 Caller::Session { id, .. } => set.sessions.get(id).and_then(|f| f.account.as_deref()),
                 _ => None,
             },
+            // A program outside Glasscode asks instead ([`decide_in`]).
             Class::Terminal => Some(account.as_str()),
         };
         if own_account != Some(account.as_str()) {

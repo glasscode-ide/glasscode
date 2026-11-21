@@ -3,7 +3,10 @@
 //!
 //! - `Ui`: the app's own window, in-process only. Nothing that arrives on the control socket, in a
 //!   request file or from the server is `Ui`: [`by_channel`] cannot return it.
-//! - `Session`: a session Glasscode started, proven by the signature the app gave it.
+//! - `Session`: a session Glasscode started, proven by the signature the app gave it, or by the
+//!   channel whatever the request says ([`by_channel_proven`]): a request file found in its
+//!   worktree, a socket peer that runs under its program ([`sessions_over`]). Leaving the
+//!   signature out does not make a session's command a terminal's.
 //! - `ShellTab`: the person, typing a `glasscode` command in a Glasscode shell tab. The app's own
 //!   terminal view saw the Enter key on that line ([`note_typed_command`]); the request's words do
 //!   not count. This is attribution, not a wall: a program the person started in that tab within
@@ -15,7 +18,8 @@
 //!   assigns both per connection (M13.2); the app never derives them.
 //! - `Terminal`: everything else, the person at a terminal outside Glasscode included, as any
 //!   program can say it is that terminal. It may read; anything else waits on a card in the app
-//!   (owner decision O13).
+//!   (owner decision O13). A socket peer whose programs cannot be read is not one: the app refuses
+//!   it unless its signature or token says who it is.
 //!
 //! The request's `interactive` flag ([`crate::control::Request`]) is still sent, for older apps; no
 //! caller is decided by it here.
@@ -76,13 +80,42 @@ impl Caller {
     }
 }
 
+impl Caller {
+    /// Whose an op is, for following it: [`Caller::origin`], except that every program outside
+    /// Glasscode is one ("terminal"), whatever its process: `glasscode wait <n>` runs in a process
+    /// of its own, after the one that asked.
+    pub fn follower(&self) -> String {
+        match self {
+            Caller::Terminal { .. } => "terminal".into(),
+            other => other.origin(),
+        }
+    }
+
+    /// Whether this caller may follow an op that `follower` started ([`Caller::follower`]): wait
+    /// for its answer, join its card, stop it. The person may follow any op; anyone else only its
+    /// own, so a session never reads what another session, the manager or a program asked and got
+    /// back.
+    pub fn may_follow(&self, follower: &str) -> bool {
+        self.is_person() || self.follower() == follower
+    }
+}
+
+/// Whether `caller` may have a voice token for the manager's room (`manager.voice_token`): one
+/// lets a device listen and speak there as the person, so only the person in the app and a device
+/// they paired get one; never a session, the manager, a command in a shell tab or a program
+/// outside Glasscode (which any session can pass for).
+pub fn may_have_voice_token(caller: &Caller) -> bool {
+    matches!(caller, Caller::Ui | Caller::Phone { .. })
+}
+
 /// How a request reached the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// The control socket (a named pipe on Windows), and the process on the other end when the
     /// system says which.
     Socket { pid: Option<u32> },
-    /// A request file left in a worktree: anyone who can write there can leave one.
+    /// A request file left in a worktree: anyone who can write there can leave one. The app knows
+    /// the worktree, so the sessions there are what it proves ([`by_channel_proven`]).
     RequestFile,
     /// A `glasscode` command on the server, relayed by glasscoded, which checked the signature of
     /// the session it names (none: a program on the server).
@@ -105,6 +138,15 @@ pub struct Signed {
 /// `request.interactive` is not read: a request that says it was typed at a terminal is the same
 /// caller as one that does not.
 pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, typed_in_tab: impl Fn(&str) -> bool) -> Caller {
+    by_channel_proven(request, channel, signed, typed_in_tab, &[])
+}
+
+/// [`by_channel`], with the sessions the channel itself proves the request came from (`proven`,
+/// the strictest first): a request file the app found in a session's worktree, a socket whose
+/// peer runs under a session's program. Such a request is that session's, signed or not, so a
+/// session never passes for a program outside Glasscode by leaving its signature out; and one
+/// signed for another session than the channel proves is the proven one's.
+pub fn by_channel_proven(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, typed_in_tab: impl Fn(&str) -> bool, proven: &[String]) -> Caller {
     if let Channel::Server { session } = channel {
         return match session {
             Some(id) => Caller::Session { id: format!("server:{id}"), project: None },
@@ -113,6 +155,7 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
     }
     if let (Some(id), Some(sig)) = (&request.session, &request.sig)
         && let Some(session) = signed(id, sig)
+        && (proven.is_empty() || proven.contains(id))
     {
         // The keys of a shell tab are typed in the app's own window, so only a request on the
         // socket (a command the shell ran) can be them; a request file is anyone's.
@@ -121,10 +164,21 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
         }
         return Caller::Session { id: id.clone(), project: None };
     }
+    if let Some(id) = proven.first() {
+        return Caller::Session { id: id.clone(), project: None };
+    }
     match channel {
         Channel::Socket { pid } => Caller::Terminal { pid: *pid },
         _ => Caller::Terminal { pid: None },
     }
+}
+
+/// The sessions a socket's peer runs under: those whose program (`session_pids`, each session's
+/// terminal process) is in the peer's `lineage` (the peer and the programs above it,
+/// `sys::lineage`). Such a peer is that session's ([`by_channel_proven`]), signed or not; one under
+/// none of them may be a program outside Glasscode.
+pub fn sessions_over(lineage: &[u32], session_pids: &[(String, u32)]) -> Vec<String> {
+    session_pids.iter().filter(|(_, pid)| lineage.contains(pid)).map(|(id, _)| id.clone()).collect()
 }
 
 // ----- what each caller may do by Settings › Permissions -----------------------------------------
@@ -225,13 +279,17 @@ fn kind_name(caller: &Caller) -> String {
     serde_json::to_value(caller).ok().and_then(|value| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string)).unwrap_or_default()
 }
 
-/// Methods a phone may not call on glasscoded until its allow-list (the server-sync plan's phase
-/// 0b): the ones proven unused by the phone. The Mac runs `phones.add` at pairing.
-pub const PHONE_REFUSED: [&str; 4] = ["restart", "shutdown", "phones.add", DECLARE_METHOD];
+/// All a paired phone may call on glasscoded (the server-sync plan's phase 0b): the handshake;
+/// list, show and read sessions; type, press keys and answer in an agent's session (never a
+/// shell's, and never an answer that allows more than once: glasscoded checks the session);
+/// watch an agent's terminal, view only (`gate attach`); Today and its board, with the Mac's approvals
+/// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
+/// notifications go. No new session, no shell, no move, no sync, no other phone's key.
+pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
 
-/// Why glasscoded refuses `method` from `caller`, before any handler runs. Everything not named
-/// here stays as it was: a `Machine`, the app and an undeclared connection keep what they had,
-/// and so does a phone, until phase 0b.
+/// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
+/// [`PHONE_ALLOWED`]; the machine-only methods need a `Machine`; a `Machine`, the app and an
+/// undeclared connection keep everything else.
 /// The Mac types a message into one of the server's sessions on behalf of an effect (M31): what
 /// that session's events then descend from (events-13), so the server's hook reader stamps them.
 pub const DRIVE_METHOD: &str = "journal.expect_drive";
@@ -240,7 +298,7 @@ pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String> {
     if (method.starts_with("owners.") || method.starts_with("home.") || method.starts_with("memory.copy.") || method == "memory.sync" || method == DRIVE_METHOD) && !matches!(caller, Caller::Machine { .. }) {
         return Some(format!("{method} is only for a Glasscode machine's own connection"));
     }
-    if matches!(caller, Caller::Phone { .. }) && PHONE_REFUSED.contains(&method) {
+    if matches!(caller, Caller::Phone { .. }) && !PHONE_ALLOWED.contains(&method) {
         return Some(format!("a phone cannot call {method}"));
     }
     None
@@ -321,6 +379,51 @@ mod tests {
             _ => None,
         };
         by_channel(request, channel, signed, |id| typed && id == "s-shell")
+    }
+
+    /// A socket's peer under a session's program is that session's: the command an agent runs
+    /// (agent, then a shell, then `glasscode`), with its signature left out, is never a program
+    /// outside Glasscode; a terminal outside every session is.
+    #[test]
+    fn a_peer_under_a_sessions_program_is_that_session() {
+        let pids = [("s-agent".to_string(), 500), ("s-shell".to_string(), 600)];
+        // glasscode (900) ← sh (800) ← the agent (500) ← the app (100) ← launchd (1).
+        let under_agent = sessions_over(&[900, 800, 500, 100, 1], &pids);
+        assert_eq!(under_agent, ["s-agent"]);
+        let unsigned = request(None, false);
+        let caller = by_channel_proven(&unsigned, &Channel::Socket { pid: Some(900) }, |_, _| None, |_| false, &under_agent);
+        assert_eq!(caller, Caller::Session { id: "s-agent".into(), project: None });
+        // A terminal of the person's, outside every session.
+        let outside = sessions_over(&[910, 810, 300, 1], &pids);
+        assert!(outside.is_empty());
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(910) }, |_, _| None, |_| false, &outside), Caller::Terminal { pid: Some(910) });
+    }
+
+    /// (a): a request file the app found in a session's worktree is that session's, signed or not,
+    /// and never a program outside Glasscode's; one signed for a session the channel does not prove
+    /// is the proven session's. Without proof, as before.
+    #[test]
+    fn a_channel_proves_its_session_without_a_signature() {
+        let signed = |id: &str, sig: &str| match (id, sig) {
+            ("s-agent", "good") | ("s-other", "good") => Some(Signed { shell: false }),
+            ("s-shell", "good") => Some(Signed { shell: true }),
+            _ => None,
+        };
+        let proven = ["s-agent".to_string()];
+        let unsigned = request(None, false);
+        assert_eq!(by_channel_proven(&unsigned, &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(9) }, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        // Signed for another session than the one the channel proves: the proven one.
+        assert_eq!(by_channel_proven(&request(Some(("s-other", "good")), false), &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        // Signed for the proven one: itself, its shell tab as before.
+        assert_eq!(by_channel_proven(&request(Some(("s-agent", "good")), false), &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        let shell = ["s-shell".to_string()];
+        assert_eq!(by_channel_proven(&request(Some(("s-shell", "good")), false), &Channel::Socket { pid: Some(5) }, signed, |_| true, &shell), Caller::ShellTab { session: "s-shell".into(), project: None });
+        // A shell tab is never proven into the person: unsigned, it is the session.
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(5) }, signed, |_| true, &shell), Caller::Session { id: "s-shell".into(), project: None });
+        // No proof: as before.
+        assert_eq!(by_channel_proven(&unsigned, &Channel::RequestFile, signed, |_| false, &[]), Caller::Terminal { pid: None });
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(9) }, signed, |_| false, &[]), Caller::Terminal { pid: Some(9) });
     }
 
     #[test]
@@ -514,15 +617,28 @@ mod tests {
     #[test]
     fn restart_and_shutdown_from_a_phone_are_refused() {
         let phone = Caller::Phone { device: UNKNOWN_DEVICE.into() };
-        for method in ["restart", "shutdown", "phones.add", DECLARE_METHOD] {
+        for method in ["restart", "shutdown", "phones.add", DECLARE_METHOD, "mirror.sync", "mirror.conversation", "mirror.conversation_into"] {
             assert!(daemon_refusal(&phone, method).is_some(), "{method}");
             // The Mac and the app keep them (the Mac pairs phones and installs updates).
             assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
             assert_eq!(daemon_refusal(&Caller::Ui, method), None, "{method}");
         }
-        // Everything else stays open to a phone until phase 0b.
-        for method in ["state", "sessions.send", "sessions.answer", "sessions.attach", "phones.remove", "phones.push_token", "today.op", "mirror.take_over", "worktrees.remove"] {
-            assert_eq!(daemon_refusal(&phone, method), None, "{method}");
+    }
+
+    /// Phase 0b: a phone may call only its list (an older phone key, `unknown`, too). What would
+    /// reach a shell here (a new session, a move, a sync, another phone's key, the journal) is
+    /// refused, while the Mac and the app keep it.
+    #[test]
+    fn a_phone_calls_only_its_list() {
+        for device in [UNKNOWN_DEVICE, "phone-1a2b"] {
+            let phone = Caller::Phone { device: device.into() };
+            for method in PHONE_ALLOWED {
+                assert_eq!(daemon_refusal(&phone, method), None, "{method}");
+            }
+            for method in ["sessions.create", "sessions.stop", "sessions.close", "sessions.rename", "projects.add", "accounts.add", "accounts.login", "worktrees.add", "worktrees.remove", "worktrees.receive", "worktrees.snapshot", "worktrees.open_parked", "mirror.take_over", "phones.remove", "phones.list", "journal.since", "github.action", "conversations.export", "doctor", "relay.status", "anything.new"] {
+                assert!(daemon_refusal(&phone, method).is_some(), "{method}");
+                assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
+            }
         }
     }
 
@@ -545,6 +661,46 @@ mod tests {
         let json = serde_json::to_string(&caller).unwrap();
         assert_eq!(json, r#"{"kind":"session","id":"s1","project":"app-3f9a1c"}"#);
         assert_eq!(serde_json::from_str::<Caller>(&json).unwrap(), caller);
+    }
+
+    /// `app.wait`, joining a card and `ops.cancel` follow only the caller's own ops: never another
+    /// session's, another lane's of the manager, or a program's; the person follows any. Programs
+    /// outside Glasscode are one follower, as each command is a process of its own.
+    #[test]
+    fn only_its_caller_follows_an_op() {
+        let a = Caller::Session { id: "s1".into(), project: None };
+        let b = Caller::Session { id: "s2".into(), project: None };
+        let chat = Caller::Manager { lane: Lane::Chat, wake: None, project: None };
+        let wake = Caller::Manager { lane: Lane::Wake, wake: Some("ci".into()), project: None };
+        let terminal = Caller::Terminal { pid: Some(41) };
+        for (started, other) in [(&a, &b), (&b, &a), (&chat, &a), (&a, &chat), (&chat, &wake), (&terminal, &a), (&a, &terminal)] {
+            assert!(started.may_follow(&started.follower()), "{started:?}");
+            assert!(!other.may_follow(&started.follower()), "{other:?} follows {started:?}");
+        }
+        assert!(Caller::Terminal { pid: Some(42) }.may_follow(&terminal.follower()), "the same terminal's next command");
+        assert!(Caller::Terminal { pid: None }.may_follow(&terminal.follower()));
+        for person in [Caller::Ui, Caller::ShellTab { session: "s9".into(), project: None }] {
+            assert!(person.may_follow(&a.follower()) && person.may_follow(&chat.follower()));
+        }
+        // A server session is its own follower, not the Mac session of the same id.
+        assert!(!Caller::Session { id: "server:s1".into(), project: None }.may_follow(&a.follower()));
+    }
+
+    /// A voice token speaks as the person in the manager's room: the app's window and a paired
+    /// device only.
+    #[test]
+    fn only_the_person_in_the_app_or_a_device_gets_a_voice_token() {
+        assert!(may_have_voice_token(&Caller::Ui) && may_have_voice_token(&Caller::Phone { device: "phone-1a2b".into() }));
+        for other in [
+            Caller::Terminal { pid: Some(7) },
+            Caller::Terminal { pid: None },
+            Caller::Session { id: "s1".into(), project: None },
+            Caller::ShellTab { session: "s1".into(), project: None },
+            Caller::Manager { lane: Lane::Chat, wake: None, project: None },
+            Caller::Machine { id: MachineId::parse("0123456789abcdef").unwrap() },
+        ] {
+            assert!(!may_have_voice_token(&other), "{other:?}");
+        }
     }
 
     #[test]

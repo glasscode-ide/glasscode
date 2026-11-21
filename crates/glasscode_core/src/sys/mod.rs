@@ -343,6 +343,19 @@ fn end_order(pid: u32, me: u32, snapshot: &[Sampled]) -> std::io::Result<Vec<&Sa
     Ok(order)
 }
 
+/// `pid` and the programs above it (its parent, the parent's parent, and on), from one read of
+/// the process list: who a control connection's peer runs under. None when `pid` is not in the
+/// list (it ended, or the system does not say), which callers take as "cannot tell".
+pub fn lineage(pid: u32) -> Option<Vec<u32>> {
+    let snapshot = sample(false);
+    if !snapshot.iter().any(|p| p.pid == pid) {
+        return None;
+    }
+    let mut out = vec![pid];
+    out.extend(ancestors(pid, &snapshot));
+    Some(out)
+}
+
 /// The programs above `pid`: its parent, the parent's parent, and on. A start time that the
 /// system does not give counts as a parent: here more is safer.
 fn ancestors(pid: u32, snapshot: &[Sampled]) -> Vec<u32> {
@@ -469,6 +482,18 @@ fn safe_git(program: &std::ffi::OsStr, command: &mut std::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control connection's peer is placed by the programs it runs under: this test's own
+    /// process first, then its parent; a process that is not running has none.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_lineage_starts_with_it_and_its_parent() {
+        let me = std::process::id();
+        let line = lineage(me).expect("this process is running");
+        assert_eq!(line[0], me);
+        assert_eq!(line.get(1).copied(), Some(std::os::unix::process::parent_id()), "{line:?}");
+        assert_eq!(lineage(u32::MAX - 7), None);
+    }
 
     #[test]
     fn local_time_fields_are_in_range() {

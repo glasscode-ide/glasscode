@@ -49,6 +49,9 @@ pub struct PageUi {
     /// How many items more than the newest [`DOCKED_ITEMS`] the panel on Today shows: the person
     /// asked for earlier ones.
     pub earlier: usize,
+    /// The manager's daily token cap and what today used, read when Settings › Manager opens and
+    /// after the cap changes (never while drawing).
+    pub budget: Option<(u64, u64)>,
 }
 
 /// Things to say to it, one click each.

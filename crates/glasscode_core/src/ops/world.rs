@@ -223,6 +223,10 @@ pub fn find_task(board: &Board, outside: &[Outside], word: &str, person: bool) -
     }
 }
 
+/// The ops that act on one of this machine's sessions (their handlers look it up and, with none,
+/// would do nothing): the session must be there.
+const ON_A_SESSION: &[&str] = &["session.open", "session.close", "session.restart", "session.rename", "session.send"];
+
 /// What an op touches: the projects, sessions, repositories and folders its words name, resolved
 /// here from ids, and whether anything leaves this machine. The words are resolved as the op's
 /// handler resolves them, so an op whose words name nothing fails here as it fails there.
@@ -233,6 +237,12 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
     if op.spec.args.iter().any(|a| a.name == "session" && a.kind == super::ArgKind::Session)
         && let Some(id) = op.text("session")
     {
+        // An op that acts on one of this machine's sessions names one there. A button's, a tool's
+        // or a debug key's op is not parsed, so its id may name none: the handler then did
+        // nothing and said "Closed “”" (the live checks: `session.close` with an id's start).
+        if ON_A_SESSION.contains(&name) && !world.sessions.iter().any(|s| s.id == id) {
+            return Err(OpError::new(ErrorCode::NotFound, format!("No session “{id}”. `glasscode session list` shows them, by their whole ids.")));
+        }
         found.session(id);
     }
     // A project it names, or the one it is for.
@@ -246,6 +256,15 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
             None => Some(project_for(world, op.text("project"))?),
         },
         _ => None,
+    };
+    // Any other op that names a project is about it too (trust-3), whichever op it is: that
+    // project's policy decides with the caller's own (its never list, the one account that may
+    // read it, a pause). Its handler resolves the word itself, some by id or name among every
+    // project, the hidden ones too: so a project the word names either way is a target, and a
+    // word that names none here fails in the handler, never here.
+    let project = match project {
+        None if op.spec.args.iter().any(|a| a.name == "project" && a.kind == super::ArgKind::Project) => op.text("project").and_then(|word| named_project(world, word)),
+        project => project,
     };
     if let Some(id) = &project {
         found.project(id);
@@ -303,6 +322,13 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
         }
     }
     Ok(found.out)
+}
+
+/// The project a word names for the gate: by id or name among every project (hidden ones too, as
+/// some handlers find them), else as [`find_project`] reads it.
+fn named_project(world: &World, word: &str) -> Option<String> {
+    let w = word.trim();
+    world.projects.iter().find(|p| p.id == w || p.name.eq_ignore_ascii_case(w)).map(|p| p.id.clone()).or_else(|| find_project(world, w).ok())
 }
 
 /// The targets found so far.
@@ -458,6 +484,28 @@ mod tests {
     }
 
     /// A target is the project its session or worktree is in, never the one the caller says
+    /// A button's, a tool's or a debug key's op is not parsed: an id that names no session (the
+    /// start of one, a title) is not found, rather than closed with nothing closed.
+    #[test]
+    fn an_op_on_a_session_names_one_that_is_there() {
+        for name in ON_A_SESSION {
+            let mut args = serde_json::json!({ "session": "8765f51a" });
+            if *name == "session.rename" {
+                args["name"] = serde_json::json!("New");
+            }
+            if *name == "session.send" {
+                args["message"] = serde_json::json!("hi");
+            }
+            let short = crate::ops::typed(name, args.clone()).unwrap();
+            let refused = targets(&short, &world(true)).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::NotFound, "{name}: {}", refused.text);
+            assert!(refused.text.contains("No session “8765f51a”"), "{name}: {}", refused.text);
+            args["session"] = serde_json::json!(APP_SESSION);
+            let whole = crate::ops::typed(name, args).unwrap();
+            assert_eq!(targets(&whole, &world(true)).unwrap().sessions, [APP_SESSION.to_string()], "{name}");
+        }
+    }
+
     /// (trust-3): not `--project`, not the project a server session claims.
     #[test]
     fn targets_never_trust_caller_project() {
@@ -502,6 +550,73 @@ mod tests {
         let file = typed("file.read", serde_json::json!({ "path": "/code/app/src/main.rs" }));
         assert_eq!((file.projects, file.paths), (vec![key("app-3f9a1c").unwrap()], vec![PathBuf::from("/code/app"), PathBuf::from("/code/app/src/main.rs")]));
         assert_eq!(typed("ui.open", serde_json::json!({ "place": APP_SESSION })).sessions, [APP_SESSION]);
+    }
+
+    /// A value of each kind of argument, for an op built in a test.
+    fn sample(kind: crate::ops::ArgKind) -> serde_json::Value {
+        use crate::ops::ArgKind as K;
+        match kind {
+            K::Switch => serde_json::json!(true),
+            K::Count | K::Number | K::Pr => serde_json::json!(1),
+            K::Day | K::Until => serde_json::json!("2099-01-02"),
+            K::Session => serde_json::json!(APP_SESSION),
+            K::Ticket => serde_json::json!("ENG-1"),
+            K::List => serde_json::json!("todo"),
+            K::Section | K::Movable => serde_json::json!(crate::board::Section::ALL.iter().find(|s| s.movable()).map(|s| s.key()).unwrap_or_default()),
+            K::Many => serde_json::json!(["x"]),
+            _ => serde_json::json!("x"),
+        }
+    }
+
+    /// trust-3: an op that names a project is about that project, whichever op it is. The gate
+    /// then reads that project's policy (its never list, the one account whose model may read it,
+    /// a pause), not only the caller's own or the default: the manager, on another account, does
+    /// not search the memory or read the journal of a project kept to one account (D17).
+    #[test]
+    fn every_project_an_op_names_is_a_target() {
+        let w = world(false);
+        let shop = key("shop-3f9a1c").unwrap();
+        let naming: Vec<&crate::ops::OpSpec> = crate::ops::OPS.iter().filter(|op| op.args.iter().any(|a| a.name == "project" && a.kind == crate::ops::ArgKind::Project)).collect();
+        assert!(naming.iter().any(|op| op.name == "memory.search") && naming.iter().any(|op| op.name == "journal.events"));
+        let mut missed = Vec::new();
+        for spec in naming {
+            let mut args = serde_json::Map::new();
+            for arg in spec.args.iter().filter(|a| a.required) {
+                args.insert(arg.name.into(), sample(arg.kind));
+            }
+            args.insert("project".into(), serde_json::json!("shop"));
+            let op = crate::ops::typed(spec.name, serde_json::Value::Object(args)).unwrap_or_else(|e| panic!("{}: {e:?}", spec.name));
+            match targets(&op, &w) {
+                Ok(found) if !found.projects.contains(&shop) => missed.push(spec.name),
+                Ok(_) => {}
+                // An op whose other words name nothing here fails as its handler would.
+                Err(error) => assert!(matches!(error.code, ErrorCode::NotFound | ErrorCode::Usage), "{}: {error:?}", spec.name),
+            }
+        }
+        assert!(missed.is_empty(), "these ops name a project that is not their target: {missed:?}");
+        // And the gate reads shop's policy: kept to another account, the manager may not search it.
+        let op = crate::ops::typed("memory.search", serde_json::json!({ "query": "renewal", "project": "shop" })).unwrap();
+        let found = targets(&op, &w).unwrap();
+        let mut set = crate::gate::PolicySet { manager_account: Some("claude-personal".into()), ..Default::default() };
+        set.policy.projects.insert(shop.clone(), crate::gate::ProjectPolicy { model_account: Some("claude-work".into()), ..Default::default() });
+        let manager = crate::caller::Caller::Manager { lane: crate::caller::Lane::Chat, wake: None, project: None };
+        assert!(matches!(crate::gate::decide(&manager, &op, &found, &set, None), crate::gate::Decision::Never { .. }), "{found:?}");
+    }
+
+    /// The rule for any op that names a project never fails an op its handler would run: a hidden
+    /// project named by its id or name is a target (Settings' `policy.set` and the journal name
+    /// one), and a word that names no project here is the handler's to refuse.
+    #[test]
+    fn a_named_project_is_a_target_without_failing_the_op() {
+        let w = world(true);
+        let secret = key("secret-3f9a1c").unwrap();
+        for (name, args) in [("policy.set", serde_json::json!({ "project": "p-secret", "level": "careful" })), ("journal.events", serde_json::json!({ "project": "secret" }))] {
+            let op = crate::ops::typed(name, args).unwrap();
+            let found = targets(&op, &w).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(found.projects.contains(&secret), "{name}: {found:?}");
+        }
+        let op = crate::ops::typed("journal.events", serde_json::json!({ "project": "gone" })).unwrap();
+        assert!(targets(&op, &w).is_ok_and(|t| t.projects.is_empty()));
     }
 
     #[test]

@@ -382,8 +382,10 @@ impl Entry {
 #[allow(clippy::large_enum_variant)]
 pub enum Line {
     Entry(Entry),
-    /// A forgotten entry: its id and when, never its text.
-    Tombstone { id: String, at: Hlc },
+    /// A forgotten entry: its id and when, never its text. `about` is where the entry pointed, when
+    /// it pointed somewhere (a proposal's file, `to=`; an employer it was kept to, `org/<employer>`),
+    /// so a tombstone of what stays on this Mac stays too (ux-m2).
+    Tombstone { id: String, at: Hlc, about: Option<String> },
     /// Anything else, kept as it is.
     Text(String),
 }
@@ -392,7 +394,8 @@ impl Line {
     fn render(&self) -> String {
         match self {
             Line::Entry(entry) => entry.render(),
-            Line::Tombstone { id, at } => format!("<!-- forgotten id={id} at={at} -->"),
+            Line::Tombstone { id, at, about: None } => format!("<!-- forgotten id={id} at={at} -->"),
+            Line::Tombstone { id, at, about: Some(about) } => format!("<!-- forgotten id={id} at={at} about={about} -->"),
             Line::Text(text) => text.clone(),
         }
     }
@@ -404,15 +407,17 @@ impl Line {
         if let Some(words) = line.trim().strip_prefix("<!-- forgotten ").and_then(|rest| rest.strip_suffix("-->")) {
             let mut id = None;
             let mut at = None;
+            let mut about = None;
             for word in words.split_whitespace() {
                 match word.split_once('=') {
                     Some(("id", value)) if valid_id(value) => id = Some(value.to_string()),
                     Some(("at", value)) => at = value.parse().ok(),
+                    Some(("about", value)) if !value.is_empty() => about = Some(value.to_string()),
                     _ => {}
                 }
             }
             if let (Some(id), Some(at)) = (id, at) {
-                return Line::Tombstone { id, at };
+                return Line::Tombstone { id, at, about };
             }
         }
         Line::Text(line.to_string())
@@ -468,7 +473,7 @@ impl Doc {
 
     pub fn tombstones(&self) -> impl Iterator<Item = (&str, &Hlc)> {
         self.lines.iter().filter_map(|line| match line {
-            Line::Tombstone { id, at } => Some((id.as_str(), at)),
+            Line::Tombstone { id, at, .. } => Some((id.as_str(), at)),
             _ => None,
         })
     }
@@ -492,15 +497,29 @@ impl Doc {
         }
     }
 
-    /// Remove one entry, leaving a tombstone of `at` where it was; false when there is none.
+    /// Remove one entry, leaving a tombstone of `at` where it was, with where the entry pointed
+    /// ([`about`]); false when there is none.
     pub fn forget(&mut self, id: &str, at: Hlc) -> bool {
         match self.position(id) {
             Some(index) => {
-                self.lines[index] = Line::Tombstone { id: id.to_string(), at };
+                let about = match &self.lines[index] {
+                    Line::Entry(entry) => about(entry),
+                    Line::Tombstone { about, .. } => about.clone(),
+                    Line::Text(_) => None,
+                };
+                self.lines[index] = Line::Tombstone { id: id.to_string(), at, about };
                 true
             }
             None => false,
         }
+    }
+
+    /// Where the tombstone of `id` says its entry pointed.
+    pub fn about_of(&self, id: &str) -> Option<String> {
+        self.lines.iter().find_map(|line| match line {
+            Line::Tombstone { id: dead, about, .. } if dead == id => about.clone(),
+            _ => None,
+        })
     }
 
     /// Remove one entry with no tombstone (it moved to another file); false when there is none.
@@ -680,10 +699,17 @@ pub fn is_work_of(doc: &Doc, key: &WorkKey) -> bool {
 
 // ----- merging (M57 syncs; the rule is the format's) --------------------------------------------
 
+/// Where an entry points, for its tombstone: a proposal's file (`to=`), else the employer it is
+/// kept to (`org/<employer>`).
+pub fn about(entry: &Entry) -> Option<String> {
+    entry.header.to.clone().or_else(|| entry.header.org.as_ref().map(|org| format!("org/{org}")))
+}
+
 /// Two copies of one file as one: entries by id, the later stamp winning (an unstamped copy loses
 /// to a stamped one, and two unstamped copies keep `ours`), and a tombstone beating any stamp of
 /// its entry. Lines of `ours` keep their order; entries only `theirs` has go into the section they
-/// are in there (or at the end).
+/// are in there (or at the end). A tombstone keeps where its entry pointed ([`about`]), from
+/// either copy.
 pub fn merge(ours: &Doc, theirs: &Doc) -> Doc {
     let mut dead: BTreeMap<String, Hlc> = BTreeMap::new();
     for (id, at) in ours.tombstones().chain(theirs.tombstones()) {
@@ -692,6 +718,7 @@ pub fn merge(ours: &Doc, theirs: &Doc) -> Doc {
             *slot = at.clone();
         }
     }
+    let about_of = |id: &str| ours.about_of(id).or_else(|| theirs.about_of(id)).or_else(|| ours.find(id).or_else(|| theirs.find(id)).and_then(about));
     let later = |a: &Entry, b: &Entry| -> bool {
         match (&a.header.at, &b.header.at) {
             (Some(a), Some(b)) => a > b,
@@ -707,7 +734,7 @@ pub fn merge(ours: &Doc, theirs: &Doc) -> Doc {
                 let id = &entry.header.id;
                 seen.insert(id.clone());
                 if let Some(at) = dead.get(id) {
-                    out.lines.push(Line::Tombstone { id: id.clone(), at: at.clone() });
+                    out.lines.push(Line::Tombstone { id: id.clone(), at: at.clone(), about: about_of(id) });
                     continue;
                 }
                 let theirs = theirs.find(id).filter(|other| later(other, entry));
@@ -715,7 +742,7 @@ pub fn merge(ours: &Doc, theirs: &Doc) -> Doc {
             }
             Line::Tombstone { id, .. } => {
                 seen.insert(id.clone());
-                out.lines.push(Line::Tombstone { id: id.clone(), at: dead[id].clone() });
+                out.lines.push(Line::Tombstone { id: id.clone(), at: dead[id].clone(), about: about_of(id) });
             }
             Line::Text(_) => out.lines.push(line.clone()),
         }
@@ -725,16 +752,16 @@ pub fn merge(ours: &Doc, theirs: &Doc) -> Doc {
             Line::Entry(entry) if !seen.contains(&entry.header.id) => {
                 seen.insert(entry.header.id.clone());
                 match dead.get(&entry.header.id) {
-                    Some(at) => out.lines.push(Line::Tombstone { id: entry.header.id.clone(), at: at.clone() }),
+                    Some(at) => out.lines.push(Line::Tombstone { id: entry.header.id.clone(), at: at.clone(), about: about_of(&entry.header.id) }),
                     None => {
                         let section = theirs.section_of(&entry.header.id);
                         out.add(section.as_deref(), entry.clone());
                     }
                 }
             }
-            Line::Tombstone { id, at } if !seen.contains(id) => {
+            Line::Tombstone { id, at, about } if !seen.contains(id) => {
                 seen.insert(id.clone());
-                out.lines.push(Line::Tombstone { id: id.clone(), at: at.clone() });
+                out.lines.push(Line::Tombstone { id: id.clone(), at: at.clone(), about: about.clone() });
             }
             _ => {}
         }

@@ -481,6 +481,14 @@ fn settle(path: &Path) {
 const COMMAND_TOOLS: [&str; 5] = ["Bash", "exec_command", "shell", "local_shell", "unified_exec"];
 
 /// The report of a closed turn, from its end, its transcript items and git (no IO).
+/// The report of a turn the app's quit cuts, read at once (there is no time to wait for its
+/// transcript to settle): its tools, commands and reply from what the transcript holds now, its
+/// files and commits, as any turn's ([`gather`] without the wait). Before, a quit reported none of
+/// it ("cut by Glasscode quitting: 0 tools" with a command running, the live checks).
+pub fn report_now(session: &str, agent: AgentKind, transcript: Option<&Path>, closed: &Closed, worktree: &Path) -> TurnReport {
+    report(session, closed, &gather(agent, transcript, closed, worktree, false))
+}
+
 pub fn report(session: &str, closed: &Closed, gathered: &Gathered) -> TurnReport {
     let tools: Vec<&TranscriptItem> = gathered.items.iter().filter(|item| item.kind == ItemKind::Tool).collect();
     let failed_tools = tools.iter().filter(|item| item.failed).map(|item| item.tool.clone().unwrap_or_else(|| item.text.clone())).collect();
@@ -716,6 +724,24 @@ mod tests {
 
     /// A short turn whose hooks are read after the agent wrote it all starts at its prompt's line,
     /// so its report has its tools (found in the journey run: "0 tools").
+    /// A turn the quit cuts while its command runs reports that command, read from the transcript
+    /// at once (the live checks: "cut by Glasscode quitting in 19 s: 0 tools").
+    #[test]
+    fn a_turn_cut_by_the_quit_reports_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let earlier = r#"{"type":"user","message":{"role":"user","content":"Earlier"}}"#;
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"Run sh wait40.sh"}}"#;
+        let tool = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"sh wait40.sh"}}]}}"#;
+        std::fs::write(&path, format!("{earlier}\n{prompt}\n{tool}\n")).unwrap();
+        let offset = turn_offset(Some(&path), Some("Run sh wait40.sh"), None);
+        let closed = Closed { turn: OpenTurn { id: "p1".into(), started_ms: 1_000, transcript_offset: offset, ..OpenTurn::default() }, end: TurnEnd::AppQuit, ended_ms: 20_000, reply: None, background: Vec::new() };
+        let report = report_now("s1", AgentKind::Claude, Some(&path), &closed, dir.path());
+        assert_eq!(report.tools, 1, "{report:?}");
+        assert_eq!(report.commands, ["sh wait40.sh"]);
+        assert_eq!(report.end, TurnEnd::AppQuit);
+    }
+
     #[test]
     fn a_short_turn_starts_at_its_prompt() {
         let dir = tempfile::tempdir().unwrap();
