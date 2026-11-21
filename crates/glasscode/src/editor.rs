@@ -1143,6 +1143,12 @@ struct Thumb {
     seen: Option<Pixels>,
     /// A draw is asked for then, to take the thumb away.
     wake_at: Option<Instant>,
+    /// Sideways: where the text lies and how far the lines on screen can scroll (the last
+    /// layout). Its thumb shows for as long as a line is wider than the text's room: lines do
+    /// not wrap, and the thumb says there is more of them.
+    across: Option<(Bounds<Pixels>, f32)>,
+    /// A drag of the sideways thumb: where in it, from its left, the pointer took it.
+    grab_x: Option<Pixels>,
 }
 
 impl Thumb {
@@ -1885,6 +1891,8 @@ struct Frame {
     hitbox: Hitbox,
     /// The scroll thumb's place for this layout, None when the text fits.
     thumb: Option<Bounds<Pixels>>,
+    /// The sideways thumb's place, None when the lines on screen fit.
+    across: Option<Bounds<Pixels>>,
 }
 
 impl Element for EditorElement {
@@ -1954,7 +1962,8 @@ impl Element for EditorElement {
             }
         }
         let widest = rows.iter().map(|(_, s)| s.width()).fold(caret_x.unwrap_or_default(), Pixels::max);
-        scroll.x = scroll.x.min((widest + edge - text.size.width).max(px(0.))).max(px(0.));
+        let max_across = (widest + edge - text.size.width).max(px(0.));
+        scroll.x = scroll.x.min(max_across).max(px(0.));
 
         let y_of = |line: usize| text.top() + pad + lh * line as f32 - scroll.y;
         let x0 = text.left() - scroll.x;
@@ -1998,9 +2007,11 @@ impl Element for EditorElement {
             }
             editor.thumb.seen = Some(scroll.y);
             editor.thumb.area = Some((bounds, max_scroll));
+            editor.thumb.across = Some((text, f32::from(max_across)));
             editor.thumb.place(scroll.y)
         });
-        Frame { under, rows: rows_painted, numbers, caret, text, hitbox, thumb }
+        let across = ui::thumb_place_across(text, f32::from(max_across), f32::from(scroll.x));
+        Frame { under, rows: rows_painted, numbers, caret, text, hitbox, thumb, across }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), frame: &mut Frame, window: &mut Window, cx: &mut App) {
@@ -2014,6 +2025,12 @@ impl Element for EditorElement {
                 return;
             }
             let taken = editor.update(cx, |editor, cx| {
+                let across = editor.thumb.across.and_then(|(area, max)| ui::thumb_place_across(area, max, f32::from(editor.scroll.x)));
+                if let Some(grab) = across.and_then(|thumb| ui::grab_across(thumb, event.position)) {
+                    editor.thumb.grab_x = Some(grab);
+                    cx.notify();
+                    return true;
+                }
                 let grab = editor.thumb.place(editor.scroll.y).and_then(|thumb| ui::grab_at(thumb, event.position));
                 if grab.is_some() {
                     editor.thumb.grab = grab;
@@ -2044,8 +2061,16 @@ impl Element for EditorElement {
                     }
                     return;
                 }
-                // A drag of the thumb that ended outside the window.
-                let ended = editor.thumb.grab.take().is_some();
+                if let Some(grab) = editor.thumb.grab_x.filter(|_| pressed) {
+                    if let Some((area, max)) = editor.thumb.across {
+                        editor.scroll.x = px(ui::scrolled_for_thumb(f32::from(area.size.width), max, f32::from(event.position.x - area.left() - grab)));
+                        editor.reveal = false;
+                        cx.notify();
+                    }
+                    return;
+                }
+                // A drag of a thumb that ended outside the window.
+                let ended = editor.thumb.grab.take().is_some() | editor.thumb.grab_x.take().is_some();
                 if over != editor.thumb.hovered || ended {
                     editor.thumb.hovered = over;
                     editor.thumb.active_at = Some(Instant::now());
@@ -2060,7 +2085,7 @@ impl Element for EditorElement {
         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
                 editor.update(cx, |editor, cx| {
-                    if editor.thumb.grab.take().is_some() {
+                    if editor.thumb.grab.take().is_some() | editor.thumb.grab_x.take().is_some() {
                         editor.thumb.active_at = Some(Instant::now());
                         cx.notify();
                     }
@@ -2121,6 +2146,9 @@ impl Element for EditorElement {
             });
             if let Some(thumb) = thumb {
                 ui::paint_thumb_quad(thumb, window);
+            }
+            if let Some(across) = frame.across {
+                ui::paint_thumb_quad(across, window);
             }
         });
     }
