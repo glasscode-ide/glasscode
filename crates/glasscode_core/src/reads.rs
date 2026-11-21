@@ -101,8 +101,27 @@ pub fn file_allowed(path: &Path, roots: &[PathBuf]) -> Result<PathBuf, String> {
 
 /// A file a caller may read ([`file_allowed`]), the first [`CAP`] bytes, as text.
 pub fn file_read(path: &Path, roots: &[PathBuf]) -> Result<String, String> {
+    file_read_kept(path, roots, &[])
+}
+
+/// What a session the person does not drive (automation, quarantine) reads with `file.read`, as
+/// its sandbox does: its own worktree and its project's folder, never another worktree (`kept_out`
+/// holds every other one, of any project, as a worktree may sit inside a project's folder).
+pub fn session_reach(own_worktree: &Path, project_root: Option<&Path>, worktrees: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut roots = vec![own_worktree.to_path_buf()];
+    roots.extend(project_root.map(Path::to_path_buf));
+    let kept_out = worktrees.iter().filter(|w| w.as_path() != own_worktree).cloned().collect();
+    (roots, kept_out)
+}
+
+/// [`file_read`], and never under one of `kept_out` (the canonical path is checked, so a link or
+/// `..` does not reach one).
+pub fn file_read_kept(path: &Path, roots: &[PathBuf], kept_out: &[PathBuf]) -> Result<String, String> {
     use std::io::Read as _;
     let real = file_allowed(path, roots)?;
+    if kept_out.iter().filter_map(|w| std::fs::canonicalize(w).ok()).any(|w| real.starts_with(&w)) {
+        return Err(format!("{} is in another worktree: a session the manager drives reads its own.", path.display()));
+    }
     let mut bytes = Vec::new();
     std::fs::File::open(&real).and_then(|f| f.take(CAP as u64 + 1).read_to_end(&mut bytes)).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.iter().take(8192).any(|b| *b == 0) {
@@ -219,6 +238,26 @@ mod tests {
             assert!(file_read(&project.join("link.txt"), &roots).unwrap_err().contains("not in a managed project"), "a link out is followed and refused");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_the_manager_drives_reads_its_own_worktree_and_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("app");
+        let (own, other) = (project.join(".worktrees").join("feat-a"), project.join(".worktrees").join("feat-b"));
+        let elsewhere = dir.path().join("shop");
+        for folder in [&own, &other, &elsewhere] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("x.rs"), "x\n").unwrap();
+        }
+        std::fs::write(project.join("README.md"), "app\n").unwrap();
+        let worktrees = vec![own.clone(), other.clone()];
+        let (roots, kept_out) = session_reach(&own, Some(&project), &worktrees);
+        assert_eq!(file_read_kept(&own.join("x.rs"), &roots, &kept_out).unwrap(), "x\n");
+        assert_eq!(file_read_kept(&project.join("README.md"), &roots, &kept_out).unwrap(), "app\n");
+        assert!(file_read_kept(&other.join("x.rs"), &roots, &kept_out).unwrap_err().contains("another worktree"));
+        assert!(file_read_kept(&own.join("../feat-b/x.rs"), &roots, &kept_out).unwrap_err().contains("another worktree"));
+        assert!(file_read_kept(&elsewhere.join("x.rs"), &roots, &kept_out).unwrap_err().contains("not in a managed project"));
     }
 
     #[test]
