@@ -1100,11 +1100,17 @@ impl Workspace {
         }
         // `GLASSCODE_DEBUG_SETTINGS_OPEN=<part>[,<part>]` opens the parts of a row that a click
         // opens: `trust:allows`, `trust:add`, `trust:delegate`, `trust:site` (the first
-        // project's), and `cli` (the technical lines of each CLI).
+        // project's), `cli` (the technical lines of each CLI) and `account-add` (the fields of
+        // a new Claude account).
         if DRAWS.load(Ordering::Relaxed) == 0 {
             for part in std::env::var("GLASSCODE_DEBUG_SETTINGS_OPEN").unwrap_or_default().split(',') {
                 match part.trim() {
                     "cli" => self.settings.cli_details.extend(["Claude Code", "Codex"].map(String::from)),
+                    "account-add" => {
+                        if let Some(form) = self.settings.form.as_mut() {
+                            form.adding = Some(glasscode_core::model::AgentKind::Claude);
+                        }
+                    }
                     part => self.trust_debug_open(part.strip_prefix("trust:").unwrap_or_default()),
                 }
             }

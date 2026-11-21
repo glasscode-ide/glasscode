@@ -279,6 +279,15 @@ impl Workspace {
                 current.delegate.extend(glasscode_core::delegation::parse("run the tests: proceed for cargo test => Yes").ok());
                 current.browser_hosts.push("docs.rs".into());
             }
+            // With it, the second and third project show the other two levels.
+            #[cfg(debug_assertions)]
+            if std::env::var("GLASSCODE_DEBUG_SETTINGS_OPEN").is_ok_and(|v| v.split(',').any(|part| part.trim() == "trust:sample")) {
+                current.level = match rows.len() {
+                    1 => Level::Standard,
+                    2 => Level::Autopilot,
+                    _ => current.level,
+                };
+            }
             let open = self.trust.open.as_ref().filter(|(id, _)| *id == project.id).map(|(_, panel)| *panel);
             let picker = ui::segmented().children(Level::ALL.into_iter().map(|level| {
                 let key = key.clone();
@@ -348,8 +357,10 @@ impl Workspace {
                         .child(div().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(takes))
                 }
             });
-            let body = div().flex().flex_col().gap(theme::sz(8.)).when(!extras.is_empty(), |d| d.child(inset().children(extras))).child(actions).children(panel);
-            rows.push(card(project.name.clone(), level_words(current.level)).control(picker).body(body).into_row());
+            // The level in one line on the whole width of the row: beside the choice it would
+            // take two lines in the smallest window.
+            let body = div().flex().flex_col().gap(theme::sz(8.)).child(small(level_words(current.level)).mt(-theme::sz(4.))).when(!extras.is_empty(), |d| d.child(inset().children(extras))).child(actions).children(panel);
+            rows.push(card(project.name.clone(), "").control(picker).body(body).into_row());
         }
         if rows.is_empty() {
             rows.push(row("No projects yet", "A project shows here with its level once it is added.", None));
@@ -377,15 +388,17 @@ impl Workspace {
                     };
                     let (id_on, id_approve, id_try) = (playbook.id.clone(), playbook.id.clone(), playbook.id.clone());
                     let on = playbook.enabled;
-                    let controls = div()
+                    // The switch alone at the right edge, as in every row; what else can be done
+                    // with the playbook is small, under its sentence, which then has the width.
+                    let toggle = ui::switch(SharedString::from(format!("trust-pb-{}", playbook.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Playbook { id: id_on.clone(), on: !on }, cx)));
+                    let actions = div()
                         .flex()
                         .flex_wrap()
                         .items_center()
-                        .gap(theme::sz(10.))
-                        .child(ui::button(format!("trust-pb-try-{}", playbook.id), "Try on the last 7 days").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.trust_try(id_try.clone(), window, cx))))
-                        .when(!playbook.approved(), |d| d.child(ui::button(format!("trust-pb-approve-{}", playbook.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApprovePlaybook { id: id_approve.clone() }, cx)))))
-                        .child(ui::switch(SharedString::from(format!("trust-pb-{}", playbook.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Playbook { id: id_on.clone(), on: !on }, cx))));
-                    books.push(row(trust::playbook_sentence(playbook), state, Some(controls.into_any_element())));
+                        .gap(theme::sz(6.))
+                        .when(!playbook.approved(), |d| d.child(ui::pill(SharedString::from(format!("trust-pb-approve-{}", playbook.id)), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApprovePlaybook { id: id_approve.clone() }, cx)))))
+                        .child(ui::pill(SharedString::from(format!("trust-pb-try-{}", playbook.id)), "Try on the last 7 days").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.trust_try(id_try.clone(), window, cx))));
+                    books.push(card(trust::playbook_sentence(playbook), state).control(toggle).body(actions).into_row());
                 }
             }
         }
@@ -400,18 +413,18 @@ impl Workspace {
                 for schedule in &file.schedules {
                     let (on, id_on, id_approve) = (schedule.enabled, schedule.id.clone(), schedule.id.clone());
                     let approved = self.trust.book.is_some() && schedule.proposed_by.is_none();
-                    let controls = div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(theme::sz(10.))
-                        .when(!approved, |d| d.child(ui::button(format!("trust-sc-approve-{}", schedule.id), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApproveSchedule { id: id_approve.clone() }, cx)))))
-                        .child(ui::switch(SharedString::from(format!("trust-sc-{}", schedule.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Schedule { id: id_on.clone(), on: !on }, cx))));
+                    let toggle = ui::switch(SharedString::from(format!("trust-sc-{}", schedule.id)), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::Schedule { id: id_on.clone(), on: !on }, cx)));
+                    let approve = (!approved).then(|| ui::pill(SharedString::from(format!("trust-sc-approve-{}", schedule.id)), "Approve").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_change(Change::ApproveSchedule { id: id_approve.clone() }, cx))));
                     let state = match &schedule.proposed_by {
                         Some(by) => format!("Proposed by {by}"),
                         None => if on { "On".into() } else { "Off".into() },
                     };
-                    schedules.push(row(trust::schedule_sentence(schedule), state, Some(controls.into_any_element())));
+                    let framed = card(trust::schedule_sentence(schedule), state).control(toggle);
+                    schedules.push(match approve {
+                        Some(approve) => framed.body(div().flex().child(approve)),
+                        None => framed,
+                    }
+                    .into_row());
                 }
             }
         }
@@ -422,10 +435,12 @@ impl Workspace {
     }
 }
 
-/// A level in one line, for a project's row (`Level::describe`, without "the manager").
+/// A level in one line, for a project's row: `Level::describe` without "the manager", and with
+/// this computer by its name (the core's sentence says "this Mac").
 fn level_words(level: Level) -> String {
     let words = level.describe();
-    format!("{}.", sentence_case(words.strip_prefix("the manager ").unwrap_or(words)))
+    let words = words.strip_prefix("the manager ").unwrap_or(words).replace("this Mac", crate::platform::this_computer());
+    format!("{}.", sentence_case(&words))
 }
 
 fn sentence_case(text: &str) -> String {
@@ -552,10 +567,12 @@ fn mark(mark: Mark) -> Div {
                 .child(div().h(px(1.)).w(relative(0.6)).bg(theme::text_soft())),
         ),
         Mark::Never => frame.child(div().w(theme::sz(9.)).h(theme::sz(1.5)).rounded_full().bg(theme::faint())),
-        Mark::Partly => frame.child(div().size(theme::sz(8.)).rounded_full().border_1().border_color(theme::text_soft())),
+        Mark::Partly => frame,
     }
 }
 
+/// One answer in its cell. A long answer ("in its own sessions; asks for others") has no
+/// mark: its words start where the marks of the other cells stand, and have the cell's width.
 fn answer(words: &str) -> Div {
     let (kind, words) = mark_of(words);
     div()
@@ -564,7 +581,8 @@ fn answer(words: &str) -> Div {
         .min_w_0()
         .items_start()
         .gap(theme::sz(5.))
-        .child(div().flex_none().pt(theme::sz(1.5)).child(mark(kind)))
+        .pr(theme::sz(6.))
+        .when(kind != Mark::Partly, |d| d.child(div().flex_none().pt(theme::sz(1.5)).child(mark(kind))))
         .child(div().flex_1().min_w_0().text_size(theme::sz(12.)).text_color(if kind == Mark::Never { theme::card_soft_text() } else { theme::text() }).child(words.to_string()))
 }
 
@@ -639,7 +657,7 @@ fn level_table(lines: &[trust::TableLine]) -> Div {
         .border_t_1()
         .border_color(theme::border())
         .children(
-            [(Mark::Yes, "without asking"), (Mark::Asks, "asks; your words in chat may allow it"), (Mark::Card, "a card with everything, each time"), (Mark::Never, "never"), (Mark::Partly, "as its cell says")]
+            [(Mark::Yes, "without asking"), (Mark::Asks, "asks; your words in chat may allow it"), (Mark::Card, "a card with everything, each time"), (Mark::Never, "never")]
                 .map(|(kind, words)| div().flex().items_center().gap(theme::sz(5.)).child(mark(kind)).child(small(words))),
         );
     div().flex().flex_col().min_w_0().child(head).children(rows).child(key)
@@ -679,5 +697,11 @@ mod tests {
     #[test]
     fn a_level_reads_as_one_sentence() {
         assert_eq!(level_words(Level::Careful), "Asks before it does anything but read, keep the board and take notes.");
+        // The other two name this computer, and none says "the manager" or "Mac" on a PC.
+        for level in Level::ALL {
+            let words = level_words(level);
+            assert!(!words.contains("the manager") && words.ends_with('.'), "{words}");
+            assert!(cfg!(not(windows)) || !words.contains("Mac"), "{words}");
+        }
     }
 }

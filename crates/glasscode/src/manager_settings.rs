@@ -641,7 +641,7 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .gap(theme::sz(10.))
-                    .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Urgent alerts"))
+                    .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("May send urgent alerts"))
                     .child(switch(SharedString::from(format!("manager-person-urgent-{i}")), person.urgent).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let name = urgent_name.clone();
                         this.manager_set(
