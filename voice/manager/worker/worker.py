@@ -197,8 +197,10 @@ class ManagerVoice:
             "vad": vad,
             "turn_handling": {
                 "turn_detection": turn_detection,
-                # The voice detector decides when the person cuts in.
-                "interruption": {"mode": "vad"},
+                # The voice detector decides when the person cuts in, once the speech-to-text
+                # service heard two words: a cough, a keyboard or the speakers' echo alone does
+                # not stop the voice in the middle of a sentence.
+                "interruption": {"mode": "vad", "min_words": 2},
                 # Thinking ahead on half a sentence sends it to the talker's service: only while
                 # a talker client chose to talk (switched on in `_apply_talker`).
                 "preemptive_generation": {"enabled": False},
@@ -529,12 +531,13 @@ class ManagerVoice:
             self._publish_state()
             return
         talking = self._talker_on()
-        if talking:
-            # The talker hears what the manager said (so "and the second one?" makes sense),
-            # but does not tell it again as its own words.
-            self.said_texts = (self.said_texts + [text])[-20:]
         try:
-            handle = self.session.say(text, add_to_chat_ctx=talking)
+            if talking:
+                # The talker retells it, short and in its own voice: to the person it is one
+                # manager, not a voice that reads out what another one wrote.
+                handle = self.session.generate_reply(instructions=f"{talker.RELAY}\n{text}")
+            else:
+                handle = self.session.say(text, add_to_chat_ctx=False)
         except RuntimeError as error:
             log.warning("cannot speak: %s", error)
             self._publish_state()

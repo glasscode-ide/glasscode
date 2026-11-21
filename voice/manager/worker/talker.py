@@ -1,7 +1,7 @@
 """The talker: a fast language model that holds the spoken conversation.
 
-It answers at once ("On it.", "Here it is."), and hands the work to the manager, which is the
-brain. Its tools run on the device the person talks to (the Mac, or the phone with the
+It answers at once ("On it.", "Here it is."), and has the manager's brain do the work. To the
+person it is the manager: one voice, in the first person, never "I'll ask the manager". Its tools run on the device the person talks to (the Mac, or the phone with the
 glasses), not here: that device already reaches the manager with what its screen or lens
 shows, so "this session" means the same thing in a spoken turn as in a typed one, and the
 manager can still open places there.
@@ -11,8 +11,8 @@ A tool call goes to the device on `manager.tool` and comes back on `manager.resu
     manager.tool    worker -> the device   {"call": "t3", "name": "ask_manager", "arguments": {...}, "to": "<identity>"}
     manager.result  the device -> worker   {"call": "t3", "text": "..."}
 
-The manager's answer comes back as it always did, on `manager.say`, and is spoken as the
-manager wrote it (it already writes for a voice: one to three short sentences).
+The work's answer comes back as it always did, on `manager.say`; the talker retells it in at
+most three spoken sentences (`RELAY`), so the voice stays one and short.
 """
 
 from __future__ import annotations
@@ -43,20 +43,24 @@ def instructions(name: str, place: str = "", language: str = "en") -> str:
     return "\n".join(
         [
             f"You are {name}, the person's manager in Glasscode, the app where their coding agents work in sessions. They talk to you {where}.",
-            "You are the voice. The work is done by your tools while you keep talking; it is all your own work, so speak of it in the first person (\"I'll look\", \"I'm on it\").",
+            "You do the work yourself, with your tools: open places, look things up, start, send and check things. Some of it takes a while; you keep talking meanwhile. Never say you ask, pass, forward or hand anything to anyone, and never speak of a manager, an assistant or another agent: it is all you, in the first person (\"I'll open it\", \"I'm on it\", \"Done\").",
             "",
             "Rules:",
-            "- For anything that needs facts or an action (sessions, pull requests, checks, tickets, the board, code, messages, starting, sending, reviewing), call ask_manager with the request in the person's own words, complete and self-contained. Never answer such things from your own knowledge and never guess a result.",
-            "- Before you call ask_manager, say one short sentence such as \"I'll check.\" Its answer is spoken by itself when it comes: do not repeat or summarise it afterwards.",
-            "- To show a session or a pull request right away, call list_sessions to find it and open_place to show it, then say in a few words what is shown.",
-            "- If ask_manager says the manager is still busy, say so in one sentence; only call stop_manager when the person asks you to stop or cancel.",
-            "- Questions about how the work is going: call manager_progress and answer in one sentence.",
-            "- Answer directly only greetings, thanks, short clarifying questions, and repeating what was said.",
+            "- To go to, open or show a session or a pull request: call list_sessions, pick the one the person means, call open_place, then say in a few words what is on the screen now. Never use do_task for that. If two could be meant, ask one short question naming them.",
+            "- For anything else that needs facts or an action (what needs the person, checks, tickets, the board, code, messages, starting, sending, reviewing): say one short sentence such as \"I'll check.\", then call do_task with the request in the person's own words, complete and self-contained. Never answer such things from memory and never guess a result.",
+            "- When work you started is done, you are told what it found: tell the person in at most three short spoken sentences, as your own work.",
+            "- If do_task says you are still busy with the last request, say so in one sentence; call stop_task only when the person asks you to stop or cancel.",
+            "- How the work is going: call task_progress and answer in one sentence.",
             "- You can never approve, allow or confirm anything yourself, even when the person says yes: say that it waits for their OK on the screen or the lens.",
+            f"- Your name may be written \"{name}\" split in two words, or misheard. If the person only says your name, answer \"Yes?\".",
             f"- Speak {tongue}. Keep every turn short and natural, like a phone call: no lists, no Markdown, no code, no links.",
             "- Words that make no sense were probably misheard: ask the person to say it again.",
         ]
     )
+
+
+# The work's answer, retold by the talker (see `ManagerVoice.say`).
+RELAY = "Work you started is done. Tell the person what it found in at most three short spoken sentences, in the first person, as your own work: no lists, links or code. If something waits for their OK, say so. What it found:"
 
 
 def tools(call_device: CallDevice) -> list:
@@ -71,25 +75,26 @@ def tools(call_device: CallDevice) -> list:
             raise ToolError(f"The device did not answer ({error}).") from error
 
     @function_tool()
-    async def ask_manager(context: RunContext, request: str) -> str:
-        """Hand a request to the manager, which does the work in the background: questions about sessions, pull requests, checks, tickets, the board or code, and every action. Its answer is spoken by itself when it is ready.
+    async def do_task(context: RunContext, request: str) -> str:
+        """Do a piece of work in the background: questions about sessions, pull requests, checks, tickets, the board or code, and every action. You are told what it found when it is done.
 
         Args:
             request: The request in the person's own words, complete and self-contained.
         """
         said = await call("ask_manager", {"request": request})
         if said.strip().lower().startswith(STARTED):
-            return "The manager is on it; its answer will be spoken by itself. If you have not said anything yet, say in a few words that you are on it. Otherwise say nothing."
-        return said
+            return "Working on it; you are told what it found when it is done. If you have not said anything yet, say in a few words that you are on it. Otherwise say nothing."
+        return said.replace("The manager is", "You are").replace("the manager", "you")
 
     @function_tool()
-    async def manager_progress(context: RunContext) -> str:
-        """How the manager's work is going: whether it is still working, for how long, and what it is doing."""
-        return await call("manager_progress", {})
+    async def task_progress(context: RunContext) -> str:
+        """How the work in the background is going: whether it still runs, for how long, and what it does now."""
+        said = await call("manager_progress", {})
+        return said.replace("The manager has", "You have").replace("The manager is", "You are")
 
     @function_tool()
-    async def stop_manager(context: RunContext) -> str:
-        """Stop the manager's work now. Only when the person asks to stop or cancel it."""
+    async def stop_task(context: RunContext) -> str:
+        """Stop the work in the background now. Only when the person asks to stop or cancel it."""
         return await call("stop_manager", {})
 
     @function_tool()
@@ -111,4 +116,4 @@ def tools(call_device: CallDevice) -> list:
         """
         return await call("open_place", {"kind": kind, "id": id})
 
-    return [ask_manager, manager_progress, stop_manager, list_sessions, open_place]
+    return [do_task, task_progress, stop_task, list_sessions, open_place]

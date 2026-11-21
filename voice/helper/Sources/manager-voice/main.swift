@@ -170,6 +170,11 @@ final class Helper {
         do {
             try await room.localParticipant.setMicrophone(enabled: want)
             micOn = want
+            if want {
+                // Whether Apple's echo cancelling runs: without it the speakers' sound comes back
+                // through the microphone and the voice may cut itself off.
+                note("audio processing: \(String(describing: AudioManager.shared.audioProcessingState))")
+            }
         } catch {
             note("microphone: \(error)")
             emit(["error": "The microphone could not be used. Allow Glasscode to use it in System Settings › Privacy & Security › Microphone."])

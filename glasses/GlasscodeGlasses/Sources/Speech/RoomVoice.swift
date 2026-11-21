@@ -42,6 +42,9 @@ final class RoomVoice {
     private(set) var state: State = .off
     var live: Bool { room != nil }
     var speaking: Bool { state == .speaking }
+    /// The room's worker has a talker: it retells the manager's answer itself, so the answer goes
+    /// to it whole, once, not sentence by sentence.
+    private(set) var talker = false
 
     /// What it heard from this phone (final), and whether the talker answers it (else: ask).
     var onHeard: ((String, Bool) -> Void)?
@@ -84,6 +87,7 @@ final class RoomVoice {
         let gen = generation
         self.name = name
         identity = pass.identity
+        talker = pass.talker
         workerHere = false
         set(.connecting)
         guard await Self.micPermission() else {

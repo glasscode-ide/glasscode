@@ -53,12 +53,19 @@ class FakeTalkerStream(llm.LLMStream):
     the manager; after a tool's answer it says nothing (as the real one is told to)."""
 
     async def _run(self):
+        # The work's answer to retell (`talker.RELAY` in the instructions): say what it found.
+        for item in self._chat_ctx.items:
+            said = getattr(item, "text_content", None) or ""
+            if getattr(item, "role", "") in ("system", "developer") and "What it found:" in said:
+                found = said.split("What it found:", 1)[1].strip()
+                self._event_ch.send_nowait(llm.ChatChunk(id="fake", delta=llm.ChoiceDelta(role="assistant", content=found)))
+                return
         last = self._chat_ctx.items[-1] if self._chat_ctx.items else None
         if getattr(last, "type", "") == "function_call_output" or getattr(last, "role", "") != "user":
             return
         asked = (last.text_content or "").strip()
         self._event_ch.send_nowait(llm.ChatChunk(id="fake", delta=llm.ChoiceDelta(role="assistant", content="I'll check.")))
-        call = llm.FunctionToolCall(name="ask_manager", arguments=json.dumps({"request": asked}), call_id=f"c{len(self._chat_ctx.items)}")
+        call = llm.FunctionToolCall(name="do_task", arguments=json.dumps({"request": asked}), call_id=f"c{len(self._chat_ctx.items)}")
         self._event_ch.send_nowait(llm.ChatChunk(id="fake", delta=llm.ChoiceDelta(role="assistant", tool_calls=[call])))
 
 

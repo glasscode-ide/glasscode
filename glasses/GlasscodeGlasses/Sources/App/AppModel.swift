@@ -391,6 +391,7 @@ final class AppModel: ObservableObject {
     private func finishAnswer(_ said: String) {
         writing = ""
         for sentence in sentences.next(said, final: true) { speak(sentence) }
+        if room.live, room.talker { roomSay(said) }
         let chips = chips(for: said)
         var model = lens
         // A long explanation with nothing to open goes a point at a time (F6), in step with the
@@ -409,7 +410,8 @@ final class AppModel: ObservableObject {
 
     private func speak(_ sentence: String) {
         if room.live {
-            roomSay(sentence)
+            // With a talker the whole answer goes once, when it is done (`finishAnswer`).
+            if !room.talker { roomSay(sentence) }
             return
         }
         turn.speaking()
