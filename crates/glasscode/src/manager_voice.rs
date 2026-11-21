@@ -400,8 +400,17 @@ impl Workspace {
                     }
                     Ok(Line::Error(problem)) => {
                         log::warn!("manager voice: {problem}");
+                        // The room was made before the voice worker on this Mac signed in, so
+                        // LiveKit never sent it in: leave, and join again a moment later (an
+                        // empty room closes at once there, and the new one gets the worker).
+                        let empty_room = self.state.manager.voice.local && problem.contains("did not join");
                         self.manager.voice.problem = Some(problem);
                         changed = true;
+                        if empty_room {
+                            self.manager_voice_end();
+                            self.manager.voice.retry_at = Some(Instant::now() + Duration::from_secs(3));
+                            break;
+                        }
                     }
                     Err(async_channel::TryRecvError::Empty) => break,
                     Err(async_channel::TryRecvError::Closed) => {

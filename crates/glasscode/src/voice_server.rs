@@ -322,7 +322,7 @@ fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
         None => "[127.0.0.1]".into(),
     };
     let config = format!(
-        "port: {PORT}\nbind_addresses: {binds}\nrtc:\n  tcp_port: {RTC_TCP}\n  udp_port: {RTC_UDP}\n  use_external_ip: false\n  node_ip: {node_ip}\nroom:\n  empty_timeout: 300\n  departure_timeout: 20\nlogging:\n  level: info\n"
+        "port: {PORT}\nbind_addresses: {binds}\nrtc:\n  tcp_port: {RTC_TCP}\n  udp_port: {RTC_UDP}\n  use_external_ip: false\n  node_ip: {node_ip}\nroom:\n  empty_timeout: 30\n  departure_timeout: 1\nlogging:\n  level: info\n"
     );
     let config_path = dir().join("livekit.yaml");
     std::fs::write(&config_path, config).map_err(|e| format!("Could not write {} ({e}).", config_path.display()))?;
@@ -371,13 +371,27 @@ fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
     if let Some(talker_key) = &talker_key {
         cmd.env("MANAGER_TALKER_KEY", talker_key);
     }
-    let worker = match spawn_logged(&mut cmd, "worker.log", "worker.pid") {
+    let mut worker = match spawn_logged(&mut cmd, "worker.log", "worker.pid") {
         Ok(worker) => worker,
         Err(why) => {
             end(livekit);
             return Err(why);
         }
     };
+    // LiveKit sends the worker into a room when the room is made, that is when the first device
+    // joins: a device that joined before the worker signed in would talk to an empty room. So it
+    // runs only once the worker is signed in (loading its voice detector takes some seconds).
+    let log = dir().join("worker.log");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("registered worker") {
+        if Instant::now() > deadline || !matches!(worker.try_wait(), Ok(None)) {
+            let why = last_line(&log);
+            end(worker);
+            end(livekit);
+            return Err(format!("The voice worker did not start on this Mac: {why}. See ~/.glasscode/voice/worker.log."));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
     Ok(Started { livekit, worker, tailnet })
 }
 
