@@ -559,9 +559,12 @@ fn ui_open(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     ws.center = crate::center::Center::Session;
                     ws.show_view(View::Sessions, cx);
                 }
-                View::Manager => ws.show_manager(window, cx),
                 other => ws.show_view(other, cx),
             },
+            // The manager's place is its panel on Today; only the person's own going there puts
+            // the cursor in its box.
+            Target::Place(Place::Manager) if go => ws.show_manager(window, cx),
+            Target::Place(Place::Manager) => ws.assistant_dock(cx),
             Target::Place(Place::Settings(section)) => ws.open_settings(section, window, cx),
             Target::Place(Place::Tab(tab)) => {
                 ws.right_tab = tab;
@@ -1457,7 +1460,9 @@ mod tests {
         // The arms for a caller that is not the person: from the deferral to the reply.
         let reveal = &open[open.find("match target {").unwrap()..];
         assert!(!reveal.replace("if go => ws.open_session", "").replace("if go => ws.go(", "").contains("open_session(") && !reveal.contains("focus"), "{reveal}");
-        for called in ["reveal_session", "show_today", "show_tickets", "show_prs", "show_view", "show_manager", "open_settings"] {
+        // `show_manager` puts the cursor in the manager's box: only the person's `--go` calls it.
+        assert!(!reveal.replace("if go => ws.show_manager(", "").contains("show_manager("), "{reveal}");
+        for called in ["reveal_session", "show_today", "show_tickets", "show_prs", "show_view", "assistant_dock", "open_settings"] {
             let text = body(called);
             for taker in ["focus(", "focus_active", "attention.remove", "dismiss_popups_for"] {
                 assert!(!text.contains(taker), "{called} calls {taker}");

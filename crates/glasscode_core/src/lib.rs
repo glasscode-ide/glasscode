@@ -2,6 +2,7 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod activity;
+pub mod agent_history;
 pub mod agents;
 pub mod autofix;
 pub mod backdrop;
@@ -74,6 +75,7 @@ pub mod resources;
 pub mod save;
 pub mod schedule;
 pub mod settings;
+pub mod signin;
 pub mod store;
 pub mod switch;
 pub mod sync;

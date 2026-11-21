@@ -10,12 +10,14 @@ use glasscode_core::github::{CheckState, MyPr};
 use glasscode_core::model::AgentKind;
 use glasscode_core::usage::{self, Limit};
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Hsla, SharedString, canvas, div,
-    fill, point, prelude::*, size,
+    AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString,
+    ScrollWheelEvent, canvas, div, fill, point, prelude::*, px,
+    relative, size,
 };
 
 use crate::backdrop;
 use crate::icons;
+use crate::motion;
 use crate::sidebar::RowState;
 use crate::theme;
 use crate::ui;
@@ -55,23 +57,75 @@ pub fn columns(width: f32) -> usize {
 
 /// The tracks of the 12 that a card spans: in three columns the rows are 5 4 3, 7 5 and 8 4; in
 /// two the wide cards take a row and the narrow ones half of one; in one each takes a row.
-pub fn span(card: Card, columns: usize) -> u16 {
+/// `quiet`: the heat map has nothing to show, so Activity is the narrow card of its row and
+/// Recent sessions the wide one (a wide card for one sentence is wasted).
+pub fn span(card: Card, columns: usize, quiet: bool) -> u16 {
     match columns {
         3 => match card {
             Card::Needs => 5,
             Card::ComingUp => 4,
             Card::Usage => 3,
+            Card::Activity if quiet => 4,
+            Card::Recent if quiet => 8,
             Card::Activity => 7,
             Card::Recent => 5,
             Card::PullRequests => 8,
             Card::Month => 4,
         },
         2 => match card {
-            Card::ComingUp | Card::Usage | Card::Month => TRACKS / 2,
+            Card::ComingUp | Card::Usage | Card::PullRequests | Card::Month => TRACKS / 2,
             _ => TRACKS,
         },
         _ => TRACKS,
     }
+}
+
+/// The one gap of the page: between the cards, and between the start box, the grid and the list.
+pub const GAP: f32 = 14.;
+/// The height of a row of a card's list, and the gap between two rows. Each row is this high,
+/// whatever it says, so that a card can end between two rows.
+pub const ROW_HEIGHT: f32 = 52.;
+const ROW_GAP: f32 = 2.;
+/// A card's header: its margins and its line.
+const HEADER: f32 = 14. + 20. + 8.;
+/// The rows a card shows before it scrolls.
+pub const ROWS_SHOWN: f32 = 4.;
+/// The height of the cards of a row (at 100 %): the header and whole rows, never a part of
+/// one (the owner, 2026-11-20: a row cut by the card's edge looks broken). The count in the
+/// header and the thumb say that there are more. The little under the last row is the next
+/// row's own padding, so nothing of it shows.
+pub const CARD_HEIGHT: f32 = HEADER + ROWS_SHOWN * (ROW_HEIGHT + ROW_GAP) + 6.;
+/// The height of a row whose cards all have only their sentence.
+pub const CARD_HEIGHT_EMPTY: f32 = 152.;
+
+/// The height of each card, in the order of `cards`, which has each card and whether it has
+/// nothing to show: the cards of a row are as high as each other. `None`: the card's own height
+/// (the heat map alone in a row, whose height follows its width).
+pub fn heights(cards: &[(Card, bool)], columns: usize, quiet: bool) -> Vec<Option<f32>> {
+    fn close(row: &mut Vec<(Card, bool)>, out: &mut Vec<Option<f32>>) {
+        let height = if row.iter().all(|(_, empty)| *empty) {
+            Some(CARD_HEIGHT_EMPTY)
+        } else if matches!(row.as_slice(), [(Card::Activity, _)]) {
+            None
+        } else {
+            Some(CARD_HEIGHT)
+        };
+        out.extend(row.drain(..).map(|_| height));
+    }
+    let mut out = Vec::with_capacity(cards.len());
+    let mut row: Vec<(Card, bool)> = Vec::new();
+    let mut tracks = 0;
+    for (card, empty) in cards {
+        let wide = span(*card, columns, quiet);
+        if tracks + wide > TRACKS {
+            close(&mut row, &mut out);
+            tracks = 0;
+        }
+        tracks += wide;
+        row.push((*card, *empty));
+    }
+    close(&mut row, &mut out);
+    out
 }
 
 // ----- a card's rows ------------------------------------------------------------------------------
@@ -88,6 +142,9 @@ pub enum Open {
     Inbox,
     /// The Usage page.
     Usage,
+    /// A part of the manager's panel in Today's right panel: its conversation, the follow-ups,
+    /// the messages, memory.
+    Manager(crate::manager_view::Stage),
 }
 
 /// The colour of a row's icon (never of its text: text on glass is `text`, `text_soft` or
@@ -148,28 +205,28 @@ impl Line {
     }
 }
 
-/// A card that is a list: its rows, how many more there are, the number in its corner, and the
+/// A card that is a list: its rows (the card scrolls them), the number in its corner, and the
 /// sentence it shows when it has no row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct List {
     pub lines: Vec<Line>,
-    pub more: usize,
-    /// Where "N more" leads.
-    pub more_open: Open,
     pub count: Option<String>,
     pub empty: Option<&'static str>,
 }
 
+/// The most rows a list card has: each is laid out on each frame, and Today draws ten times a
+/// second. The number in the card's corner is of all of them.
+pub const LIST_MOST: usize = 40;
+
 impl List {
-    fn of(mut lines: Vec<Line>, shown: usize, empty: &'static str) -> List {
-        let more = lines.len().saturating_sub(shown);
-        lines.truncate(shown);
+    /// The first [`LIST_MOST`] of `lines`, with how many there are in the corner.
+    fn of(mut lines: Vec<Line>, empty: &'static str) -> List {
+        let count = (!lines.is_empty()).then(|| lines.len().to_string());
+        lines.truncate(LIST_MOST);
         let empty = lines.is_empty().then_some(empty);
         List {
             lines,
-            more,
-            more_open: Open::Nothing,
-            count: None,
+            count,
             empty,
         }
     }
@@ -188,7 +245,6 @@ pub struct Need {
     pub open: Open,
 }
 
-const NEEDS_SHOWN: usize = 4;
 pub const NEEDS_EMPTY: &str = "Nothing waits for you right now.";
 
 /// Needs you: the requests that wait for an OK (one row that leads to Inbox), then the sessions
@@ -212,13 +268,16 @@ pub fn needs(needs: &[Need], approvals: usize) -> List {
         });
     }
     for need in needs {
+        // What the manager holds (a message to allow, a follow-up to look at again) has its mark.
+        let held = matches!(need.open, Open::Manager(_));
         let mark = match (need.failing, need.agent) {
             (true, _) => Mark::Icon(icons::PULL_REQUEST, Tone::Bad),
             (false, Some(agent)) => Mark::Agent(agent),
+            (false, None) if held => Mark::Icon(icons::ASSISTANT, Tone::Attention),
             (false, None) => Mark::Icon(icons::BELL, Tone::Attention),
         };
         lines.push(Line {
-            action: Some(if need.failing { "Open" } else { "Answer" }),
+            action: Some(if need.failing || held { "Open" } else { "Answer" }),
             ..Line::new(
                 mark,
                 need.title.clone(),
@@ -227,11 +286,7 @@ pub fn needs(needs: &[Need], approvals: usize) -> List {
             )
         });
     }
-    let total = lines.len();
-    let mut list = List::of(lines, NEEDS_SHOWN, NEEDS_EMPTY);
-    list.more_open = Open::Inbox;
-    list.count = (total > 0).then(|| total.to_string());
-    list
+    List::of(lines, NEEDS_EMPTY)
 }
 
 // ----- Coming up ------------------------------------------------------------------------------------
@@ -249,7 +304,6 @@ pub struct Upcoming {
 
 /// How far ahead Coming up looks.
 const AHEAD: Day = 7;
-const COMING_SHOWN: usize = 5;
 pub const COMING_EMPTY: &str = "Nothing is due in the next 7 days, and no review waits for you.";
 
 fn is_review(item: &Item) -> bool {
@@ -322,7 +376,7 @@ pub fn coming_up_list(upcoming: &[Upcoming], open: impl Fn(&Upcoming) -> Open) -
             ..Line::new(Mark::None, u.title.clone(), u.detail.clone(), open(u))
         })
         .collect();
-    List::of(lines, COMING_SHOWN, COMING_EMPTY)
+    List::of(lines, COMING_EMPTY)
 }
 
 // ----- Usage -----------------------------------------------------------------------------------------
@@ -521,9 +575,12 @@ pub struct Recent {
     pub agent: AgentKind,
     pub state: RowState,
     pub created_at: u64,
+    /// What the manager knows of it: its state and where its last reply ends. Empty: nothing.
+    pub line: String,
+    /// It runs on the server (the manager sees it there).
+    pub on_server: bool,
 }
 
-const RECENT_SHOWN: usize = 5;
 pub const RECENT_EMPTY: &str = "The sessions you start show here.";
 
 /// The newest sessions; those that wait for the person are in Needs you instead.
@@ -533,18 +590,29 @@ pub fn recent(mut sessions: Vec<Recent>, now: u64) -> List {
     let lines = sessions
         .into_iter()
         .map(|s| {
-            let detail = if s.project.is_empty() {
+            // The manager's line says more than when the session started.
+            let what = if s.line.is_empty() {
                 ago(s.created_at, now)
             } else {
-                format!("{} · {}", s.project, ago(s.created_at, now))
+                s.line.clone()
+            };
+            let detail = if s.project.is_empty() {
+                what
+            } else {
+                format!("{} · {what}", s.project)
+            };
+            let open = if s.on_server {
+                Open::Server(s.id)
+            } else {
+                Open::Session(s.id)
             };
             Line {
                 state: Some(s.state),
-                ..Line::new(Mark::Agent(s.agent), s.title, detail, Open::Session(s.id))
+                ..Line::new(Mark::Agent(s.agent), s.title, detail, open)
             }
         })
         .collect();
-    List::of(lines, RECENT_SHOWN, RECENT_EMPTY)
+    List::of(lines, RECENT_EMPTY)
 }
 
 /// "started 5 min ago", "started 3 h ago", "started 2 days ago".
@@ -561,7 +629,6 @@ fn ago(at: u64, now: u64) -> String {
 
 // ----- Pull requests -------------------------------------------------------------------------------
 
-const PRS_SHOWN: usize = 3;
 pub const PRS_LOADING: &str = "Looking for your open pull requests…";
 pub const PRS_NO_GH: &str =
     "Your open pull requests show here when the GitHub command (gh) is installed and signed in.";
@@ -574,8 +641,6 @@ pub fn pull_requests(prs: Option<&Result<Vec<MyPr>, String>>) -> List {
         None => {
             return List {
                 lines: Vec::new(),
-                more: 0,
-                more_open: Open::Nothing,
                 count: None,
                 empty: Some(PRS_LOADING),
             };
@@ -583,8 +648,6 @@ pub fn pull_requests(prs: Option<&Result<Vec<MyPr>, String>>) -> List {
         Some(Err(_)) => {
             return List {
                 lines: Vec::new(),
-                more: 0,
-                more_open: Open::Nothing,
                 count: None,
                 empty: Some(PRS_NO_GH),
             };
@@ -636,7 +699,7 @@ pub fn pull_requests(prs: Option<&Result<Vec<MyPr>, String>>) -> List {
             )
         })
         .collect();
-    let mut card = List::of(lines, PRS_SHOWN, PRS_EMPTY);
+    let mut card = List::of(lines, PRS_EMPTY);
     card.count = (!list.is_empty()).then(|| format!("{} open", list.len()));
     card
 }
@@ -707,7 +770,15 @@ pub fn month(activity: Option<&Activity>, today: &str) -> Month {
 
 // ----- drawing -------------------------------------------------------------------------------------
 
-/// A card on glass: an icon and a title, a number in its corner, then its body. In the light
+/// The radius of a card's corners.
+const RADIUS: f32 = 14.;
+/// From a card's edge to its header and its text.
+const PAD: f32 = 16.;
+/// From a card's edge to a row: a row's hover reaches this far, and its text is at [`PAD`].
+const ROW_PAD: f32 = 6.;
+
+/// A card on glass: an icon and a title, a number in its corner, then its body, which fills the
+/// rest of the card. `height` is the card's, at 100 %; none: as high as its body. In the light
 /// theme glass on white has almost no edge (its border is white, as in the mock): the soft
 /// shadow under it, the mock's, gives it one.
 pub fn card(
@@ -715,21 +786,25 @@ pub fn card(
     glyph_tone: Tone,
     title: &'static str,
     count: Option<String>,
+    height: Option<f32>,
+    body: AnyElement,
 ) -> Div {
-    backdrop::glass(theme::sz(14.))
+    backdrop::glass(theme::sz(RADIUS))
         .flex()
         .flex_col()
-        .gap(theme::sz(10.))
         .min_w_0()
-        .px(theme::sz(15.))
-        .pt(theme::sz(13.))
-        .pb(theme::sz(14.))
+        .when_some(height, |d, height| d.h(theme::sz(height)).overflow_hidden())
         .when(theme::is_light(), |d| d.shadow_md())
         .child(
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(theme::sz(8.))
+                .h(theme::sz(20.))
+                .mx(theme::sz(PAD))
+                .mt(theme::sz(14.))
+                .mb(theme::sz(8.))
                 .text_size(theme::sz(13.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::text_soft())
@@ -752,12 +827,38 @@ pub fn card(
                     d.child(
                         div()
                             .flex_none()
+                            .px(theme::sz(7.))
+                            .py(theme::sz(1.))
+                            .rounded_full()
+                            .bg(theme::tint())
+                            .text_size(theme::sz(11.5))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(theme::card_soft_text())
                             .child(n),
                     )
                 }),
         )
+        // A card of its own height is as high as its body; else the body has what is left.
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .when(height.is_some(), |d| d.flex_1().min_h_0())
+                .child(body),
+        )
+}
+
+/// A card's body that does not scroll: it keeps the card's padding, and fills a card of a set
+/// height (it grows from its own height, not from nothing: in a card of its own height, the
+/// heat map alone in a row, that is the height of the card).
+fn padded() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_grow(1.)
+        .min_h_0()
+        .px(theme::sz(PAD))
+        .pb(theme::sz(PAD))
 }
 
 /// The microphone of the start box, beside Send: it opens the voice screen (slice U19). Only where
@@ -769,25 +870,151 @@ pub fn mic_button() -> gpui::Stateful<Div> {
         .flex_none()
         .items_center()
         .justify_center()
-        .size(theme::sz(30.))
+        .size(theme::sz(38.))
         .rounded_full()
         .cursor_pointer()
         .hover(|s| s.bg(theme::tint()))
         .child(icons::icon(
             icons::MIC,
-            theme::sz(15.),
-            theme::sz(15.),
+            theme::sz(17.),
+            theme::sz(17.),
             theme::card_soft_text(),
         ))
 }
 
-/// The one sentence of a card with nothing to show.
-pub fn empty(sentence: &'static str) -> Div {
+/// A card with nothing to show: its sign and its one sentence, in the middle of the body.
+pub fn empty(glyph: &'static [u8], sentence: &'static str) -> AnyElement {
+    padded()
+        .items_center()
+        .justify_center()
+        .gap(theme::sz(8.))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(theme::sz(32.))
+                .rounded_full()
+                .bg(theme::tint())
+                .child(icons::icon(
+                    glyph,
+                    theme::sz(15.),
+                    theme::sz(15.),
+                    theme::card_soft_text(),
+                )),
+        )
+        .child(
+            div()
+                .max_w(theme::sz(280.))
+                .text_center()
+                .text_size(theme::sz(12.5))
+                .line_height(theme::sz(18.))
+                .text_color(theme::card_soft_text())
+                .child(sentence),
+        )
+        .into_any_element()
+}
+
+/// Rows that stand for a list that is on its way (a search for pull requests, a usage scan):
+/// a mark and two lines, as wide as the card lets them be. `ring`: the mark is a ring's track,
+/// as the Usage card's rows have.
+fn waiting(id: &'static str, rows: usize, ring: bool) -> AnyElement {
     div()
-        .text_size(theme::sz(12.5))
-        .line_height(theme::sz(18.))
-        .text_color(theme::card_soft_text())
-        .child(sentence)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .gap(theme::sz(if ring { 8. } else { 13. }))
+        .px(theme::sz(PAD))
+        .pt(theme::sz(if ring { 5. } else { 8. }))
+        .children((0..rows).map(|row| {
+            let line = |part: usize, width: f32, height: f32| {
+                motion::skeleton_block(
+                    (id, row * 3 + part),
+                    div().w(relative(width)).h(theme::sz(height)),
+                )
+            };
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(theme::sz(12.))
+                .child(if ring {
+                    motion::ring(0., RING, RING_LINE, theme::hover()).into_any_element()
+                } else {
+                    motion::skeleton((id, row * 3), 16., 16.).into_any_element()
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(theme::sz(6.))
+                        .child(line(1, 0.72 - 0.12 * (row % 3) as f32, 11.))
+                        .child(line(2, 0.42 + 0.1 * (row % 2) as f32, 9.)),
+                )
+        }))
+        .into_any_element()
+}
+
+/// Rows that scroll in their card. The card is as high as whole rows (`CARD_HEIGHT`), so its
+/// edge cuts none; while rows are above the body, a thin line under the card's header parts
+/// them from it. (The handle has what the frame before laid out.)
+///
+/// The wheel over a card turns the card and not the page, until the card is at its end: then
+/// the page goes on. (Each scrolling element under the pointer takes a wheel turn, the page
+/// too: the card keeps from the page the turns it has room for.)
+fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) -> AnyElement {
+    let (scrolled, most) = (-scroll.offset().y, scroll.max_offset().y);
+    let above = scrolled > px(1.);
+    let keep = move |event: &ScrollWheelEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+        // Only the direction matters, so any line height does.
+        let turn = event.delta.pixel_delta(px(16.));
+        let moved = if turn.y == px(0.) { turn.x } else { turn.y };
+        if wheel_stays(f32::from(moved), f32::from(scrolled), f32::from(most)) {
+            cx.stop_propagation();
+        }
+    };
+    let mut line = theme::text();
+    line.a = 0.1;
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .on_scroll_wheel(keep)
+        .child(ui::scroll_area(id, scroll, rows))
+        .when(above, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(theme::sz(PAD))
+                    .right(theme::sz(PAD))
+                    .h(px(1.))
+                    .bg(line),
+            )
+        })
+        .into_any_element()
+}
+
+/// Whether a turn of the wheel stays in a card: `moved` is how far the turn moves the rows
+/// (down the list is negative), `scrolled` how far they are scrolled, and `most` how far they
+/// can be. A card whose rows fit, or that is at the end the turn goes to, lets the page have it.
+fn wheel_stays(moved: f32, scrolled: f32, most: f32) -> bool {
+    if most <= 1. {
+        return false;
+    }
+    let scrolled = scrolled.clamp(0., most);
+    if moved < 0. {
+        most - scrolled > 0.5
+    } else {
+        moved > 0. && scrolled > 0.5
+    }
 }
 
 fn mark(mark: &Mark) -> Option<AnyElement> {
@@ -818,34 +1045,36 @@ fn mark(mark: &Mark) -> Option<AnyElement> {
     }
 }
 
-/// A list card's rows, its "N more" and its empty sentence. `prefix` keeps the ids apart.
-pub fn list(prefix: &'static str, list: &List, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    let mut rows: Vec<AnyElement> = list
-        .lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| row(SharedString::from(format!("{prefix}-{i}")), line, cx))
-        .collect();
+/// A list card's body: its rows, which scroll in the card (`scroll` is kept by `TodayUi`), or
+/// its sentence under `glyph`; `loading`: the list is on its way. `prefix` keeps the ids apart.
+pub fn list(
+    prefix: &'static str,
+    glyph: &'static [u8],
+    list: &List,
+    loading: bool,
+    scroll: &ScrollHandle,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     if let Some(sentence) = list.empty {
-        rows.push(empty(sentence).into_any_element());
+        return if loading {
+            waiting(prefix, 3, false)
+        } else {
+            empty(glyph, sentence)
+        };
     }
-    if list.more > 0 {
-        let open = list.more_open.clone();
-        let more = div()
-            .id(SharedString::from(format!("{prefix}-more")))
-            .text_size(theme::sz(12.))
-            .text_color(theme::card_soft_text())
-            .child(format!("{} more", list.more))
-            .when(open != Open::Nothing, |d| {
-                d.cursor_pointer()
-                    .hover(|s| s.text_color(theme::text()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.today_open(&open, window, cx)
-                    }))
-            });
-        rows.push(more.into_any_element());
-    }
-    rows
+    let rows = div()
+        .flex()
+        .flex_col()
+        .gap(theme::sz(ROW_GAP))
+        .px(theme::sz(PAD - ROW_PAD))
+        .pb(theme::sz(PAD - ROW_PAD))
+        .children(
+            list.lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| row(SharedString::from(format!("{prefix}-{i}")), line, cx)),
+        );
+    scrolling(prefix, scroll, rows)
 }
 
 fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement {
@@ -855,12 +1084,13 @@ fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement
     div()
         .id(id)
         .flex()
-        .items_start()
-        .gap(theme::sz(9.))
-        .mx(theme::sz(-6.))
-        .px(theme::sz(6.))
-        .py(theme::sz(4.))
-        .rounded(theme::sz(7.))
+        .flex_none()
+        .items_center()
+        .gap(theme::sz(10.))
+        .h(theme::sz(ROW_HEIGHT))
+        .px(theme::sz(ROW_PAD))
+        .overflow_hidden()
+        .rounded(theme::sz(8.))
         .text_size(theme::sz(13.))
         .when(clickable, |d| {
             d.cursor_pointer()
@@ -889,6 +1119,7 @@ fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement
                 .min_w_0()
                 .flex()
                 .flex_col()
+                .gap(theme::sz(1.))
                 .child(
                     div()
                         .overflow_hidden()
@@ -923,105 +1154,175 @@ fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement
                 div()
                     .flex_none()
                     .self_center()
+                    .pr(theme::sz(4.))
                     .child(ui::status_dot(state, false)),
             )
         })
         .into_any_element()
 }
 
-/// The Usage card's body: a meter for each account. A click opens the Usage page.
-pub fn meters(card: &UsageCard, cx: &mut Context<Workspace>) -> AnyElement {
-    if let Some(sentence) = card.empty {
-        return empty(sentence).into_any_element();
+/// A usage ring is this wide, and its line this thick (at 100 %).
+const RING: f32 = 42.;
+const RING_LINE: f32 = 5.;
+
+/// The colour of a ring's fill: the "needs you" orange near the limit, else the accent. An
+/// accent that is itself an orange (the amber accent) would say "near the limit" for each
+/// ring, so the ring is then the soft text colour, as the meters of the status bar are.
+fn ring_color(hot: bool) -> Hsla {
+    let (accent, attention) = (theme::accent(), theme::attention());
+    let apart = (accent.h - attention.h).abs();
+    if hot {
+        attention
+    } else if apart.min(1. - apart) < 0.1 || accent.s < 0.15 {
+        theme::text_soft()
+    } else {
+        accent
     }
-    div()
+}
+
+/// The Usage card's body: a ring for each account, which fills when it first shows, with the
+/// percentage in it and the account, the window and the reset beside it. They scroll in the
+/// card; a click opens the Usage page. `loading`: a usage scan is under way.
+pub fn rings(
+    card: &UsageCard,
+    loading: bool,
+    scroll: &ScrollHandle,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    if let Some(sentence) = card.empty {
+        return if loading {
+            waiting("today-usage-wait", 2, true)
+        } else {
+            empty(icons::GAUGE, sentence)
+        };
+    }
+    let rows = div()
         .id("today-usage-meters")
         .flex()
         .flex_col()
-        .gap(theme::sz(10.))
-        .mx(theme::sz(-6.))
-        .px(theme::sz(6.))
-        .py(theme::sz(4.))
-        .rounded(theme::sz(7.))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::tint()))
-        .on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.today_open(&Open::Usage, window, cx)
-            }),
-        )
-        .children(card.meters.iter().map(|m| {
+        .gap(theme::sz(ROW_GAP))
+        .px(theme::sz(PAD - ROW_PAD))
+        .pb(theme::sz(PAD - ROW_PAD))
+        .children(card.meters.iter().enumerate().map(|(i, m)| {
             div()
+                .id(("today-usage", i))
                 .flex()
-                .flex_col()
-                .gap(theme::sz(4.))
+                .flex_none()
+                .items_center()
+                .gap(theme::sz(12.))
+                .h(theme::sz(ROW_HEIGHT))
+                .px(theme::sz(ROW_PAD))
+                .rounded(theme::sz(8.))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::tint()))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.today_open(&Open::Usage, window, cx)
+                }))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(theme::sz(8.))
-                        .text_size(theme::sz(12.))
-                        .text_color(theme::text_soft())
-                        .child(icons::brand(
-                            icons::agent_brand(m.agent),
-                            14.,
+                        .relative()
+                        .flex_none()
+                        .size(theme::sz(RING))
+                        .child(motion::ring_in(
+                            ("today-usage-ring", i),
+                            m.fraction,
+                            RING,
+                            RING_LINE,
+                            ring_color(m.hot),
                         ))
-                        .child(ui::meter(m.fraction, m.hot))
                         .child(
                             div()
-                                .flex_none()
-                                .w(theme::sz(34.))
-                                .text_right()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(theme::sz(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::text())
                                 .child(m.percent.clone()),
                         ),
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .flex()
-                        .gap(theme::sz(8.))
-                        .text_size(theme::sz(11.5))
-                        .text_color(theme::card_soft_text())
+                        .flex_col()
+                        .gap(theme::sz(2.))
                         .child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(m.label.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(theme::sz(6.))
+                                .text_size(theme::sz(12.5))
+                                .text_color(theme::text())
+                                .child(icons::brand(
+                                    icons::agent_brand(m.agent),
+                                    13.,
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(m.label.clone()),
+                                ),
                         )
-                        .when_some(m.resets.clone(), |d, r| d.child(div().flex_none().child(r))),
+                        .when_some(m.resets.clone(), |d, resets| {
+                            d.child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(theme::sz(12.))
+                                    .text_color(theme::card_soft_text())
+                                    .child(resets),
+                            )
+                        }),
                 )
-        }))
-        .into_any_element()
+        }));
+    scrolling("today-usage", scroll, rows)
 }
 
 /// The heat map: 26 weeks of 7 squares, painted at once (182 elements would each be laid out on
-/// each frame), with its totals and where the history starts.
-pub fn heat_map(heat: &Heat) -> AnyElement {
-    let footer = div()
-        .flex()
-        .flex_wrap()
-        .justify_between()
-        .gap(theme::sz(10.))
-        .text_size(theme::sz(12.))
-        .text_color(theme::card_soft_text())
-        .when(heat.empty.is_none(), |d| d.child(heat.totals.clone()))
-        .child(heat.since.clone());
-    if let Some(sentence) = heat.empty {
-        return div()
-            .flex()
-            .flex_col()
-            .gap(theme::sz(8.))
-            .child(empty(sentence))
-            .when(!heat.since.is_empty(), |d| d.child(footer))
-            .into_any_element();
-    }
+/// each frame), with its totals and where the history starts at the foot of the card.
+/// `loading`: the activity file is being read for the first time.
+pub fn heat_map(heat: &Heat, loading: bool) -> AnyElement {
     // A square, then a gap of a quarter of one.
     const GAP: f32 = 0.25;
-    let levels = heat.levels.clone();
-    let weeks = levels.len().max(1) as f32;
+    let weeks = if loading { WEEKS } else { heat.levels.len().max(1) } as f32;
     let (wide, tall) = (weeks + (weeks - 1.) * GAP, 7. + 6. * GAP);
+    if loading {
+        // The map's own shape, so that the card does not change when the map comes.
+        return padded()
+            .child(motion::skeleton_block(
+                "today-heat-wait",
+                div()
+                    .w_full()
+                    .max_w(theme::sz(640.))
+                    .aspect_ratio(wide / tall),
+            ))
+            .into_any_element();
+    }
+    if let Some(sentence) = heat.empty {
+        return empty(icons::GRID, sentence);
+    }
+    let footer = div()
+        .flex()
+        .flex_none()
+        .flex_wrap()
+        .justify_between()
+        .gap_x(theme::sz(10.))
+        .text_size(theme::sz(12.))
+        .text_color(theme::card_soft_text())
+        .child(heat.totals.clone())
+        .child(heat.since.clone());
+    let levels = heat.levels.clone();
     let empty_cell = theme::tint();
     let mut ink = theme::link();
     let shades: [Hsla; 4] = [0.22, 0.45, 0.7, 1.].map(|alpha| {
@@ -1052,14 +1353,15 @@ pub fn heat_map(heat: &Heat) -> AnyElement {
             }
         },
     )
+    .flex_none()
     .w_full()
     // A card a row wide (two columns, one, 130 %) would make each square large.
     .max_w(theme::sz(640.))
     .aspect_ratio(wide / tall);
-    div()
-        .flex()
-        .flex_col()
-        .gap(theme::sz(8.))
+    // The map at the top and the totals at the foot, whatever the height of the row.
+    padded()
+        .justify_between()
+        .gap(theme::sz(10.))
         .child(squares)
         .child(footer)
         .into_any_element()
@@ -1068,12 +1370,14 @@ pub fn heat_map(heat: &Heat) -> AnyElement {
 /// This month: two numbers, each with its change from the month before.
 pub fn month_stats(month: &Month) -> AnyElement {
     if let Some(sentence) = month.empty {
-        return empty(sentence).into_any_element();
+        return empty(icons::CHART, sentence);
     }
     let stat = |label: &'static str, value: u32, change: Option<String>| {
         div()
             .flex()
             .flex_col()
+            .flex_1()
+            .min_w(theme::sz(150.))
             .gap(theme::sz(1.))
             .child(
                 div()
@@ -1098,20 +1402,25 @@ pub fn month_stats(month: &Month) -> AnyElement {
                 )
             })
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap(theme::sz(12.))
-        .child(stat(
-            "Sessions started",
-            month.sessions,
-            month.sessions_change.clone(),
-        ))
-        .child(stat(
-            "Pull requests merged",
-            month.merged,
-            month.merged_change.clone(),
-        ))
+    // One under the other in a narrow card, side by side in a wide one.
+    padded()
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_x(theme::sz(PAD))
+                .gap_y(theme::sz(12.))
+                .child(stat(
+                    "Sessions started",
+                    month.sessions,
+                    month.sessions_change.clone(),
+                ))
+                .child(stat(
+                    "Pull requests merged",
+                    month.merged,
+                    month.merged_change.clone(),
+                )),
+        )
         .into_any_element()
 }
 
@@ -1151,17 +1460,80 @@ mod tests {
     #[test]
     fn the_cards_fill_their_rows() {
         // Three columns: rows of 5 4 3, 7 5 and 8 4, as in the mock.
-        let three: Vec<u16> = ALL.iter().map(|c| span(*c, 3)).collect();
+        let three: Vec<u16> = ALL.iter().map(|c| span(*c, 3, false)).collect();
         assert_eq!(three, vec![5, 4, 3, 7, 5, 8, 4]);
         for row in [&three[0..3], &three[3..5], &three[5..7]] {
             assert_eq!(row.iter().sum::<u16>(), TRACKS);
         }
-        // Two: the narrow cards (Coming up, Usage, This month) take half a row.
+        // A heat map with nothing to show: Activity is the narrow card, Recent the wide one.
+        let quiet: Vec<u16> = ALL.iter().map(|c| span(*c, 3, true)).collect();
+        assert_eq!(quiet, vec![5, 4, 3, 4, 8, 8, 4]);
+        // Two: Coming up and Usage share a row, and so do Pull requests and This month.
+        for quiet in [false, true] {
+            assert_eq!(
+                ALL.iter().map(|c| span(*c, 2, quiet)).collect::<Vec<_>>(),
+                vec![12, 6, 6, 12, 12, 6, 6]
+            );
+            assert!(ALL.iter().all(|c| span(*c, 1, quiet) == TRACKS));
+        }
+    }
+
+    #[test]
+    fn the_cards_of_a_row_are_as_high_as_each_other() {
+        let full = Some(CARD_HEIGHT);
+        let short = Some(CARD_HEIGHT_EMPTY);
+        let cards = |empty: [bool; 7]| -> Vec<(Card, bool)> { ALL.into_iter().zip(empty).collect() };
+        // Three columns, each card with something to show.
+        assert_eq!(heights(&cards([false; 7]), 3, false), vec![full; 7]);
+        // One card of a row with something: the row is of the full height. A row of sentences
+        // is short.
         assert_eq!(
-            ALL.iter().map(|c| span(*c, 2)).collect::<Vec<_>>(),
-            vec![12, 6, 6, 12, 12, 12, 6]
+            heights(&cards([true, true, false, true, true, true, true]), 3, true),
+            vec![full, full, full, short, short, short, short]
         );
-        assert!(ALL.iter().all(|c| span(*c, 1) == TRACKS));
+        // Two columns: the heat map alone in its row is as high as it is wide asks for; with
+        // nothing to show it is a short card.
+        assert_eq!(
+            heights(&cards([false; 7]), 2, false),
+            vec![full, full, full, None, full, full, full]
+        );
+        assert_eq!(heights(&cards([true; 7]), 2, true), vec![short; 7]);
+        // One column: each card is its own row.
+        assert_eq!(
+            heights(&cards([true, false, false, false, false, false, true]), 1, false),
+            vec![short, full, full, None, full, full, short]
+        );
+    }
+
+    #[test]
+    fn the_wheel_turns_a_card_until_its_end_and_then_the_page() {
+        // Rows that fit: the page has each turn.
+        assert!(!wheel_stays(-40., 0., 0.));
+        assert!(!wheel_stays(40., 0., 0.));
+        // At the top: down stays in the card, up goes to the page.
+        assert!(wheel_stays(-40., 0., 200.));
+        assert!(!wheel_stays(40., 0., 200.));
+        // In the middle both stay.
+        assert!(wheel_stays(-40., 90., 200.));
+        assert!(wheel_stays(40., 90., 200.));
+        // At the end (and past it, before the next frame puts it back): down goes to the page.
+        assert!(!wheel_stays(-40., 200., 200.));
+        assert!(!wheel_stays(-40., 240., 200.));
+        assert!(wheel_stays(40., 240., 200.));
+        // A turn that moves nothing is not the card's.
+        assert!(!wheel_stays(0., 90., 200.));
+    }
+
+    #[test]
+    fn a_long_list_keeps_its_first_rows_and_counts_them_all() {
+        let lines: Vec<Line> = (0..LIST_MOST + 5)
+            .map(|n| Line::new(Mark::None, format!("Row {n}"), "", Open::Nothing))
+            .collect();
+        let list = List::of(lines, RECENT_EMPTY);
+        assert_eq!(list.lines.len(), LIST_MOST);
+        assert_eq!(list.lines[LIST_MOST - 1].title, format!("Row {}", LIST_MOST - 1));
+        assert_eq!(list.count, Some((LIST_MOST + 5).to_string()));
+        assert_eq!(list.empty, None);
     }
 
     fn item(key: &str, title: &str, due: Option<Day>) -> Item {
@@ -1282,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn needs_you_leads_with_the_requests_and_sends_the_rest_to_inbox() {
+    fn needs_you_leads_with_the_requests_and_has_a_row_for_each_need() {
         let need = |n: usize, failing: bool| Need {
             title: format!("Session {n}"),
             what: "Claude is waiting for your answer".into(),
@@ -1299,7 +1671,8 @@ mod tests {
             ],
             2,
         );
-        assert_eq!(list.lines.len(), NEEDS_SHOWN);
+        // Each of them is a row: the card scrolls.
+        assert_eq!(list.lines.len(), 5);
         assert_eq!(
             (
                 list.lines[0].title.as_str(),
@@ -1316,16 +1689,13 @@ mod tests {
             (&list.lines[2].mark, list.lines[2].action),
             (&Mark::Icon(icons::PULL_REQUEST, Tone::Bad), Some("Open"))
         );
-        assert_eq!(
-            (
-                list.more,
-                &list.more_open,
-                list.count.as_deref(),
-                list.empty
-            ),
-            (1, &Open::Inbox, Some("5"), None)
-        );
+        assert_eq!((list.count.as_deref(), list.empty), (Some("5"), None));
         assert_eq!(needs(&[], 1).lines[0].title, "1 request waits for your OK");
+        // What the manager holds for the person has its mark, and opens its part of the panel.
+        let held = Need { title: "A message to Sam Example waits for your OK".into(), what: "The fix is pushed.".into(), agent: None, failing: false, open: Open::Manager(crate::manager_view::Stage::Messages) };
+        let line = &needs(&[held], 0).lines[0];
+        assert_eq!((line.action, &line.mark), (Some("Open"), &Mark::Icon(icons::ASSISTANT, Tone::Attention)));
+        assert_eq!(line.open, Open::Manager(crate::manager_view::Stage::Messages));
     }
 
     #[test]
@@ -1430,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_sessions_are_the_five_newest_that_do_not_wait_for_you() {
+    fn recent_sessions_are_newest_first_without_those_that_wait_for_you() {
         let session = |n: u64, state| Recent {
             id: format!("s{n}"),
             title: format!("Session {n}"),
@@ -1438,10 +1808,20 @@ mod tests {
             agent: AgentKind::Codex,
             state,
             created_at: 1_000_000 + n * 60,
+            line: String::new(),
+            on_server: false,
         };
         let mut sessions: Vec<Recent> = (0..8).map(|n| session(n, RowState::Idle)).collect();
         sessions[7].state = RowState::NeedsYou;
         sessions[6].state = RowState::Working;
+        // What the manager knows of a session stands in place of when it started, and a session
+        // on the server opens there.
+        let mut known = sessions.clone();
+        known[6].line = "Working · Running the tests now".into();
+        known[5].on_server = true;
+        let with_manager = recent(known, 1_000_000 + 7 * 60);
+        assert_eq!(with_manager.lines[0].detail, "app · Working · Running the tests now");
+        assert_eq!(with_manager.lines[1].open, Open::Server("s5".into()));
         let list = recent(sessions, 1_000_000 + 7 * 60);
         let ids: Vec<&Open> = list.lines.iter().map(|l| &l.open).collect();
         assert_eq!(
@@ -1451,14 +1831,16 @@ mod tests {
                 &Open::Session("s5".into()),
                 &Open::Session("s4".into()),
                 &Open::Session("s3".into()),
-                &Open::Session("s2".into())
+                &Open::Session("s2".into()),
+                &Open::Session("s1".into()),
+                &Open::Session("s0".into())
             ]
         );
         assert_eq!(
             (list.lines[0].state, list.lines[0].detail.as_str()),
             (Some(RowState::Working), "app · started 1 min ago")
         );
-        assert_eq!(list.more, 2);
+        assert_eq!(list.count.as_deref(), Some("7"));
         assert_eq!(ago(0, 59), "started just now");
         assert_eq!(ago(0, 3 * 3_600), "started 3 h ago");
         assert_eq!(ago(0, 30 * 3_600), "started yesterday");
@@ -1466,7 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_requests_show_three_with_their_checks_and_say_how_many_more() {
+    fn pull_requests_show_their_checks_and_say_how_many_are_open() {
         let check = |conclusion: &str| CheckRun {
             name: "test".into(),
             status: "COMPLETED".into(),
@@ -1499,10 +1881,10 @@ mod tests {
             pr(4, None),
             pr(5, None),
         ])));
-        assert_eq!(list.lines.len(), 3);
+        assert_eq!(list.lines.len(), 5);
         assert_eq!(
-            (list.more, list.count.as_deref(), list.empty),
-            (2, Some("5 open"), None)
+            (list.count.as_deref(), list.empty),
+            (Some("5 open"), None)
         );
         assert_eq!(
             (list.lines[0].detail.as_str(), &list.lines[0].mark),

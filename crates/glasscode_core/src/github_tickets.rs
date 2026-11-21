@@ -271,6 +271,12 @@ fn synthetic_states() -> Vec<(String, Status)> {
     states
 }
 
+/// The status of each of the board's six columns. They are fixed (a label, or open/closed), so
+/// the board shows them all, also the ones with no issue in them: a card needs a place to drop.
+pub fn columns() -> Vec<Status> {
+    synthetic_states().into_iter().map(|(_, status)| status).collect()
+}
+
 /// The `Status` a board column carries, for the optimistic update when a card is dragged (and
 /// for moving a ticket to In Progress on session start). Unknown names fall back to Todo.
 pub fn column_status(column: &str) -> Status {

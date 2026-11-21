@@ -38,7 +38,23 @@ error in `server_ui.rs`; clippy is not a CI gate there, nor on `ui-redesign`.
    is UI-free and fast to test.
 4. Make sure `cargo test` passes, and run `cargo clippy` (see above for the branches where it
    stops on old errors).
-5. Open a pull request describing what changed and why.
+5. Add a line under "Unreleased" in [`CHANGELOG.md`](CHANGELOG.md) when a person sees the
+   change.
+6. Open a pull request describing what changed and why.
+
+## Licence
+
+Glasscode is licensed under the Apache License 2.0. What you contribute is under that licence
+too (its section 5); you need the right to give it.
+
+- **No new dependency without the owners' agreement.** Its licence must be one of `about.toml`:
+  the release build stops at another one. Nothing under the GPL, the LGPL or the AGPL.
+- **Code from elsewhere** comes with a note of its source, its commit and its licence, as
+  `vendor/README.md` has for GPUI, and a line in `NOTICE`. Do not copy code from the parts of
+  Zed that are under the GPL (its editor, terminal and most of its application): only the
+  Apache-2.0 crates in `vendor/` come from there.
+- **Icons and fonts** need a licence that lets them be distributed, and its text in the
+  repository.
 
 ## Code for one operating system
 

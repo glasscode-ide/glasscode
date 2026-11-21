@@ -132,7 +132,8 @@ impl Workspace {
                 .id(SharedString::from(format!("theme-{choice:?}")))
                 .flex()
                 .flex_col()
-                .w(theme::sz(216.))
+                .flex_1()
+                .min_w(theme::sz(THEME_CARD_MIN))
                 .rounded(theme::sz(12.))
                 .border_2()
                 .border_color(if on { theme::accent() } else { theme::border() })
@@ -144,41 +145,53 @@ impl Workspace {
                     this.set_appearance(|a| a.theme = choice, cx);
                     this.show_toast(format!("{} is on. Everything changed at once.", theme_name(choice)), cx);
                 }))
-                .child(preview(&palette, accent))
+                // The mark of the theme that is on lies on its picture, so that the caption keeps
+                // its width for the name in a narrow card.
+                .child(div().relative().child(preview(&palette, accent)).when(on, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .right(theme::sz(8.))
+                            .bottom(theme::sz(8.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(theme::sz(22.))
+                            .rounded_full()
+                            .bg(theme::accent())
+                            .child(crate::icons::icon(crate::icons::CHECK, theme::sz(13.), theme::sz(13.), theme::on_accent())),
+                    )
+                }))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap_2()
+                        .flex_col()
+                        .gap(theme::sz(2.))
                         .px(theme::sz(12.))
                         .py(theme::sz(10.))
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(theme_name(choice)))
-                                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(note)),
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(theme_name(choice)))
+                                .child(ui::badge(mode, theme::text_soft()).border_color(theme::border())),
                         )
-                        .child(ui::badge(mode, theme::text_soft()).border_color(theme::border()))
-                        .when(on, |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(theme::sz(22.))
-                                    .rounded_full()
-                                    .bg(theme::accent())
-                                    .child(crate::icons::icon(crate::icons::CHECK, theme::sz(13.), theme::sz(13.), theme::on_accent())),
-                            )
-                        }),
+                        .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(note)),
                 )
                 .into_any_element()
         });
-        div().flex().flex_wrap().gap(theme::sz(12.)).children(cards).into_any_element()
+        // The pictures share the width of the row, three or two beside each other, with no ragged
+        // edge. Five of them leave one place open in the last row at either count: an empty
+        // place of the same width keeps the last pictures as wide as the others.
+        div()
+            .flex()
+            .flex_none()
+            .flex_wrap()
+            .gap(theme::sz(12.))
+            .children(cards)
+            .child(div().flex_1().min_w(theme::sz(THEME_CARD_MIN)))
+            .into_any_element()
     }
 
     /// The Accent card's swatches.
@@ -248,6 +261,13 @@ impl Workspace {
     }
 }
 
+/// The least width of a theme's picture at 100 %: four do not fit beside each other in the widest
+/// card of Settings, and two do in the first run's column.
+const THEME_CARD_MIN: f32 = 200.;
+/// The top corners of a theme's picture: the card's 12, less its edge of 2, so that the picture
+/// does not show outside the card's round corners.
+const PREVIEW_CORNER: f32 = 10.;
+
 /// The looks of the backdrop, in the order of the choice.
 const BACKDROPS: [(BackdropChoice, &str); 4] = [(BackdropChoice::Prism, "Prism"), (BackdropChoice::Aurora, "Aurora"), (BackdropChoice::Dusk, "Dusk"), (BackdropChoice::None, "None")];
 
@@ -266,6 +286,7 @@ fn preview(p: &Palette, accent: u32) -> AnyElement {
     div()
         .flex()
         .h(theme::sz(118.))
+        .rounded_t(theme::sz(PREVIEW_CORNER))
         .bg(c(p.bg))
         .child(
             div()
@@ -275,6 +296,7 @@ fn preview(p: &Palette, accent: u32) -> AnyElement {
                 .w(gpui::relative(0.26))
                 .px_2()
                 .py(theme::sz(10.))
+                .rounded_tl(theme::sz(PREVIEW_CORNER))
                 .bg(c(p.panel))
                 .border_r_1()
                 .border_color(c(p.border))
@@ -295,6 +317,7 @@ fn preview(p: &Palette, accent: u32) -> AnyElement {
                         .gap(theme::sz(6.))
                         .h(theme::sz(22.))
                         .px_2()
+                        .rounded_tr(theme::sz(PREVIEW_CORNER))
                         .bg(c(p.chrome))
                         .border_b_1()
                         .border_color(c(p.border))

@@ -41,6 +41,8 @@ mod movein_ui;
 mod scenes_ui;
 mod mirror_ui;
 mod device_door;
+mod motion;
+mod orb;
 mod pair_ui;
 mod palette_ui;
 mod platform;

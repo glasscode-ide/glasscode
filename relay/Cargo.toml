@@ -8,7 +8,7 @@ name = "glasscode-relay"
 version = "0.1.0"
 edition = "2021"
 description = "A small WebSocket switchboard that joins your Glasscode devices (Mac, phone, build server) so they reach each other from anywhere, using a shared secret you set. Carries their bytes without reading them."
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 repository = "https://github.com/glasscode-ide/glasscode"
 
 [[bin]]

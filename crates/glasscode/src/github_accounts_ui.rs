@@ -253,9 +253,10 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
                 div()
                     .w_full()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_2()
-                    .child(div().flex_1().child(email.clone()))
+                    .gap(theme::sz(8.))
+                    .child(div().flex_1().min_w(theme::sz(220.)).child(email.clone()))
                     .child(ui::primary_button(("github-email-save", i), "Save").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let Some(text) = this.settings.form.as_ref().map(|form| form.github_email.read(cx).text()) else { return };
                         this.save_github_email(&l3, text, cx);

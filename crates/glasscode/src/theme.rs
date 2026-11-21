@@ -37,7 +37,10 @@ impl From<Translucent> for Hsla {
     }
 }
 
-/// A terminal's colours, as 0xRRGGBB.
+/// A terminal's colours, as 0xRRGGBB. The foreground and each of the 16 colours that is a colour
+/// of text read at 4.5 or more on `background` (a dark theme's black is its ground, not text);
+/// what a program paints with its own colours is held to the same when it is drawn
+/// (`terminal::colors::text_on`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TermColors {
     pub background: u32,
@@ -200,8 +203,8 @@ pub const GLASS_LIGHT: Palette = Palette {
         cursor: 0x1c1812,
         selection: 0xe6dccd,
         ansi: [
-            0x3d372f, 0xb00a1d, 0x0f6a31, 0x8a5a00, 0x1c65c8, 0x8b3fb5, 0x0e7490, 0x5c554b, 0x746c60, 0xd0312d, 0x1f8a45, 0x9a6b00, 0x2f7ae0, 0xa457cf,
-            0x1590a6, 0x15110c,
+            0x3d372f, 0xb00a1d, 0x0f6a31, 0x8a5a00, 0x1c65c8, 0x8b3fb5, 0x0e7490, 0x5c554b, 0x746c60, 0xd0312d, 0x1a7f3d, 0x9a6b00, 0x2a6fd6, 0x9a4bc6,
+            0x107c92, 0x15110c,
         ],
     },
     syntax: SyntaxColors { comment: 0x6b655a, string: 0x24692b, number: 0x9a3e00, keyword: 0x7a2aa8, type_name: 0x0b6478, key: 0x1c5aa8, heading: 0x9c2f12 },
@@ -269,7 +272,7 @@ pub const GLASS_DARK: Palette = Palette {
         cursor: 0xfafafa,
         selection: 0x3f3f46,
         ansi: [
-            0x27272a, 0xf87171, 0x4ade80, 0xfacc15, 0x60a5fa, 0xc084fc, 0x22d3ee, 0xd4d4d8, 0x71717a, 0xfca5a5, 0x86efac, 0xfde047, 0x93c5fd, 0xd8b4fe,
+            0x27272a, 0xf87171, 0x4ade80, 0xfacc15, 0x60a5fa, 0xc084fc, 0x22d3ee, 0xd4d4d8, 0x80808a, 0xfca5a5, 0x86efac, 0xfde047, 0x93c5fd, 0xd8b4fe,
             0x67e8f9, 0xfafafa,
         ],
     },
@@ -340,7 +343,7 @@ pub const CLASSIC: Palette = Palette {
         cursor: 0xf2b65a,
         selection: 0x2a3550,
         ansi: [
-            0x1b2130, 0xf07c7c, 0x7dd3a0, 0xf2c46d, 0x7fb2ff, 0xc7a6ff, 0x6fd3d8, 0xc9d1de, 0x5c677a, 0xff9c9c, 0x9be7b8, 0xffd98a, 0xa3c8ff, 0xdbc2ff,
+            0x1b2130, 0xf07c7c, 0x7dd3a0, 0xf2c46d, 0x7fb2ff, 0xc7a6ff, 0x6fd3d8, 0xc9d1de, 0x74809a, 0xff9c9c, 0x9be7b8, 0xffd98a, 0xa3c8ff, 0xdbc2ff,
             0x92e6ea, 0xf2f4f8,
         ],
     },
@@ -1081,6 +1084,31 @@ mod tests {
                 }
                 let ratio = contrast(c(colour), c(p.term.selection));
                 assert!(ratio >= 3.0, "{}: {name} on the selection is {ratio:.2}", p.name);
+            }
+        }
+    }
+
+    /// The terminal's own colours read on its ground in each palette: the foreground at 7 or
+    /// more, each of the 16 colours at 4.5 or more. Black in a dark theme is the colour of the
+    /// ground (a program paints backgrounds with it): as text it is lifted when it is drawn,
+    /// which `terminal::colors` tests.
+    #[test]
+    fn terminal_colours_read_on_the_terminal_ground() {
+        const NAMES: [&str; 8] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+        for p in PALETTES {
+            let ground = c(p.term.background);
+            let text = contrast(c(p.term.foreground), ground);
+            assert!(text >= 7.0, "{}: the terminal's text is {text:.2}", p.name);
+            let cursor = contrast(c(p.term.cursor), ground);
+            assert!(cursor >= 4.5, "{}: the cursor is {cursor:.2}", p.name);
+            let selected = contrast(c(p.term.foreground), c(p.term.selection));
+            assert!(selected >= 4.5, "{}: the terminal's text on the selection is {selected:.2}", p.name);
+            for (i, colour) in p.term.ansi.iter().enumerate() {
+                if !p.light && i == 0 {
+                    continue;
+                }
+                let ratio = contrast(c(*colour), ground);
+                assert!(ratio >= 4.5, "{}: {}{} is {ratio:.2}", p.name, if i < 8 { "" } else { "bright " }, NAMES[i % 8]);
             }
         }
     }

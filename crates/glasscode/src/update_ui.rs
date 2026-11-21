@@ -1,11 +1,11 @@
 //! Glasscode keeps itself current: every few hours it looks for a newer signed release,
 //! downloads and checks it in the background, and offers "Restart to update". It installs
 //! when the person restarts or quits, never on its own: a restart would stop the agents
-//! running here.
+//! running here. Settings › Updates turns the looking off; "Check now" looks at once.
 //!
-//! TODO(glasscode): the standalone fork has no release server, so `update::newer` reports
-//! "no update" and the background check never fetches. The local install path (staged app →
-//! restart/quit swap) is kept for when a release is staged by other means.
+//! The releases are those of the GitHub repository (`glasscode_core::update`,
+//! `docs/releasing.md`). The Windows app takes them; for the Mac app `update::newer` has
+//! nothing yet, and `mac_app::stage` is not written.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -21,21 +21,26 @@ use glasscode_core::update::windows_app as app;
 use crate::theme;
 use crate::workspace::Workspace;
 
-const EVERY: Duration = Duration::from_secs(3600);
+const EVERY: Duration = Duration::from_secs(6 * 3600);
 
 pub struct UpdateUi {
     /// Downloaded and checked, waiting for a restart: (build, version, staged app).
     pub ready: Option<(u64, String, PathBuf)>,
     pub error: Option<String>,
     pub(crate) checking: bool,
-    last_check: Instant,
+    /// When Glasscode looks by itself next. A time ahead, never one before now: on Windows an
+    /// `Instant` cannot be before the start of the computer, and taking hours off one panics on
+    /// a computer that started less than those hours ago.
+    next_check: Instant,
+    /// When the last check ended without an error, for Settings.
+    pub checked: Option<Instant>,
 }
 
 impl UpdateUi {
     pub fn new() -> Self {
         // The first check comes half a minute after launch.
         let first = std::env::var("GLASSCODE_UPDATE_FIRST_CHECK").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
-        UpdateUi { ready: None, error: None, checking: false, last_check: Instant::now() - EVERY + Duration::from_secs(first) }
+        UpdateUi { ready: None, error: None, checking: false, next_check: Instant::now() + Duration::from_secs(first), checked: None }
     }
 }
 
@@ -56,12 +61,20 @@ impl Workspace {
             self.save();
             return cx.quit();
         }
+        if self.state.prefs.update_check_off || Instant::now() < self.update.next_check {
+            return;
+        }
+        self.update_check(cx);
+    }
+
+    /// Look for a newer release now, and download it when there is one.
+    fn update_check(&mut self, cx: &mut Context<Self>) {
         let u = &self.update;
-        if BUILD == 0 || u.checking || u.ready.is_some() || u.last_check.elapsed() < EVERY || app::current_install().is_none() {
+        if BUILD == 0 || u.checking || u.ready.is_some() || app::current_install().is_none() {
             return;
         }
         self.update.checking = true;
-        self.update.last_check = Instant::now();
+        self.update.next_check = Instant::now() + EVERY;
         let channel = self.state.prefs.update_channel().to_string();
         let task = cx.background_spawn(async move {
             match update::newer(app::PRODUCT, &channel, BUILD)? {
@@ -76,6 +89,7 @@ impl Workspace {
                 match result {
                     Ok(ready) => {
                         this.update.error = None;
+                        this.update.checked = Some(Instant::now());
                         if let Some((_, version, _)) = &ready {
                             this.show_toast(format!("A Glasscode update ({version}) is ready: restart to use it, or it installs when you quit"), cx);
                         }
@@ -90,7 +104,7 @@ impl Workspace {
                         log::warn!("update check: {error:#}");
                         this.update.error = Some(format!("{error:#}"));
                         // Try again in an hour rather than six.
-                        this.update.last_check = Instant::now() - EVERY + Duration::from_secs(3600);
+                        this.update.next_check = Instant::now() + Duration::from_secs(3600);
                     }
                 }
                 cx.notify();
@@ -107,11 +121,12 @@ impl Workspace {
             return;
         }
         // Taken, so quitting next does not install it a second time.
-        let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
+        let (Some((_, version, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
         // Tests install and quit only: a relaunch would start without their environment.
         let relaunch = std::env::var_os("GLASSCODE_TEST_UPDATE_RESTART").is_none();
         match app::install(&staged, &install).and_then(|_| if relaunch { app::relaunch_after_exit(&install) } else { Ok(()) }) {
             Ok(()) => {
+                note_installed(&version);
                 self.save();
                 cx.quit();
             }
@@ -126,8 +141,7 @@ impl Workspace {
             self.show_toast("This is a development build: it does not update itself.", cx);
             return;
         }
-        self.update.last_check = Instant::now() - EVERY - Duration::from_secs(1);
-        self.update_tick(cx);
+        self.update_check(cx);
         cx.notify();
     }
 
@@ -136,12 +150,22 @@ impl Workspace {
         if self.state.prefs.install_on_quit_off {
             return;
         }
-        if let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install())
-            && let Err(error) = app::install(&staged, &install)
-        {
-            log::warn!("update on quit: {error:#}");
+        if let (Some((_, version, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) {
+            match app::install(&staged, &install) {
+                Ok(()) => note_installed(&version),
+                Err(error) => log::warn!("update on quit: {error:#}"),
+            }
         }
     }
+}
+
+/// Windows: "Installed apps" shows the version that is installed now.
+#[cfg(any(target_os = "macos", windows))]
+fn note_installed(version: &str) {
+    #[cfg(windows)]
+    app::note_installed(version);
+    #[cfg(not(windows))]
+    let _ = version;
 }
 
 /// Only the Mac and Windows apps can stage and install an update so far, so elsewhere there is

@@ -1,10 +1,13 @@
 //! Settings: one page on the backdrop (the Settings row of the left sidebar, and its key), in
-//! twelve sections. Each setting is a card on glass: its title, one sentence, its control, and a
-//! footer line where it helps; a list (accounts, projects, shortcuts) is rows in its card. A
-//! change saves at once. The search finds the cards of every section by title and sentence.
+//! twelve sections. A section is a few groups: one glass card with a small title, and in it a row
+//! for each setting (its title, one sentence, its control at the right edge, and a note where it
+//! helps), with a hairline between the rows. A list (accounts, projects, shortcuts) is a card of
+//! its own with the same rows. A change saves at once. The search finds the settings of every
+//! section by title and sentence, and shows each one found in its group.
 //!
-//! Every card is in one table (`cards!` below): a section draws its cards from it, the search
-//! reads it, and the tests check that each saved setting has a card.
+//! Every setting is in one table (`cards!` below, where a setting is still called a card): a
+//! section draws its groups from it, the search reads it, and the tests check that each saved
+//! setting has a card.
 
 use std::path::{Path, PathBuf};
 
@@ -189,14 +192,18 @@ impl Section {
 pub(crate) struct CardInfo {
     pub card: CardId,
     pub section: Section,
+    /// The title of its group: the cards of a section that follow each other with the same title
+    /// are the rows of one glass card. Empty: no title over them.
+    pub group: &'static str,
     pub title: &'static str,
     pub sentence: &'static str,
 }
 
 /// Makes the card ids and the table of cards from one list, so that no card can be drawn and
-/// not found, or found and not drawn (`settings_card` matches each id).
+/// not found, or found and not drawn (`settings_piece` matches each id). A line is
+/// `Card in Section, "Group title": "title", "sentence";`.
 macro_rules! cards {
-    ($($card:ident in $section:ident: $title:expr, $sentence:expr;)*) => {
+    ($($card:ident in $section:ident, $group:literal: $title:expr, $sentence:expr;)*) => {
         /// A card of the page.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub(crate) enum CardId {
@@ -205,98 +212,99 @@ macro_rules! cards {
 
         /// Every card, in the order of the page.
         pub(crate) fn catalog() -> Vec<CardInfo> {
-            vec![$(CardInfo { card: CardId::$card, section: Section::$section, title: $title, sentence: $sentence }),*]
+            vec![$(CardInfo { card: CardId::$card, section: Section::$section, group: $group, title: $title, sentence: $sentence }),*]
         }
     };
 }
 
 cards! {
-    Startup in General: "When Glasscode opens", "Sessions come back as you left them: the same projects, worktrees, tabs, accounts and conversations.";
-    NotifyNeeds in General: "A session needs you", "Notify me when a session asks a question, wants a permission or has a plan to approve.";
-    NotifyFinished in General: "A session finishes its turn", "Notify me when an agent is done and waits for you.";
-    NotifyCi in General: "CI fails on one of my pull requests", "Notify me, also when Glasscode gives up asking the agent to fix it, and for merge conflicts.";
-    NotifyTickets in General: "A ticket or a review asks for me", "Notify me when a ticket is assigned to me or a review asks for me, from Linear and GitHub.";
-    NotifySound in General: "Play a sound", "With each notice that Glasscode shows.";
-    QuietHours in General: "Quiet hours", "Only urgent notices come through then; the rest wait, and come as one notice when the quiet hours end.";
-    AutoNames in General: "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
-    ConfirmClose in General: "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
-    Editor in General: "Open files in", "The editor that the editor button and file links use.";
+    Startup in General, "Startup": "When Glasscode opens", "Sessions come back as you left them: the same projects, worktrees, tabs, accounts and conversations.";
+    NotifyNeeds in General, "Notifications": "A session needs you", "Notify me when a session asks a question, wants a permission or has a plan to approve.";
+    NotifyFinished in General, "Notifications": "A session finishes its turn", "Notify me when an agent is done and waits for you.";
+    NotifyCi in General, "Notifications": "CI fails on one of my pull requests", "Notify me, also when Glasscode gives up asking the agent to fix it, and for merge conflicts.";
+    NotifyTickets in General, "Notifications": "A ticket or a review asks for me", "Notify me when a ticket is assigned to me or a review asks for me, from Linear and GitHub.";
+    NotifySound in General, "Notifications": "Play a sound", "With each notice that Glasscode shows.";
+    QuietHours in General, "Notifications": "Quiet hours", "Only urgent notices come through then; the rest wait, and come as one notice when the quiet hours end.";
+    AutoNames in General, "Sessions": "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
+    ConfirmClose in General, "Sessions": "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
+    Editor in General, "Sessions": "Open files in", "The editor that the editor button and file links use.";
 
     // The manager's own section draws its groups itself (`manager_settings.rs`).
-    Manager in Manager: "The manager", "Switch it on, its name and brain, the projects it manages, where it runs, messages, teammates, voice and the daily brief.";
+    Manager in Manager, "": "The manager", "Switch it on, its name and brain, the projects it manages, where it runs, messages, teammates, voice and the daily brief.";
 
-    Theme in Appearance: "Theme", "Glasscode Light and Dark, Glasscode classic and High contrast. Auto follows the system.";
-    Accent in Appearance: "Accent", "Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.";
-    Backdrop in Appearance: "Backdrop", "The moving light behind Today, Settings and sessions. None is a plain background.";
-    Finish in Appearance: "Backdrop finish", "Smooth, or Dither: fine dots, as in print. The voice orb follows it.";
-    BackdropInSessions in Appearance: "Backdrop behind sessions", "Off: sessions keep a plain background, and the backdrop moves only behind Today, Settings and the first run.";
-    Scale in Appearance: "Scale", "The size of the whole interface: text, icons, gaps and panels.";
-    TextSize in Appearance: "Text size", "The terminals, and the base size of the interface, on top of the scale.";
-    Density in Appearance: "Density", "Rows in the sidebar.";
-    UiFont in Appearance: "Interface font", "Menus, the sidebar, settings.";
-    CodeFont in Appearance: "Code font", "Terminals, branches and paths.";
-    ChatFont in Appearance: "Conversation font", "What Claude and Codex write in the Chat view.";
-    SessionView in Appearance: "Sessions open as", "Chat reads like the Claude app; Terminal is the CLI itself. Each session has the switch too.";
-    Cursor in Appearance: "Cursor", "In every terminal, where the program does not choose its own.";
+    Theme in Appearance, "Theme and accent": "Theme", "Glasscode Light and Dark, Glasscode classic and High contrast. Auto follows the system.";
+    Accent in Appearance, "Theme and accent": "Accent", "Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.";
+    Backdrop in Appearance, "Backdrop": "Backdrop", "The moving light behind Today, Settings and sessions. None is a plain background.";
+    Finish in Appearance, "Backdrop": "Backdrop finish", "Smooth, or Dither: fine dots, as in print. The voice orb follows it.";
+    BackdropInSessions in Appearance, "Backdrop": "Backdrop behind sessions", "Off: sessions keep a plain background, and the backdrop moves only behind Today, Settings and the first run.";
+    Scale in Appearance, "Size and density": "Scale", "The size of the whole interface: text, icons, gaps and panels.";
+    TextSize in Appearance, "Size and density": "Text size", "The terminals, and the base size of the interface, on top of the scale.";
+    Density in Appearance, "Size and density": "Density", "Rows in the sidebar.";
+    UiFont in Appearance, "Fonts": "Interface font", "Menus, the sidebar, settings.";
+    CodeFont in Appearance, "Fonts": "Code font", "Terminals, branches and paths.";
+    ChatFont in Appearance, "Fonts": "Conversation font", "What Claude and Codex write in the Chat view.";
+    SessionView in Appearance, "Sessions and terminal": "Sessions open as", "Chat reads like the Claude app; Terminal is the CLI itself. Each session has the switch too.";
+    Cursor in Appearance, "Sessions and terminal": "Cursor", "In every terminal, where the program does not choose its own.";
 
-    AgentAccounts in Accounts: "Claude and Codex accounts", "Each session runs on one account; new sessions use the default. Sign in, add an account, make one the default or remove one.";
-    GithubAccounts in Accounts: "GitHub accounts", "The accounts gh is signed in to, the default for every repository, and the email each one commits with.";
+    AgentAccounts in Accounts, "": "Claude and Codex accounts", "Each session runs on one account; new sessions use the default. Sign in, add an account, make one the default or remove one.";
+    GithubAccounts in Accounts, "": "GitHub accounts", "The accounts gh is signed in to, the default for every repository, and the email each one commits with.";
 
-    RuleRead in Permissions: Kind::Read.label(), suggested(Kind::Read);
-    RuleBoard in Permissions: Kind::Board.label(), suggested(Kind::Board);
-    RuleStart in Permissions: Kind::Start.label(), suggested(Kind::Start);
-    RuleRename in Permissions: Kind::Rename.label(), suggested(Kind::Rename);
-    RuleSend in Permissions: Kind::Send.label(), suggested(Kind::Send);
-    RuleImport in Permissions: Kind::Import.label(), suggested(Kind::Import);
-    RuleClose in Permissions: Kind::Close.label(), suggested(Kind::Close);
-    RuleRemove in Permissions: Kind::Remove.label(), suggested(Kind::Remove);
-    RuleMove in Permissions: Kind::Move.label(), suggested(Kind::Move);
-    RuleTickets in Permissions: Kind::Tickets.label(), suggested(Kind::Tickets);
-    RuleGithub in Permissions: Kind::Github.label(), suggested(Kind::Github);
-    RuleShow in Permissions: Kind::Show.label(), suggested(Kind::Show);
-    RuleSettings in Permissions: Kind::Settings.label(), suggested(Kind::Settings);
-    AgentsSkill in Permissions: "Tell new sessions about the glasscode command", "Claude gets a skill, Codex a few lines of instructions. Off: agents only find it if someone tells them.";
-    AgentsOutside in Permissions: "Programs Glasscode did not start follow these rules too", "Off: they can only read; anything else waits for your Allow. You at a terminal can always do everything.";
-    ControlStatus in Permissions: "The glasscode command", "Claude and Codex control Glasscode with it; glasscode help lists the commands.";
+    RuleRead in Permissions, "What agents may do": Kind::Read.label(), suggested(Kind::Read);
+    RuleBoard in Permissions, "What agents may do": Kind::Board.label(), suggested(Kind::Board);
+    RuleStart in Permissions, "What agents may do": Kind::Start.label(), suggested(Kind::Start);
+    RuleRename in Permissions, "What agents may do": Kind::Rename.label(), suggested(Kind::Rename);
+    RuleSend in Permissions, "What agents may do": Kind::Send.label(), suggested(Kind::Send);
+    RuleImport in Permissions, "What agents may do": Kind::Import.label(), suggested(Kind::Import);
+    RuleClose in Permissions, "What agents may do": Kind::Close.label(), suggested(Kind::Close);
+    RuleRemove in Permissions, "What agents may do": Kind::Remove.label(), suggested(Kind::Remove);
+    RuleMove in Permissions, "What agents may do": Kind::Move.label(), suggested(Kind::Move);
+    RuleTickets in Permissions, "What agents may do": Kind::Tickets.label(), suggested(Kind::Tickets);
+    RuleGithub in Permissions, "What agents may do": Kind::Github.label(), suggested(Kind::Github);
+    RuleShow in Permissions, "What agents may do": Kind::Show.label(), suggested(Kind::Show);
+    RuleSettings in Permissions, "What agents may do": Kind::Settings.label(), suggested(Kind::Settings);
+    AgentsSkill in Permissions, "The glasscode command": "Tell new sessions about the glasscode command", "Claude gets a skill, Codex a few lines of instructions. Off: agents only find it if someone tells them.";
+    AgentsOutside in Permissions, "The glasscode command": "Programs Glasscode did not start follow these rules too", "Off: they can only read; anything else waits for your Allow. You at a terminal can always do everything.";
+    ControlStatus in Permissions, "The glasscode command": "The glasscode command", "Claude and Codex control Glasscode with it; glasscode help lists the commands.";
 
-    Projects in Projects: "Projects", "Show a project in Glasscode or hide it, its repository and GitHub account, where its worktrees go, and cleaning them up.";
-    FreshMain in Projects: "Start new work from the latest main", "Fetched first, never from a stale folder.";
-    DeleteBranch in Projects: "Also delete the local branch when removing a worktree", "Only when every commit of it is on the remote or another branch; you can change it each time.";
+    Projects in Projects, "": "Projects", "Show a project in Glasscode or hide it, its repository and GitHub account, where its worktrees go, and cleaning them up.";
+    FreshMain in Projects, "New work and worktrees": "Start new work from the latest main", "Fetched first, never from a stale folder.";
+    DeleteBranch in Projects, "New work and worktrees": "Also delete the local branch when removing a worktree", "Only when every commit of it is on the remote or another branch; you can change it each time.";
     // A project's own file (`.glasscode/settings.json`): the scope "Project" of this section.
-    ProjectSetup in Projects: "Setup script", "Runs in each new worktree before the agent starts, once you allow it on this computer. Set in the project's file.";
-    ProjectBranch in Projects: "Branch names", "How a new branch is named, from {type}, {issue}, {slug}, {repo} and {branch}. Set in the project's file.";
-    ProjectFolder in Projects: "Worktree folder", "Where a new worktree goes, always below Glasscode's worktree folder. Set in the project's file.";
-    ProjectAgent in Projects: "Default agent", "The agent of a new session when none is chosen: Claude, Codex or Shell. Set in the project's file.";
+    ProjectSetup in Projects, "": "Setup script", "Runs in each new worktree before the agent starts, once you allow it on this computer. Set in the project's file.";
+    ProjectBranch in Projects, "": "Branch names", "How a new branch is named, from {type}, {issue}, {slug}, {repo} and {branch}. Set in the project's file.";
+    ProjectFolder in Projects, "": "Worktree folder", "Where a new worktree goes, always below Glasscode's worktree folder. Set in the project's file.";
+    ProjectAgent in Projects, "": "Default agent", "The agent of a new session when none is chosen: Claude, Codex or Shell. Set in the project's file.";
 
-    Linear in Integrations: "Linear", "Your tickets on Today and the Board: the API key, who you are, your reviewer label, and who drives sessions started from a ticket.";
+    Linear in Integrations, "": "Linear", "Your tickets on Today and the Board: the API key, who you are, your reviewer label, and who drives sessions started from a ticket.";
 
-    FixCi in Automation: "Ask the session's agent to fix failing CI", "Once per commit, when its turn is over and nobody is typing. Never for review sessions.";
-    FixConflicts in Automation: "Ask the session's agent to resolve merge conflicts", "When GitHub says the pull request conflicts with its base: once per new commit on either side. Conflicts come before CI.";
-    FixTries in Automation: "Asks before it is over to you", "How many times in a row Glasscode asks the agent to fix CI or conflicts, until it passes or merges; then it tells you.";
-    CiWait in Automation: "Wait for the other checks", "Once one check fails, so that the agent hears of every failure at once.";
-    AutoReview in Automation: "Auto-review pull requests", "Runs your agent on the diff of a pull request that asks for your review and posts an overview comment, never an approval. Each repository opts in.";
-    MoveTicket in Automation: "Move a ticket to In Progress when its session starts", "Linear: only from Triage, Backlog or Todo; you can turn it off each time.";
-    AgentsLog in Automation: "Show what agents did on Today", "One line for each action, with the session that did it. glasscode log lists them all.";
-    Morning in Automation: "Open Today the first time each morning", "When Glasscode is in front before noon and you have not looked at Today yet.";
+    FixCi in Automation, "Pull requests": "Ask the session's agent to fix failing CI", "Once per commit, when its turn is over and nobody is typing. Never for review sessions.";
+    FixConflicts in Automation, "Pull requests": "Ask the session's agent to resolve merge conflicts", "When GitHub says the pull request conflicts with its base: once per new commit on either side. Conflicts come before CI.";
+    FixTries in Automation, "Pull requests": "Asks before it is over to you", "How many times in a row Glasscode asks the agent to fix CI or conflicts, until it passes or merges; then it tells you.";
+    CiWait in Automation, "Pull requests": "Wait for the other checks", "Once one check fails, so that the agent hears of every failure at once.";
+    AutoReview in Automation, "": "Auto-review pull requests", "Runs your agent on the diff of a pull request that asks for your review and posts an overview comment, never an approval. Each repository opts in.";
+    MoveTicket in Automation, "Tickets and Today": "Move a ticket to In Progress when its session starts", "Linear: only from Triage, Backlog or Todo; you can turn it off each time.";
+    AgentsLog in Automation, "Tickets and Today": "Show what agents did on Today", "One line for each action, with the session that did it. glasscode log lists them all.";
+    Morning in Automation, "Tickets and Today": "Open Today the first time each morning", "When Glasscode is in front before noon and you have not looked at Today yet.";
 
-    BrowserState in Browser: "Glasscode Browser", "A browser window of its own that the agents use. Your own browser is not touched.";
-    BrowserAgents in Browser: "Agents may use the browser", "New Claude and Codex sessions can use it, each in its own background tab, without asking.";
-    BrowserReset in Browser: "Start over", "Quits the Glasscode Browser and forgets everything it knows: sign-ins, history, extensions.";
+    BrowserState in Browser, "": "Glasscode Browser", "A browser window of its own that the agents use. Your own browser is not touched.";
+    BrowserAgents in Browser, "": "Agents may use the browser", "New Claude and Codex sessions can use it, each in its own background tab, without asking.";
+    BrowserReset in Browser, "": "Start over", "Quits the Glasscode Browser and forgets everything it knows: sign-ins, history, extensions.";
 
-    Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
-    Phones in Server: "Glasses", "The Glasscode app on your iPhone, with your Ray-Ban Display: it talks to the manager on this Mac, and on your server while the Mac sleeps, over Tailscale.";
-    Voice in Server: "Reach from the glasses", "Your glasses reach this computer's device door over Tailscale, with the key you paired in Glasses above. Nothing else on your network can.";
+    Server in Server, "": "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
+    Phones in Server, "": "Glasses", "The Glasscode app on your iPhone, with your Ray-Ban Display: it talks to the manager on this Mac, and on your server while the Mac sleeps, over Tailscale.";
+    Voice in Server, "": "Reach from the glasses", "Your glasses reach this computer's device door over Tailscale, with the key you paired in Glasses above. Nothing else on your network can.";
 
-    UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
-    Channel in Updates: "Channel", "Beta gets new builds first.";
-    InstallOnQuit in Updates: "Install updates when Glasscode quits", "Or at once with Restart to update.";
-    CliVersions in Updates: "CLI versions", "Claude Code and Codex are built in; keep them current here, and add any other CLI you use. New and reopened sessions pick up a change; running ones keep theirs.";
+    UpdateStatus in Updates, "": "Glasscode updates", "A release comes from Glasscode's GitHub releases and is installed only with the signature of the release key.";
+    AutoCheck in Updates, "Checking and installing": "Look for updates by itself", "Every few hours Glasscode asks GitHub for a newer release and downloads it. Off: only Check now does.";
+    Channel in Updates, "Checking and installing": "Channel", "Beta gets new builds first.";
+    InstallOnQuit in Updates, "Checking and installing": "Install updates when Glasscode quits", "Or at once with Restart to update.";
+    CliVersions in Updates, "": "CLI versions", "Claude Code and Codex are built in; keep them current here, and add any other CLI you use. New and reopened sessions pick up a change; running ones keep theirs.";
 
-    Shortcuts in Shortcuts: "Shortcuts", "Search, sessions, panels and the terminal.";
+    Shortcuts in Shortcuts, "": "Shortcuts", "Search, sessions, panels and the terminal.";
 
-    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; journal/ what agents did with the glasscode command, and what happened. Glasscode writes its other messages to the console that started it.";
-    UnsavedCopies in Advanced: "Unsaved copies", "When Glasscode quit and could not ask, the editor kept a copy of each file with unsaved changes here. Glasscode never removes them.";
-    FirstRun in Advanced: "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
+    GlasscodeFolder in Advanced, "": "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; journal/ what agents did with the glasscode command, and what happened. Glasscode writes its other messages to the console that started it.";
+    UnsavedCopies in Advanced, "": "Unsaved copies", "When Glasscode quit and could not ask, the editor kept a copy of each file with unsaved changes here. Glasscode never removes them.";
+    FirstRun in Advanced, "": "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
 }
 
 impl CardId {
@@ -440,11 +448,14 @@ pub struct SettingsUi {
     /// How many copies of unsaved text `~/.glasscode/unsaved` holds, counted in the background
     /// each time Settings opens (none: not counted yet).
     unsaved_copies: Option<usize>,
+    /// The CLIs whose row shows its technical lines (Updates › CLI versions, "Details").
+    pub(crate) cli_details: std::collections::BTreeSet<String>,
 }
 
-/// A card of the page: what it is (title, sentence) and its control in the head, then a body
-/// (content that draws itself), its rows, and a footer line. It lies on strong glass, so its
-/// words are `text` and `card_soft_text`; controls keep their own opaque ground.
+/// A setting as the page draws it: what it is (title, sentence) and its control in the head, then
+/// a body (content that draws itself), its rows, and a footer line. In a group it is one row
+/// (`into_row`); with rows of its own, or alone, it is a card (`render`). Both lie on strong
+/// glass, so the words are `text` and `card_soft_text`; controls keep their own opaque ground.
 pub(crate) struct Frame {
     title: AnyElement,
     sentence: SharedString,
@@ -476,6 +487,138 @@ pub(crate) fn card_with(title: impl IntoElement, sentence: impl Into<SharedStrin
     }
 }
 
+/// What an entry of the table draws (`Workspace::settings_piece`).
+enum Piece {
+    /// A row of its group.
+    Row(Frame),
+    /// Cards of its own, already drawn: none, one or several.
+    Cards(Vec<AnyElement>),
+}
+
+/// The sizes of a row at 100 %: every row of the page has them, in a group or in a list.
+const ROW_PAD_X: f32 = 16.;
+const ROW_PAD_Y: f32 = 14.;
+const ROW_MIN_HEIGHT: f32 = 56.;
+/// The gap between two groups of a section.
+const GROUP_GAP: f32 = 14.;
+/// The least width of a row's words: a control that would leave them less goes under them.
+const ROW_WORDS_MIN: f32 = 240.;
+/// The most beside a control, so that a sentence is not read across the whole card.
+const ROW_WORDS_MAX: f32 = 480.;
+
+/// The one layout of a row: the title and its sentence at the left, the control at the right
+/// edge, centred on the height of the words. A control too wide to stand beside
+/// [`ROW_WORDS_MIN`] of words goes to a line of its own under them, at the left edge, and may
+/// wrap there (the four code fonts in the smallest window).
+fn line(title: AnyElement, sentence: SharedString, control: Option<AnyElement>) -> Div {
+    let beside = control.is_some();
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_x(theme::sz(16.))
+        .gap_y(theme::sz(10.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(theme::sz(ROW_WORDS_MIN))
+                .when(beside, |d| d.max_w(theme::sz(ROW_WORDS_MAX)))
+                .gap(theme::sz(3.))
+                .child(div().text_size(theme::sz(13.)).child(title))
+                .when(!sentence.is_empty(), |d| d.child(soft_words(sentence))),
+        )
+        .when_some(control, |d, control| {
+            d.child(div().flex().max_w_full().child(control))
+        })
+}
+
+/// The second line of a row, and a note under it.
+fn soft_words(text: SharedString) -> Div {
+    div()
+        .text_size(theme::sz(12.))
+        .text_color(theme::card_soft_text())
+        .child(text)
+}
+
+fn padded(row: Div) -> Div {
+    row.flex_none()
+        .min_h(theme::sz(ROW_MIN_HEIGHT))
+        .px(theme::sz(ROW_PAD_X))
+        .py(theme::sz(ROW_PAD_Y))
+}
+
+/// A row that is all content (a table, a list that draws itself), with the paddings of a row.
+pub(crate) fn wide_row(content: impl IntoElement) -> Div {
+    padded(div().flex().flex_col().min_w_0()).child(content)
+}
+
+/// The hairline between two rows of a card. It stops short of the card's edges.
+fn hairline() -> Div {
+    div()
+        .flex_none()
+        .mx(theme::sz(ROW_PAD_X))
+        .h(px(1.))
+        .bg(theme::border())
+}
+
+/// Rows with a hairline between them (`lead`: also over the first).
+fn divided(rows: Vec<Div>, lead: bool) -> Vec<Div> {
+    let mut out = Vec::with_capacity(rows.len() * 2);
+    for (i, row) in rows.into_iter().enumerate() {
+        if lead || i > 0 {
+            out.push(hairline());
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// The glass that a group or a card lies on.
+fn surface() -> Div {
+    backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .when(theme::is_light(), |d| d.shadow_md())
+}
+
+/// A group: one card with its title in small capitals and a row for each of its settings.
+fn group_card(title: &str, rows: Vec<Div>) -> AnyElement {
+    titled_group(title, "", rows)
+}
+
+/// A group whose title has a sentence under it (what the whole group is about): the Manager's
+/// groups draw themselves with it, so they read as the groups of every other section.
+pub(crate) fn titled_group(title: &str, note: &str, rows: Vec<Div>) -> AnyElement {
+    surface()
+        .when(!title.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::sz(4.))
+                    .px(theme::sz(ROW_PAD_X))
+                    .pt(theme::sz(ROW_PAD_Y))
+                    .mb(-theme::sz(4.))
+                    .child(
+                        div()
+                            .text_size(theme::sz(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::card_soft_text())
+                            .child(title.to_uppercase()),
+                    )
+                    .when(!note.is_empty(), |d| {
+                        d.child(soft_words(note.to_string().into()).max_w(theme::sz(ROW_WORDS_MAX + 80.)))
+                    }),
+            )
+        })
+        .children(divided(rows, false))
+        .into_any_element()
+}
+
 impl Frame {
     pub(crate) fn control(mut self, control: impl IntoElement) -> Self {
         self.control = Some(control.into_any_element());
@@ -497,62 +640,39 @@ impl Frame {
         self
     }
 
+    /// The setting as a row of its group: the head, then its body and its footer as a note, each
+    /// on the whole width of the row.
+    pub(crate) fn into_row(self) -> Div {
+        padded(div().flex().flex_col().justify_center().gap(theme::sz(8.)))
+            .child(line(self.title, self.sentence, self.control))
+            .when_some(self.body, |d, body| d.child(body))
+            .when_some(self.footer, |d, footer| d.child(soft_words(footer)))
+    }
+
+    /// The setting as a card of its own: the head, its body, its rows, and the footer as a strip
+    /// at the end.
     pub(crate) fn render(self) -> AnyElement {
         let radius = theme::sz(ui::CARD_RADIUS);
-        let head = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(theme::sz(12.))
-            .px(theme::sz(16.))
-            .py(theme::sz(14.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(theme::sz(200.))
-                    .gap(theme::sz(3.))
-                    .child(self.title)
-                    .when(!self.sentence.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_size(theme::sz(12.5))
-                                .text_color(theme::card_soft_text())
-                                .child(self.sentence),
-                        )
-                    }),
-            )
-            // A wide control (the four fonts) wraps its segments in a narrow card.
-            .when_some(self.control, |d, control| {
-                d.child(div().flex().max_w_full().child(control))
-            });
-        backdrop::glass_strong(radius)
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .when(theme::is_light(), |d| d.shadow_md())
-            .child(head)
+        surface()
+            .child(padded(line(self.title, self.sentence, self.control)))
             .when_some(self.body, |d, body| {
-                d.child(div().px(theme::sz(16.)).pb(theme::sz(16.)).child(body))
-            })
-            .children(
-                self.rows
-                    .into_iter()
-                    .map(|row| row.border_t_1().border_color(theme::glass_border())),
-            )
-            .when_some(self.footer, |d, footer| {
                 d.child(
                     div()
-                        .px(theme::sz(16.))
-                        .py(theme::sz(9.))
+                        .px(theme::sz(ROW_PAD_X))
+                        .pb(theme::sz(ROW_PAD_X))
+                        .child(body),
+                )
+            })
+            .children(divided(self.rows, true))
+            .when_some(self.footer, |d, footer| {
+                d.child(
+                    soft_words(footer)
+                        .px(theme::sz(ROW_PAD_X))
+                        .py(theme::sz(10.))
                         .border_t_1()
                         .border_color(theme::glass_border())
                         .rounded_b(radius)
-                        .bg(theme::tint())
-                        .text_size(theme::sz(12.5))
-                        .text_color(theme::card_soft_text())
-                        .child(footer),
+                        .bg(theme::tint()),
                 )
             })
             .into_any_element()
@@ -587,33 +707,71 @@ pub(crate) fn row_with(
     detail: impl Into<SharedString>,
     control: Option<AnyElement>,
 ) -> Div {
-    let detail: SharedString = detail.into();
+    padded(line(title.into_any_element(), detail.into(), control))
+}
+
+/// The width of a text field that stands beside a row's words, at 100 %: one for all of
+/// Settings, so the fields of a card end on one edge.
+pub(crate) const FIELD_WIDTH: f32 = 260.;
+
+/// A text field as a row's control, [`FIELD_WIDTH`] wide (and no wider than its row).
+pub(crate) fn field(input: &Entity<TextInput>) -> Div {
+    field_of(input, FIELD_WIDTH)
+}
+
+/// A text field of another width: a short one for a time of day, narrow ones that stand in a
+/// line of several.
+pub(crate) fn field_of(input: &Entity<TextInput>, width: f32) -> Div {
+    div().w(theme::sz(width)).max_w_full().child(input.clone())
+}
+
+/// The quiet box under a row's words: what a row lists or explains, and the field it opens.
+pub(crate) fn inset() -> Div {
     div()
         .flex()
-        .items_center()
-        .flex_wrap()
-        .gap(theme::sz(12.))
-        .min_h(theme::sz(52.))
-        .px(theme::sz(16.))
+        .flex_col()
+        .min_w_0()
+        .gap(theme::sz(8.))
+        .px(theme::sz(12.))
         .py(theme::sz(10.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(theme::sz(200.))
-                .gap(theme::sz(2.))
-                .child(title)
-                .when(!detail.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_size(theme::sz(12.5))
-                            .text_color(theme::card_soft_text())
-                            .child(detail),
-                    )
-                }),
-        )
-        .when_some(control, |d, c| d.child(c))
+        .rounded(theme::sz(8.))
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::tint())
+}
+
+/// The small button that opens and closes more of a row ("Details", "What Careful allows"):
+/// its words and a chevron that points down while it is open.
+pub(crate) fn disclosure(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    open: bool,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(theme::sz(4.))
+        .h(theme::sz(26.))
+        .pl(theme::sz(6.))
+        .pr(theme::sz(9.))
+        .rounded(theme::sz(7.))
+        .border_1()
+        .border_color(theme::border())
+        .text_size(theme::sz(12.))
+        .text_color(if open { theme::text() } else { theme::text_soft() })
+        .when(open, |d| d.bg(theme::selected()))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+        .child(icons::icon(
+            if open { icons::CHEVRON_DOWN } else { icons::CHEVRON },
+            theme::sz(12.),
+            theme::sz(12.),
+            theme::text_soft(),
+        ))
+        .child(label.into())
 }
 
 fn mono(text: impl Into<SharedString>) -> AnyElement {
@@ -737,6 +895,10 @@ impl Workspace {
         }
         if section == Section::Browser {
             self.browser_refresh(cx);
+        }
+        // What each account's CLI says of its login: asked here, in the background, never while drawing.
+        if section == Section::Accounts {
+            self.accounts_ask_logins(cx);
         }
         // Whether the manager's voice key is kept: asked once here, never while drawing.
         if section == Section::Manager {
@@ -863,10 +1025,8 @@ impl Workspace {
         let query = self.settings.query.trim().to_string();
         let narrow = narrow(self.window_width, theme::scale());
 
+        let chips = narrow.then(|| self.settings_menu_chips(current, query.is_empty(), search.clone(), cx));
         let mut column: Vec<AnyElement> = Vec::new();
-        if narrow {
-            column.push(self.settings_menu_chips(current, query.is_empty(), search.clone(), cx));
-        }
         if query.is_empty() {
             column.push(heading(current.icon(), current.label(), current.sentence()));
             if current == Section::Projects {
@@ -876,18 +1036,37 @@ impl Workspace {
         } else {
             column.extend(self.settings_found(&query, window, cx));
         }
+        // The section comes in once when it is chosen: the id is the section's, so that neither a
+        // change on the page nor a frame of the backdrop plays it again, and the search has one
+        // id for all its words. The menu's chips stay as they are.
+        let shown: gpui::ElementId = if query.is_empty() {
+            ("settings-section", current as usize).into()
+        } else {
+            "settings-found".into()
+        };
+        let column = crate::motion::fade_in(
+            shown,
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::sz(GROUP_GAP))
+                .children(column),
+        );
         let content = div().w_full().flex().justify_center().child(
             div()
                 .w_full()
                 .max_w(theme::sz(800.))
                 .flex()
                 .flex_col()
-                .gap(theme::sz(12.))
+                .gap(theme::sz(GROUP_GAP))
                 .px(theme::sz(if narrow { 12. } else { 20. }))
                 .pt(theme::sz(12.))
                 .pb(theme::sz(40.))
-                .children(column),
+                .children(chips)
+                .child(column),
         );
+        #[cfg(debug_assertions)]
+        self.settings_debug_scroll(cx);
         let scroll = ui::scroll_area("settings-scroll", &self.settings.scroll, content);
         let page = if narrow {
             div().flex().flex_col().flex_1().min_h_0().child(scroll)
@@ -912,6 +1091,57 @@ impl Workspace {
             .child(layer)
             .child(page)
             .into_any_element()
+    }
+
+    /// Debug builds: `GLASSCODE_DEBUG_SETTINGS_SCROLL=<px>` (at 100 %) starts the page scrolled
+    /// that far down, so a screen check sees the lower groups of a long section without input.
+    /// It holds for the first draws only (the page has no height before its first layout), then
+    /// the page scrolls as always.
+    #[cfg(debug_assertions)]
+    fn settings_debug_scroll(&mut self, cx: &mut Context<Self>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DRAWS: AtomicUsize = AtomicUsize::new(0);
+        if DRAWS.load(Ordering::Relaxed) >= 12 {
+            return;
+        }
+        // `GLASSCODE_DEBUG_SETTINGS_OPEN=<part>[,<part>]` opens the parts of a row that a click
+        // opens: `trust:allows`, `trust:add`, `trust:delegate`, `trust:site` (the first
+        // project's), `cli` (the technical lines of each CLI) and `account-add` (the fields of
+        // a new Claude account).
+        if DRAWS.load(Ordering::Relaxed) == 0 {
+            for part in std::env::var("GLASSCODE_DEBUG_SETTINGS_OPEN").unwrap_or_default().split(',') {
+                match part.trim() {
+                    "cli" => self.settings.cli_details.extend(["Claude Code", "Codex"].map(String::from)),
+                    "account-add" => {
+                        if let Some(form) = self.settings.form.as_mut() {
+                            form.adding = Some(glasscode_core::model::AgentKind::Claude);
+                        }
+                    }
+                    // The first Claude account signs in, with whatever `claude` is first on the
+                    // PATH: a check puts a stand-in there and sets GLASSCODE_DEBUG_SIGNIN.
+                    "signin" => {
+                        if let Some(id) = self.state.accounts.iter().find(|a| a.agent == glasscode_core::model::AgentKind::Claude).map(|a| a.id.clone()) {
+                            self.signin_begin(&id, cx);
+                        }
+                    }
+                    part => self.trust_debug_open(part.strip_prefix("trust:").unwrap_or_default()),
+                }
+            }
+        }
+        DRAWS.fetch_add(1, Ordering::Relaxed);
+        let Some(down) = std::env::var("GLASSCODE_DEBUG_SETTINGS_SCROLL").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v > 0.) else {
+            DRAWS.store(12, Ordering::Relaxed);
+            return;
+        };
+        self.settings.scroll.set_offset(gpui::point(px(0.), -theme::sz(down)));
+    }
+
+    /// Show or hide the technical lines of a CLI's row (Updates › CLI versions).
+    pub(crate) fn cli_details_toggle(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.settings.cli_details.remove(&name) {
+            self.settings.cli_details.insert(name);
+        }
+        cx.notify();
     }
 
     /// The menu beside the cards: the way back to work (the left sidebar does not show in
@@ -1029,26 +1259,66 @@ impl Workspace {
         }
     }
 
-    /// The cards of a section, in the order of the table.
+    /// The groups of a section, in the order of the table.
     fn settings_section(
         &self,
         section: Section,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut out = Vec::new();
         let scope = self.settings.scope.clone();
-        for info in catalog().iter().filter(|c| c.section == section) {
-            if section == Section::Projects && !in_scope(info.card, &scope) {
-                continue;
+        let cards = catalog();
+        let shown: Vec<&CardInfo> = cards
+            .iter()
+            .filter(|c| c.section == section)
+            .filter(|c| section != Section::Projects || in_scope(c.card, &scope))
+            .collect();
+        self.settings_groups(&shown, true, window, cx)
+    }
+
+    /// Cards as the page shows them: those that follow each other in one group of one section
+    /// are the rows of one glass card under the group's title, and a card that draws itself (a
+    /// list) stands between them as it is. Only what is drawn counts: a group with no row has no
+    /// card and no title, and the hairlines lie between the rows that show. The search draws
+    /// what it found with this too, so a row found shows in its group, without the others.
+    fn settings_groups(
+        &self,
+        cards: &[&CardInfo],
+        with_terminal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = Vec::new();
+        let mut open: Option<(Section, &'static str)> = None;
+        let mut rows: Vec<Div> = Vec::new();
+        let close = |out: &mut Vec<AnyElement>, rows: &mut Vec<Div>, group: Option<(Section, &'static str)>| {
+            if let (Some((_, title)), false) = (group, rows.is_empty()) {
+                out.push(group_card(title, std::mem::take(rows)));
             }
-            out.extend(self.settings_card(info, window, cx));
+        };
+        for info in cards {
+            let group = Some((info.section, info.group));
+            if open != group {
+                close(&mut out, &mut rows, open);
+                open = group;
+            }
+            match self.settings_piece(info, window, cx) {
+                Piece::Row(frame) => rows.push(frame.into_row()),
+                // Nothing drawn (no copies of unsaved text): the rows around it stay one card.
+                Piece::Cards(own) if own.is_empty() => {}
+                Piece::Cards(own) => {
+                    close(&mut out, &mut rows, open);
+                    out.extend(own);
+                }
+            }
             // The terminal that signs an account in, or installs a CLI, under the card that
             // started it.
-            if matches!(info.card, CardId::AgentAccounts | CardId::CliVersions) {
+            if with_terminal && matches!(info.card, CardId::AgentAccounts | CardId::CliVersions) {
+                close(&mut out, &mut rows, open);
                 out.extend(self.settings_terminal(cx));
             }
         }
+        close(&mut out, &mut rows, open);
         out
     }
 
@@ -1059,7 +1329,8 @@ impl Workspace {
             .and_then(|form| crate::dialogs::accounts_terminal(form, cx))
     }
 
-    /// The search: the cards found in each section, under the section's name (a click opens it).
+    /// The search: the settings found in each section, in their groups, under the section's name
+    /// (a click opens it).
     fn settings_found(
         &self,
         query: &str,
@@ -1074,10 +1345,8 @@ impl Workspace {
             format!("Settings matching “{query}”"),
         )];
         for (section, label, _, icon) in SECTIONS {
-            let mut shown: Vec<AnyElement> = Vec::new();
-            for info in found.iter().filter(|c| c.section == section) {
-                shown.extend(self.settings_card(info, window, cx));
-            }
+            let here: Vec<&CardInfo> = found.iter().copied().filter(|c| c.section == section).collect();
+            let shown = self.settings_groups(&here, false, window, cx);
             if shown.is_empty() {
                 continue;
             }
@@ -1152,15 +1421,29 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The cards of one entry of the table: one card, several (an account group for each agent,
-    /// one card for each project), or none (the iPhone without a server, voice on Windows). The
-    /// first run draws the Appearance cards with it too.
+    /// One entry of the table as cards of their own, outside a group: the first run draws the
+    /// Appearance cards that change the look most with it.
     pub(crate) fn settings_card(
         &self,
         info: &CardInfo,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        match self.settings_piece(info, window, cx) {
+            Piece::Row(frame) => vec![frame.render()],
+            Piece::Cards(cards) => cards,
+        }
+    }
+
+    /// What one entry of the table draws: a row of its group, or cards of its own: one (a list
+    /// has rows of its own), several (an account group for each agent, one card for each
+    /// project), or none (the iPhone without a server, voice on Windows).
+    fn settings_piece(
+        &self,
+        info: &CardInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Piece {
         let id = info.card;
         let frame = || card(info.title, info.sentence);
         let s = &self.state;
@@ -1199,14 +1482,15 @@ impl Workspace {
             | CardId::SessionView
             | CardId::Cursor => frame().control(self.appearance_control(id, cx)),
 
-            CardId::Manager => return self.settings_manager(window, cx),
+            // The manager's section draws its own groups (`manager_settings.rs`).
+            CardId::Manager => return Piece::Cards(self.settings_manager(window, cx)),
             CardId::AgentAccounts => {
-                let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
-                return crate::dialogs::account_groups(self, form, cx);
+                let Some(form) = self.settings.form.as_ref() else { return Piece::Cards(Vec::new()) };
+                return Piece::Cards(crate::dialogs::account_groups(self, form, cx));
             }
             CardId::GithubAccounts => {
-                let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
-                return vec![crate::github_accounts_ui::render_github_section(self, &form.github_email, window, cx)];
+                let Some(form) = self.settings.form.as_ref() else { return Piece::Cards(Vec::new()) };
+                return Piece::Cards(vec![crate::github_accounts_ui::render_github_section(self, &form.github_email, window, cx)]);
             }
 
             CardId::RuleRead
@@ -1222,7 +1506,7 @@ impl Workspace {
             | CardId::RuleGithub
             | CardId::RuleShow
             | CardId::RuleSettings => {
-                let Some(kind) = id.rule() else { return Vec::new() };
+                let Some(kind) = id.rule() else { return Piece::Cards(Vec::new()) };
                 let framed = frame().control(self.rule_control(kind, cx));
                 if s.agents.rule(kind) != kind.default_rule() { framed.footer("Changed from the suggestion.") } else { framed }
             }
@@ -1242,7 +1526,7 @@ impl Workspace {
                 frame().footer(status)
             }
 
-            CardId::Projects => return self.settings_projects(cx),
+            CardId::Projects => return Piece::Cards(self.settings_projects(cx)),
             CardId::FreshMain => frame()
                 .control(self.setting_switch(id, !s.prefs.fresh_main_off, |s| s.prefs.fresh_main_off = !s.prefs.fresh_main_off, cx))
                 .footer(format!("Off: from main as it is on {}.", platform::this_computer())),
@@ -1250,8 +1534,8 @@ impl Workspace {
                 .control(self.setting_switch(id, !s.prefs.keep_branch_on_remove, |s| s.prefs.keep_branch_on_remove = !s.prefs.keep_branch_on_remove, cx))
                 .footer("Removing runs in the background: the dialog closes, the row says Removing… and you carry on."),
             CardId::ProjectSetup | CardId::ProjectBranch | CardId::ProjectFolder | CardId::ProjectAgent => {
-                let Some(project) = self.scope_project() else { return Vec::new() };
-                return vec![self.project_file_card(info, &project, cx)];
+                let Some(project) = self.scope_project() else { return Piece::Cards(Vec::new()) };
+                return Piece::Cards(vec![self.project_file_card(info, &project, cx)]);
             }
 
             // The form is the Board's (`tickets_ui.rs`), with words in colours that are not for
@@ -1285,7 +1569,7 @@ impl Workspace {
             CardId::Phones => frame().rows(self.phone_rows(cx)),
             CardId::Voice => {
                 if !crate::glasscode_ui::VOICE {
-                    return Vec::new();
+                    return Piece::Cards(Vec::new());
                 }
                 frame()
             }
@@ -1298,8 +1582,9 @@ impl Workspace {
                 |s, c| s.prefs.update_channel = (c == "beta").then(|| c.to_string()),
                 cx,
             )),
+            CardId::AutoCheck => frame().control(self.setting_switch(id, !s.prefs.update_check_off, |s| s.prefs.update_check_off = !s.prefs.update_check_off, cx)),
             CardId::InstallOnQuit => frame().control(self.setting_switch(id, !s.prefs.install_on_quit_off, |s| s.prefs.install_on_quit_off = !s.prefs.install_on_quit_off, cx)),
-            CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx).into_iter().map(|r| div().px(theme::sz(16.)).py(theme::sz(10.)).child(r))),
+            CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx)),
 
             CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
 
@@ -1316,7 +1601,7 @@ impl Workspace {
             CardId::UnsavedCopies => {
                 let count = self.settings.unsaved_copies.unwrap_or(0);
                 if count == 0 {
-                    return Vec::new();
+                    return Piece::Cards(Vec::new());
                 }
                 frame()
                     .control(ui::button("settings-open-unsaved", "Open folder").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
@@ -1333,7 +1618,11 @@ impl Workspace {
                 this.open_first_run(crate::first_run::Step::Projects, cx);
             }))),
         };
-        vec![framed.render()]
+        if framed.rows.is_empty() {
+            Piece::Row(framed)
+        } else {
+            Piece::Cards(vec![framed.render()])
+        }
     }
 
     fn rule_control(&self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
@@ -1610,10 +1899,9 @@ impl Workspace {
                         } else {
                             ""
                         },
-                        Some(mono(match folder {
-                            Some(template) => format!("~/.glasscode/worktrees/{template}"),
-                            None => format!("~/.glasscode/worktrees/{}", project.name),
-                        })),
+                        // The folder as it is on this computer (its place and its separators),
+                        // not as the Mac writes it.
+                        Some(mono(tilde(&glasscode_core::paths::worktrees_dir().join(folder.as_deref().unwrap_or(&project.name))))),
                     ));
                     let id = project.id.clone();
                     rows.push(row(
@@ -2145,7 +2433,12 @@ impl Workspace {
             (None, None) if self.update.checking => row("Checking for updates…", "", None),
             (None, None) => row(
                 "Up to date",
-                "",
+                match self.update.checked.map(|at| at.elapsed().as_secs() / 60) {
+                    None => String::new(),
+                    Some(0) => "Checked just now".to_string(),
+                    Some(minutes) if minutes < 60 => format!("Checked {minutes} min ago"),
+                    Some(minutes) => format!("Checked {} h ago", minutes / 60),
+                },
                 Some(
                     ui::button("settings-check", "Check now")
                         .on_click(
@@ -2271,6 +2564,7 @@ mod tests {
             fix_tries,
             ci_wait_minutes,
             update_channel,
+            update_check_off,
             install_on_quit_off,
             notify_ci_off,
             keep_branch_on_remove,
@@ -2426,6 +2720,10 @@ mod tests {
             (
                 "Prefs.update_channel",
                 on(update_channel, &[CardId::Channel]),
+            ),
+            (
+                "Prefs.update_check_off",
+                on(update_check_off, &[CardId::AutoCheck]),
             ),
             (
                 "Prefs.install_on_quit_off",
@@ -2700,6 +2998,27 @@ mod tests {
             .find(|c| c.card == CardId::BackdropInSessions)
             .unwrap();
         assert!(BACKDROP_COST.contains(in_sessions.title));
+    }
+
+    /// A group is one card: its cards follow each other in the table, so no title shows twice
+    /// in a section. (Cards with no title are cards of their own, or one card where they meet.)
+    #[test]
+    fn the_cards_of_a_group_follow_each_other() {
+        let cards = catalog();
+        let mut seen: Vec<(Section, &str)> = Vec::new();
+        for card in &cards {
+            let group = (card.section, card.group);
+            if seen.last() == Some(&group) || card.group.is_empty() {
+                continue;
+            }
+            assert!(!seen.contains(&group), "{:?} is not with the rest of “{}”", card.card, card.group);
+            seen.push(group);
+        }
+        // What the owner asked for: the settings of Appearance are rows of a few cards.
+        let groups = |section: Section| seen.iter().filter(|(s, _)| *s == section).map(|(_, group)| *group).collect::<Vec<_>>();
+        assert_eq!(groups(Section::Appearance), ["Theme and accent", "Backdrop", "Size and density", "Fonts", "Sessions and terminal"]);
+        // A rule of Permissions is a row beside the other rules.
+        assert!(cards.iter().filter(|c| c.card.rule().is_some()).all(|c| c.group == "What agents may do"));
     }
 
     /// 900 px at 130 % is about 692 wide: the menu goes above the cards.

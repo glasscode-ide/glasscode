@@ -1,0 +1,24 @@
+name: Idea
+description: Something Glasscode should do, or do differently
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The work you want to get done, and what stands in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you imagine it. A sketch or an example from another program is welcome.
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Both
+        - Windows
+        - macOS

@@ -60,6 +60,11 @@ Source: "{#StageDir}\Glasscode.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\glasscode-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; The Linux builds of the server daemon, when the bundle script had them.
 Source: "{#StageDir}\glasscoded\*"; DestDir: "{app}\glasscoded"; Flags: ignoreversion skipifsourcedoesntexist
+; The licence of Glasscode and those of what it is built on.
+Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\THIRD-PARTY-NOTICES.html"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 Name: "{autoprograms}\Glasscode"; Filename: "{app}\Glasscode.exe"; Comment: "Claude Code and Codex agents side by side"
@@ -68,6 +73,10 @@ Name: "{autoprograms}\Glasscode"; Filename: "{app}\Glasscode.exe"; Comment: "Cla
 Filename: "{app}\Glasscode.exe"; Description: "{cm:LaunchProgram,Glasscode}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; The programs that an update replaced (glasscode_core::update::windows_app).
+; What an update put there after the installation (glasscode_core::update::windows_app): files of
+; a newer release that this installer does not know, and the programs that the update replaced.
+Type: filesandordirs; Name: "{app}\glasscoded"
+Type: filesandordirs; Name: "{app}\licenses"
+Type: files; Name: "{app}\THIRD-PARTY-NOTICES.html"
 Type: files; Name: "{app}\Glasscode.old.exe"
 Type: files; Name: "{app}\glasscode-cli.old.exe"

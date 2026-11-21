@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in Glasscode does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem does not belong here: see SECURITY.md.
+        Please leave out tokens, keys, and the names of private repositories and people.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to see it again
+      placeholder: |
+        1. Open …
+        2. Click …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Glasscode version and build
+      description: Settings › Updates, "This build", or `glasscode --version`.
+      placeholder: 0.1.0 (1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent in the session, if it matters
+      options:
+        - Does not matter
+        - Claude Code
+        - Codex
+        - Shell
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: A screenshot, the theme and scale (Settings › Appearance), messages from the console.

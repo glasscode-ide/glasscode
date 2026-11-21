@@ -128,6 +128,26 @@ pub struct AccountsForm {
     pub terminal: Option<(String, Entity<TerminalView>)>,
     /// Opened from Tickets: Linear comes first.
     pub linear_first: bool,
+    /// An account that is signing in now, in the browser (`glasscode_core::signin`).
+    pub signin: Option<SignIn>,
+    /// What each account's CLI says of its login, by account id; none while it is asked.
+    pub logins: std::collections::HashMap<String, glasscode_core::signin::Status>,
+    /// The CLIs were asked once since Settings opened.
+    pub logins_asked: bool,
+    /// The field for a code that the browser page shows.
+    pub code: Entity<TextInput>,
+}
+
+/// A sign-in under way, or the one that just failed.
+pub struct SignIn {
+    pub account_id: String,
+    pub attempt: glasscode_core::signin::Attempt,
+    /// Where the browser was sent, to open or copy again.
+    pub url: Option<String>,
+    /// The CLI takes a code from the browser page.
+    pub wants_code: bool,
+    /// Why it did not work; the CLI has ended then.
+    pub failed: Option<String>,
 }
 
 fn review_title(pr: &glasscode_core::github::PrHit) -> String {
@@ -316,7 +336,14 @@ impl AccountsForm {
             InputEvent::Changed => {}
         })
         .detach();
-        AccountsForm { adding: None, label, plan, github_email, terminal: None, linear_first: false }
+        let code = cx.new(|cx| TextInput::new("Code from the browser page", cx));
+        cx.subscribe_in(&code, window, |this: &mut Workspace, _, event, _, cx| {
+            if matches!(event, InputEvent::Submit) {
+                this.signin_send_code(cx);
+            }
+        })
+        .detach();
+        AccountsForm { adding: None, label, plan, github_email, terminal: None, linear_first: false, signin: None, logins: Default::default(), logins_asked: false, code }
     }
 }
 
@@ -1761,6 +1788,22 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
                 1 => "Used by 1 session".to_string(),
                 n => format!("Used by {n} sessions"),
             };
+            // Signed in: the login's file is there (known at once); who and what, once its CLI
+            // has answered in the background.
+            let said = form.logins.get(&account.id);
+            let signed_in = said.map_or_else(|| glasscode_core::discover::signed_in(account), |s| s.signed_in);
+            let signing = form.signin.as_ref().is_some_and(|s| s.account_id == account.id && s.failed.is_none());
+            let login_text = match (signed_in, said) {
+                (true, Some(s)) => match (&s.who, &s.kind) {
+                    (Some(who), Some(kind)) => format!("Signed in as {who} · {kind}"),
+                    (Some(who), None) => format!("Signed in as {who}"),
+                    (None, Some(kind)) => format!("Signed in with {kind}"),
+                    (None, None) => "Signed in".to_string(),
+                },
+                (true, None) => "Signed in".to_string(),
+                (false, _) => "Not signed in".to_string(),
+            };
+            let out_id = account.id.clone();
             let buttons = div()
                 .flex()
                 .flex_wrap()
@@ -1774,46 +1817,71 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
                         }),
                     ))
                 })
-                .child(ui::button(SharedString::from(format!("login-{login_id}")), "Sign in…").on_click(
-                    cx.listener(move |this, _: &ClickEvent, window, cx| this.start_login(&login_id, window, cx)),
-                ))
+                .when(!signing, |d| {
+                    // The one thing to do on an account that is not signed in; a quiet choice on one that is.
+                    let id = SharedString::from(format!("login-{login_id}"));
+                    let button = if signed_in { ui::button(id, "Sign in again") } else { ui::primary_button(id, "Sign in") };
+                    d.child(button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.start_login(&login_id, window, cx))))
+                })
+                .when(signed_in && !signing, |d| {
+                    d.child(ui::button(SharedString::from(format!("logout-{out_id}")), "Sign out").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.account_sign_out(&out_id, cx))))
+                })
                 .when(used == 0, |d| {
                     d.child(ui::button(SharedString::from(format!("remove-{remove_id}")), "Remove").on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.remove_account(&remove_id, cx)),
                     ))
                 })
                 .into_any_element();
-            rows.push(row_with(title, format!("{used_text} · {}", crate::settings_ui::tilde(&folder)), Some(buttons)));
-        }
-        if form.adding == Some(agent) {
-            rows.push(
+            let title = title.child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(form.label.clone())
-                    .child(form.plan.clone())
-                    .child(
+                    .items_center()
+                    .gap(theme::sz(6.))
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text_soft())
+                    .child(ui::dot(if signed_in { theme::added() } else { theme::faint() }))
+                    .child(login_text),
+            );
+            rows.push(row_with(title, format!("{used_text} · {}", crate::settings_ui::tilde(&folder)), Some(buttons)));
+            if let Some(signin) = form.signin.as_ref().filter(|s| s.account_id == account.id) {
+                rows.push(signin_row(signin, account, form, cx));
+            }
+        }
+        if form.adding == Some(agent) {
+            // The new account's fields as a row of the card: its words, then the two fields of
+            // one width and the buttons under them.
+            rows.push(
+                crate::settings_ui::card(format!("A new {} account", agent.name()), "Its name in Glasscode, and its plan if you want it shown. Then you sign in in your browser.")
+                    .body(
                         div()
                             .flex()
-                            .gap_2()
-                            .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
-                            ))
-                            .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                if let Some(form) = this.settings.form.as_mut() {
-                                    form.adding = None;
-                                }
-                                cx.notify();
-                            }))),
-                    ),
+                            .flex_wrap()
+                            .items_center()
+                            .gap(theme::sz(8.))
+                            .child(crate::settings_ui::field(&form.label))
+                            .child(crate::settings_ui::field(&form.plan))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(theme::sz(8.))
+                                    .child(ui::primary_button("add-confirm", format!("Add and sign in with {}", agent.name())).on_click(
+                                        cx.listener(|this, _: &ClickEvent, window, cx| this.add_account_from_form(window, cx)),
+                                    ))
+                                    .child(ui::button("add-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if let Some(form) = this.settings.form.as_mut() {
+                                            form.adding = None;
+                                        }
+                                        cx.notify();
+                                    }))),
+                            ),
+                    )
+                    .into_row(),
             );
         } else {
             rows.push(row(
                 format!("Add another {} account", agent.name()),
-                "Signs in with the official CLI, in a terminal here",
+                "You sign in in your browser; the official CLI keeps the login",
                 Some(
                     ui::button(SharedString::from(format!("add-{}", agent.name())), "Add…")
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1837,6 +1905,68 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
     }
 
     groups
+}
+
+/// Under an account while it signs in: what to do in the browser, the link again, a field for a
+/// code, Cancel; or why it did not work, and the ways on from there.
+fn signin_row(signin: &SignIn, account: &Account, form: &AccountsForm, cx: &mut Context<Workspace>) -> gpui::Div {
+    let quiet = "Glasscode never sees your password or your tokens: the official CLI signs in, in this account's own folder.";
+    if let Some(why) = &signin.failed {
+        let (again, terminal) = (account.id.clone(), account.id.clone());
+        return crate::settings_ui::card(format!("{} did not sign in", account.label), why.clone())
+            .body(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(theme::sz(8.))
+                    .child(ui::primary_button("signin-again", "Try again").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.start_login(&again, window, cx))))
+                    // The way from before: the CLI itself, in a terminal here.
+                    .child(ui::button("signin-terminal", "Sign in in a terminal instead").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.start_login_terminal(&terminal, window, cx))))
+                    .child(ui::button("signin-close", "Close").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.signin_cancel(cx)))),
+            )
+            .into_row();
+    }
+    let link = signin.url.clone();
+    let copy = signin.url.clone();
+    let waiting = div()
+        .flex()
+        .items_center()
+        .gap(theme::sz(8.))
+        .text_size(theme::sz(13.))
+        .text_color(theme::text())
+        .child(crate::motion::spinner("signin-spinner", 14., theme::text_soft()))
+        .child(if signin.url.is_some() { "Waiting for you in the browser…" } else { "Opening your browser…" });
+    let actions = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(theme::sz(8.))
+        .when_some(link, |d, url| d.child(ui::button("signin-open", "Open the page again").on_click(move |_: &ClickEvent, _, cx| crate::center::open_url(&url, cx))))
+        .when_some(copy, |d, url| {
+            d.child(ui::button("signin-copy", "Copy the link").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                this.show_toast("The sign-in link is copied", cx);
+            })))
+        })
+        .child(ui::button("signin-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.signin_cancel(cx))));
+    let code = signin.wants_code.then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme::sz(6.))
+            .pt(theme::sz(4.))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child("Most times the browser finishes by itself. If its page shows a code instead, paste it here."))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::sz(8.))
+                    .child(crate::settings_ui::field(&form.code))
+                    .child(ui::button("signin-code", "Use this code").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.signin_send_code(cx)))),
+            )
+    });
+    crate::settings_ui::card(format!("Signing in to {}", account.label), quiet).body(div().flex().flex_col().gap(theme::sz(10.)).child(waiting).child(actions).children(code)).into_row()
 }
 
 /// The terminal an account signs in in (or an install runs in), while it is open.
@@ -1914,9 +2044,75 @@ fn add_cli_footer(cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    let mut rows: Vec<AnyElement> = ws
-        .cli_status
+/// What a CLI's row says under its name: the version installed, the pinned one when it is
+/// another, and the newest published.
+fn cli_versions_line(status: &glasscode_core::versions::CliStatus) -> String {
+    let installed = match (&status.installed, &status.approved) {
+        (None, Some(pinned)) => format!("Not installed · pinned {pinned}"),
+        (None, None) => "Not installed".to_string(),
+        (Some(v), Some(pinned)) if v != pinned => format!("{v} installed · pinned {pinned}"),
+        (Some(v), Some(_)) => format!("{v} installed, the pinned version"),
+        (Some(v), None) => format!("{v} installed"),
+    };
+    match &status.latest {
+        Some(latest) if status.installed.as_deref() == Some(latest.as_str()) => format!("{installed} · the latest"),
+        Some(latest) => format!("{installed} · latest {latest}"),
+        None => installed,
+    }
+}
+
+/// Debug builds: `GLASSCODE_DEBUG_CLI=sample` shows made-up CLIs in Updates › CLI versions (one
+/// that refuses arguments and has an update, one as it should be, one not installed, one the
+/// person added), so a screen check sees each state of a row without the real programs.
+#[cfg(debug_assertions)]
+type CliSample = (Vec<glasscode_core::versions::CliStatus>, std::collections::HashMap<String, (String, Result<(), Vec<String>>)>);
+
+#[cfg(debug_assertions)]
+fn cli_sample() -> Option<CliSample> {
+    use glasscode_core::versions::{CliKind, CliStatus};
+    if std::env::var("GLASSCODE_DEBUG_CLI").ok().as_deref() != Some("sample") {
+        return None;
+    }
+    let status = |name: &str, installed: Option<&str>, approved: Option<&str>, latest: Option<&str>, builtin: bool, kind: CliKind| CliStatus {
+        name: name.to_string(),
+        installed: installed.map(str::to_string),
+        approved: approved.map(str::to_string),
+        latest: latest.map(str::to_string),
+        path: None,
+        builtin,
+        kind,
+    };
+    let list = vec![
+        status("Claude Code", Some("2.1.329"), None, Some("2.1.330"), true, CliKind::ClaudeCode),
+        status("Codex", Some("0.41.0"), Some("0.41.0"), Some("0.41.0"), true, CliKind::Codex),
+        status("Gemini", None, None, Some("0.9.2"), false, CliKind::Npm { package: "@google/gemini-cli".into() }),
+        status("my-agent", Some("1.4.0"), None, None, false, CliKind::Command { install: "brew install my-agent".into() }),
+    ];
+    let refused = vec![
+        "runtime::claude args: -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode default --version → error: unknown option '--include-partial-messages'".to_string(),
+        "review::claude args: -p --output-format json --max-turns 40 --version → error: unknown option '--max-turns'".to_string(),
+    ];
+    let contracts = std::collections::HashMap::from([("Claude Code".to_string(), ("2.1.329".to_string(), Err(refused))), ("Codex".to_string(), ("0.41.0".to_string(), Ok(())))]);
+    Some((list, contracts))
+}
+
+/// Updates › CLI versions: a row for each CLI in the one layout of Settings (its name, its
+/// versions under it, its buttons at the right edge), and what its argument contract says under
+/// the words. A CLI that refuses arguments says so in one sentence that wraps in the card; the
+/// argument lists themselves show behind "Details", in the code font.
+pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<gpui::Div> {
+    use crate::settings_ui::{card_with, disclosure, inset, row};
+    #[cfg(debug_assertions)]
+    let sample = cli_sample();
+    #[cfg(debug_assertions)]
+    let (statuses, contracts) = match &sample {
+        Some((statuses, contracts)) => (statuses, contracts),
+        None => (&ws.cli_status, &ws.cli_contracts),
+    };
+    #[cfg(not(debug_assertions))]
+    let (statuses, contracts) = (&ws.cli_status, &ws.cli_contracts);
+
+    let mut rows: Vec<gpui::Div> = statuses
         .iter()
         .map(|status| {
             let ok = status.is_ok();
@@ -1926,94 +2122,87 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
             // Built-ins: offer the pinned version when it differs. Nothing installed: an Install.
             let install_pinned = status.install_command().filter(|_| !ok && update.is_none());
             let install_fresh = (!installed && update.is_none()).then(|| status.install_latest_command());
-            let latest_note = status
-                .latest
-                .as_ref()
-                .map(|l| if status.installed.as_deref() == Some(l.as_str()) { format!(" · latest {l} ✓") } else { format!(" · latest {l}") })
-                .unwrap_or_default();
             let builtin = status.builtin;
-            let update_name = name.clone();
-            let install_name = name.clone();
-            let remove_name = name.clone();
-            div()
+            // The argument contract of the installed version (alt-m4, M22).
+            let contract = contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone());
+            let refused = contract.as_ref().and_then(|result| result.as_ref().err().cloned());
+
+            // On glass the words stay `text`; a CLI that is not right gets an orange dot.
+            let title = div()
                 .flex()
                 .items_center()
+                .gap(theme::sz(8.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .when(!ok || refused.is_some(), |d| d.child(ui::dot(theme::attention())))
+                .child(name.clone());
+
+            let buttons = div()
+                .flex()
                 .flex_wrap()
-                .gap_2()
-                // On glass the words stay `text`; a CLI that is not right gets an orange dot.
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .flex_1()
-                        .min_w(theme::sz(220.))
-                        .text_color(theme::text())
-                        .when(!ok, |d| d.child(ui::dot(theme::attention())))
-                        .child(format!("{}{latest_note}", status.summary())),
-                )
-                // The argument contract of the installed version (alt-m4, M22).
-                .when_some(ws.cli_contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone()), |d, result| {
-                    let refused = result.is_err();
-                    d.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(theme::sz(12.))
-                            .text_color(if refused { theme::text() } else { theme::muted() })
-                            .when(refused, |d| d.child(ui::dot(theme::attention())))
-                            .child(glasscode_core::versions::contract_words(&result)),
-                    )
-                })
+                .items_center()
+                .gap(theme::sz(8.))
                 .when_some(update, |d, version| {
-                    let v = version.clone();
-                    let name = update_name.clone();
-                    d.child(
-                        ui::primary_button(SharedString::from(format!("update-{name}")), format!("Update to {version}"))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.cli_install(name.clone(), Some(v.clone()), window, cx)
-                            })),
-                    )
+                    let (name, v) = (name.clone(), version.clone());
+                    d.child(ui::button(SharedString::from(format!("update-{name}")), if installed { format!("Update to {version}") } else { format!("Install {version}") }).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.cli_install(name.clone(), Some(v.clone()), window, cx)
+                    })))
                 })
                 .when_some(install_pinned, |d, _command| {
-                    let name = install_name.clone();
-                    d.child(
-                        ui::button(SharedString::from(format!("install-{name}")), "Install pinned version").on_click(
-                            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                let pin = this.cli_status.iter().find(|s| s.name == name).and_then(|s| s.approved.clone());
-                                this.cli_install(name.clone(), pin, window, cx)
-                            }),
-                        ),
-                    )
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("install-{name}")), "Install pinned version").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        let pin = this.cli_status.iter().find(|s| s.name == name).and_then(|s| s.approved.clone());
+                        this.cli_install(name.clone(), pin, window, cx)
+                    })))
                 })
                 .when_some(install_fresh, |d, _command| {
-                    let name = install_name.clone();
-                    d.child(
-                        ui::button(SharedString::from(format!("install-fresh-{name}")), "Install").on_click(cx.listener(
-                            move |this, _: &ClickEvent, window, cx| this.cli_install(name.clone(), None, window, cx),
-                        )),
-                    )
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("install-fresh-{name}")), "Install").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.cli_install(name.clone(), None, window, cx))))
                 })
                 .when(!builtin, |d| {
-                    let name = remove_name.clone();
-                    d.child(ui::button(SharedString::from(format!("remove-{name}")), "Remove").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _window, cx| this.remove_custom_cli(name.clone(), cx),
-                    )))
-                })
-                .into_any_element()
+                    let name = name.clone();
+                    d.child(ui::button(SharedString::from(format!("remove-{name}")), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| this.remove_custom_cli(name.clone(), cx))))
+                });
+
+            let framed = card_with(title, cli_versions_line(status)).control(buttons);
+            match (contract, refused) {
+                (None, _) => framed,
+                (Some(_), None) => framed.footer("Takes every argument list Glasscode starts it with."),
+                (Some(_), Some(failures)) => {
+                    let open = ws.settings.cli_details.contains(&name);
+                    let toggle = name.clone();
+                    let warning = div()
+                        .flex()
+                        .items_start()
+                        .gap(theme::sz(10.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(theme::sz(12.))
+                                .text_color(theme::text())
+                                .child("Refuses some of Glasscode's arguments, so sessions may not start. Install the version you had approved before."),
+                        )
+                        .child(
+                            disclosure(SharedString::from(format!("cli-details-{name}")), if failures.len() == 1 { "Details".to_string() } else { format!("Details · {}", failures.len()) }, open)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.cli_details_toggle(toggle.clone(), cx))),
+                        );
+                    let body = div().flex().flex_col().min_w_0().gap(theme::sz(8.)).child(warning).when(open, |d| {
+                        d.child(inset().children(failures.iter().map(|failure| {
+                            div().min_w_0().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).line_height(theme::sz(17.)).text_color(theme::text_soft()).child(failure.clone())
+                        })))
+                    });
+                    framed.body(body)
+                }
+            }
+            .into_row()
         })
         .collect();
-    rows.push(
-        div()
-            .flex()
-            .child(
-                ui::button(SharedString::from("add-cli"), "+ Add a CLI")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_add_cli(window, cx))),
-            )
-            .into_any_element(),
-    );
+    rows.push(row(
+        "Another CLI",
+        "From npm, or with an install command of your own",
+        Some(ui::button(SharedString::from("add-cli"), "Add a CLI…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_add_cli(window, cx))).into_any_element()),
+    ));
     rows
 }
 
@@ -2351,10 +2540,168 @@ impl Workspace {
         self.start_login(&id, window, cx);
     }
 
+    /// Sign an account in: its CLI's own login runs out of sight and opens the browser, and the
+    /// account's row says where things stand (`glasscode_core::signin`). No terminal.
     pub fn start_login(&mut self, account_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account) = self.state.account(account_id).cloned() else { return };
         if self.view != crate::shell::View::Settings || self.settings.section != crate::settings_ui::Section::Accounts {
             self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
+        }
+        self.signin_begin(&account.id, cx);
+    }
+
+    /// The sign-in itself, on the Accounts page that shows.
+    pub(crate) fn signin_begin(&mut self, account_id: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.state.account(account_id).cloned() else { return };
+        // A screen check never starts an agent's program (debug builds).
+        if cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").as_deref() == Ok("1") && std::env::var_os("GLASSCODE_DEBUG_SIGNIN").is_none() {
+            self.show_toast("Signing in does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)", cx);
+            return;
+        }
+        let Some(form) = self.settings.form.as_mut() else { return };
+        // One at a time: an earlier one ends (its CLI with it).
+        form.signin = None;
+        form.terminal = None;
+        form.code.update(cx, |input, cx| input.set_text("", cx));
+        // An account named by its address signs in with that address filled in.
+        let started = glasscode_core::signin::start(&account, &self.env, Some(account.label.as_str()));
+        let failed = started.as_ref().err().map(|err| format!("{err:#}"));
+        match started {
+            Ok(attempt) => form.signin = Some(SignIn { account_id: account.id.clone(), attempt, url: None, wants_code: false, failed: None }),
+            Err(_) => {
+                // The CLI could not start at all: say so where the sign-in would show.
+                self.show_toast(format!("Could not start the sign-in: {}", failed.unwrap_or_default()), cx);
+                cx.notify();
+                return;
+            }
+        }
+        // Look at it four times a second, for as long as it runs.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                match this.update(cx, |this, cx| this.signin_tick(cx)) {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// What the running sign-in said since the last look. False once there is nothing to wait for.
+    fn signin_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(signin) = self.settings.form.as_mut().and_then(|form| form.signin.as_mut()) else { return false };
+        if signin.failed.is_some() {
+            return false;
+        }
+        let account_id = signin.account_id.clone();
+        let mut ended = None;
+        for event in signin.attempt.poll() {
+            match event {
+                glasscode_core::signin::Event::Url(url) => signin.url = Some(url),
+                glasscode_core::signin::Event::WantsCode => signin.wants_code = true,
+                glasscode_core::signin::Event::Ended(result) => ended = Some(result),
+            }
+            cx.notify();
+        }
+        match ended {
+            None => true,
+            Some(Ok(())) => {
+                if let Some(form) = self.settings.form.as_mut() {
+                    form.signin = None;
+                }
+                let label = self.state.account(&account_id).map(|a| a.label.clone()).unwrap_or_default();
+                self.show_toast(format!("{label} is signed in"), cx);
+                self.accounts_ask_logins(cx);
+                false
+            }
+            Some(Err(why)) => {
+                if let Some(signin) = self.settings.form.as_mut().and_then(|form| form.signin.as_mut()) {
+                    signin.failed = Some(upper_first(&why));
+                }
+                false
+            }
+        }
+    }
+
+    /// Cancel a sign-in, or close what is left of one that failed.
+    pub(crate) fn signin_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(form) = self.settings.form.as_mut() {
+            // Dropping it ends its CLI.
+            form.signin = None;
+        }
+        cx.notify();
+    }
+
+    /// The code from the browser page goes to the CLI.
+    pub(crate) fn signin_send_code(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.settings.form.as_mut() else { return };
+        let code = form.code.read(cx).text().trim().to_string();
+        let Some(signin) = form.signin.as_mut() else { return };
+        if code.is_empty() {
+            return;
+        }
+        if let Err(err) = signin.attempt.send_code(&code) {
+            signin.failed = Some(format!("The code could not be given to the CLI: {err}."));
+        }
+        form.code.update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    /// Ask each account's CLI whether it is signed in, and as whom: in the background, as each
+    /// answer starts a program.
+    pub(crate) fn accounts_ask_logins(&mut self, cx: &mut Context<Self>) {
+        if cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").as_deref() == Ok("1") {
+            return;
+        }
+        let accounts: Vec<Account> = self.state.accounts.clone();
+        let env = self.env.clone();
+        let task = cx.background_spawn(async move { accounts.iter().filter_map(|account| Some((account.id.clone(), glasscode_core::signin::status(account, &env)?))).collect::<Vec<_>>() });
+        cx.spawn(async move |this, cx| {
+            let answers = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(form) = this.settings.form.as_mut() {
+                    form.logins.extend(answers);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sign an account out, with its CLI's own command.
+    pub(crate) fn account_sign_out(&mut self, account_id: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.state.account(account_id).cloned() else { return };
+        let env = self.env.clone();
+        let label = account.label.clone();
+        let id = account.id.clone();
+        let task = cx.background_spawn(async move { glasscode_core::signin::sign_out(&account, &env).map_err(|err| format!("{err:#}")) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if let Some(form) = this.settings.form.as_mut() {
+                            form.logins.insert(id, Default::default());
+                        }
+                        this.show_toast(format!("{label} is signed out"), cx);
+                    }
+                    Err(why) => this.show_toast(format!("Could not sign {label} out: {why}"), cx),
+                }
+                this.accounts_ask_logins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The way from before, kept for when the browser way does not work: the CLI itself in a
+    /// terminal on the page.
+    pub fn start_login_terminal(&mut self, account_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self.state.account(account_id).cloned() else { return };
+        if let Some(form) = self.settings.form.as_mut() {
+            form.signin = None;
         }
         let launch = agents::login_launch(&account, &self.env);
         let spec = SpawnSpec {
@@ -2529,4 +2876,9 @@ impl Workspace {
             cx,
         );
     }
+}
+
+fn upper_first(text: &str) -> String {
+    let mut letters = text.chars();
+    letters.next().map(|first| first.to_uppercase().chain(letters).collect()).unwrap_or_default()
 }

@@ -1978,7 +1978,12 @@ fn detail_box(lines: &[Line], sel: &mut Selection) -> AnyElement {
 
 /// An agent's reply: Markdown in the reading font, code in chips and boxes.
 pub(crate) fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>) -> AnyElement {
-    let size = theme::chat_text_size();
+    render_reply_at(text, key, sel, ws, theme::chat_text_size())
+}
+
+/// As [`render_reply`], at a text size of its own (on the screen, scaled already): the
+/// manager's panel is narrower than a session's chat, and its type a size smaller.
+pub(crate) fn render_reply_at(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>, size: f32) -> AnyElement {
     let blocks = markdown::parse(text);
     let _ = ws;
     div()
