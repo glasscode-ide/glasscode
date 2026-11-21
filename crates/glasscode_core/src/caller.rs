@@ -102,7 +102,8 @@ pub enum Channel {
     /// The control socket (a named pipe on Windows), and the process on the other end when the
     /// system says which.
     Socket { pid: Option<u32> },
-    /// A request file left in a worktree: anyone who can write there can leave one.
+    /// A request file left in a worktree: anyone who can write there can leave one. The app knows
+    /// the worktree, so the sessions there are what it proves ([`by_channel_proven`]).
     RequestFile,
     /// A `glasscode` command on the server, relayed by glasscoded, which checked the signature of
     /// the session it names (none: a program on the server).
@@ -125,6 +126,15 @@ pub struct Signed {
 /// `request.interactive` is not read: a request that says it was typed at a terminal is the same
 /// caller as one that does not.
 pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, typed_in_tab: impl Fn(&str) -> bool) -> Caller {
+    by_channel_proven(request, channel, signed, typed_in_tab, &[])
+}
+
+/// [`by_channel`], with the sessions the channel itself proves the request came from (`proven`,
+/// the strictest first): a request file the app found in a session's worktree, a socket whose
+/// peer runs under a session's program. Such a request is that session's, signed or not, so a
+/// session never passes for a program outside Glasscode by leaving its signature out; and one
+/// signed for another session than the channel proves is the proven one's.
+pub fn by_channel_proven(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, typed_in_tab: impl Fn(&str) -> bool, proven: &[String]) -> Caller {
     if let Channel::Server { session } = channel {
         return match session {
             Some(id) => Caller::Session { id: format!("server:{id}"), project: None },
@@ -133,12 +143,16 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
     }
     if let (Some(id), Some(sig)) = (&request.session, &request.sig)
         && let Some(session) = signed(id, sig)
+        && (proven.is_empty() || proven.contains(id))
     {
         // The keys of a shell tab are typed in the app's own window, so only a request on the
         // socket (a command the shell ran) can be them; a request file is anyone's.
         if session.shell && matches!(channel, Channel::Socket { .. }) && typed_in_tab(id) {
             return Caller::ShellTab { session: id.clone(), project: None };
         }
+        return Caller::Session { id: id.clone(), project: None };
+    }
+    if let Some(id) = proven.first() {
         return Caller::Session { id: id.clone(), project: None };
     }
     match channel {
@@ -345,6 +359,33 @@ mod tests {
             _ => None,
         };
         by_channel(request, channel, signed, |id| typed && id == "s-shell")
+    }
+
+    /// (a): a request file the app found in a session's worktree is that session's, signed or not,
+    /// and never a program outside Glasscode's; one signed for a session the channel does not prove
+    /// is the proven session's. Without proof, as before.
+    #[test]
+    fn a_channel_proves_its_session_without_a_signature() {
+        let signed = |id: &str, sig: &str| match (id, sig) {
+            ("s-agent", "good") | ("s-other", "good") => Some(Signed { shell: false }),
+            ("s-shell", "good") => Some(Signed { shell: true }),
+            _ => None,
+        };
+        let proven = ["s-agent".to_string()];
+        let unsigned = request(None, false);
+        assert_eq!(by_channel_proven(&unsigned, &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(9) }, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        // Signed for another session than the one the channel proves: the proven one.
+        assert_eq!(by_channel_proven(&request(Some(("s-other", "good")), false), &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        // Signed for the proven one: itself, its shell tab as before.
+        assert_eq!(by_channel_proven(&request(Some(("s-agent", "good")), false), &Channel::RequestFile, signed, |_| false, &proven), Caller::Session { id: "s-agent".into(), project: None });
+        let shell = ["s-shell".to_string()];
+        assert_eq!(by_channel_proven(&request(Some(("s-shell", "good")), false), &Channel::Socket { pid: Some(5) }, signed, |_| true, &shell), Caller::ShellTab { session: "s-shell".into(), project: None });
+        // A shell tab is never proven into the person: unsigned, it is the session.
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(5) }, signed, |_| true, &shell), Caller::Session { id: "s-shell".into(), project: None });
+        // No proof: as before.
+        assert_eq!(by_channel_proven(&unsigned, &Channel::RequestFile, signed, |_| false, &[]), Caller::Terminal { pid: None });
+        assert_eq!(by_channel_proven(&unsigned, &Channel::Socket { pid: Some(9) }, signed, |_| false, &[]), Caller::Terminal { pid: Some(9) });
     }
 
     #[test]
