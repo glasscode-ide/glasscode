@@ -80,7 +80,10 @@ impl Line {
     fn text(&self) -> String {
         let pr = self.pr.map(|n| format!(", pull request #{n}")).unwrap_or_default();
         let shown = if self.shown { " (on the Mac's screen now)" } else { "" };
-        format!("id {}: \"{}\" in {}, branch {}, {}{pr}{shown}", self.id, self.title, self.project, self.branch, spoken_state(&self.state))
+        // A short ref, for open_place only: a whole id read aloud is noise (`voice_session_for`
+        // takes the start of an id).
+        let short: String = self.id.chars().take(8).collect();
+        format!("ref {short}: \"{}\" in {}, branch {}, {}{pr}{shown}", self.title, self.project, self.branch, spoken_state(&self.state))
     }
 }
 
@@ -219,6 +222,53 @@ impl Workspace {
         session_find::project(said, &names).map(|i| projects[i].id.clone()).ok_or_else(|| format!("There is no project \"{said}\". The projects: {}.", names.join(", ")))
     }
 
+    /// The project the words name, if they name one (`session_find::named_project`), with the
+    /// words left: a project given already stays, and its name is taken out of the words.
+    pub(crate) fn project_in_words(&self, given: Option<String>, words: &str) -> (Option<String>, String) {
+        let projects: Vec<&Project> = self.state.visible_projects().collect();
+        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        match session_find::named_project(words, &names) {
+            Some((i, rest)) if given.as_ref().is_none_or(|g| *g == projects[i].id) => (Some(projects[i].id.clone()), rest),
+            _ => (given, words.trim().to_string()),
+        }
+    }
+
+    /// What is going on in Glasscode, for the voice to know before it is asked: each project
+    /// with how many sessions are open, the ones at work or waiting for the person, and every
+    /// open session's title (so a title heard wrongly is still recognised). No ids.
+    pub(crate) fn voice_overview(&self) -> String {
+        let (sessions, _) = self.sidebar_places();
+        let mut parts = Vec::new();
+        for p in self.state.visible_projects() {
+            let here: Vec<&&Session> = sessions.iter().filter(|s| s.project_id == p.id).collect();
+            if here.is_empty() {
+                parts.push(format!("{}: no open session.", p.name));
+                continue;
+            }
+            let titled = |state: &str| -> Vec<String> { here.iter().filter(|s| self.session_state(s) == state).map(|s| format!("\"{}\"", glasscode_core::lens::clip(&self.session_title(s), 48))).collect() };
+            let (working, needs) = (titled("working"), titled("needs you"));
+            let mut line = format!("{}: {} open", p.name, here.len());
+            if !working.is_empty() {
+                line.push_str(&format!("; working: {}", working.join(", ")));
+            }
+            if !needs.is_empty() {
+                line.push_str(&format!("; waiting for the person: {}", needs.join(", ")));
+            }
+            let titles: Vec<String> = here.iter().take(14).map(|s| glasscode_core::lens::clip(&self.session_title(s), 48)).collect();
+            let more = if here.len() > 14 { format!(" and {} more", here.len() - 14) } else { String::new() };
+            line.push_str(&format!("; its sessions: {}{more}.", titles.join(" | ")));
+            parts.push(line);
+        }
+        format!("What is open in Glasscode now (sessions by project): {}", parts.join(" "))
+    }
+
+    /// The projects the voice and the manager may name, in a sentence: a project said or heard
+    /// differently is the one it sounds like.
+    pub(crate) fn projects_line(&self) -> String {
+        let names: Vec<&str> = self.state.visible_projects().map(|p| p.name.as_str()).collect();
+        format!("The projects in Glasscode: {}. A project the person names, however it was said or heard (\"class code\" or \"glass code\" is glasscode), is one of these: use its exact name, and look only at its sessions.", names.join(", "))
+    }
+
     /// The worktrees without a session whose branch or folder fits the words: (label, project).
     fn closed_fits(&self, said: &str, leftovers: &[Leftover]) -> Vec<(String, String)> {
         let entries: Vec<Entry> = leftovers
@@ -238,6 +288,10 @@ impl Workspace {
                 Err(say) => return say,
             },
         };
+        // A project named among the words ("the voice session in class code"): only its
+        // sessions, and its name is not searched for (other projects' branches have it too).
+        let (within, search) = self.project_in_words(within, search);
+        let search = search.as_str();
         let (sessions, leftovers) = self.sidebar_places();
         let mine = |id: &str| within.as_deref().is_none_or(|p| p == id);
         let sessions: Vec<&Session> = sessions.into_iter().filter(|s| mine(&s.project_id)).filter(|s| !needs || self.session_state(s) == "needs you").collect();
@@ -278,6 +332,13 @@ impl Workspace {
     pub(crate) fn voice_session_for(&self, said: &str) -> Result<String, String> {
         let said = said.trim();
         let (sessions, leftovers) = self.sidebar_places();
+        // Words that name a project ("the voice one in class code") look only there.
+        let (within, words) = self.project_in_words(None, said);
+        let (sessions, leftovers): (Vec<&Session>, Vec<Leftover>) = match &within {
+            Some(p) if !words.is_empty() => (sessions.into_iter().filter(|s| s.project_id == *p).collect(), leftovers.into_iter().filter(|l| l.project_id == *p).collect()),
+            _ => (sessions, leftovers),
+        };
+        let said = if within.is_some() && !words.is_empty() { words.as_str() } else { said };
         if let Some(s) = sessions.iter().find(|s| s.id == said) {
             return Ok(s.id.clone());
         }
@@ -379,10 +440,10 @@ mod tests {
         let mut rows = text.lines();
         assert_eq!(rows.next(), Some("Count: glasscode has 2 open sessions (each is a row in the sidebar)."));
         assert_eq!(rows.next(), Some("Not sessions: 9 worktrees have no session. They are closed: never count, list or open them as a session."));
-        assert_eq!(rows.next(), Some("id s1: \"Why the finished state and orange icon lag\" in glasscode, branch glasscode/s1, working"));
+        assert_eq!(rows.next(), Some("ref s1: \"Why the finished state and orange icon lag\" in glasscode, branch glasscode/s1, working"));
         assert_eq!(
             rows.next(),
-            Some("id s2: \"Voice talker\" in glasscode, branch glasscode/s2, not started since Glasscode opened (it starts when opened), pull request #347 (on the Mac's screen now)")
+            Some("ref s2: \"Voice talker\" in glasscode, branch glasscode/s2, not started since Glasscode opened (it starts when opened), pull request #347 (on the Mac's screen now)")
         );
         assert_eq!(rows.next(), None);
         // Every project: a count for each, and the total.
@@ -406,12 +467,12 @@ mod tests {
 
         let ranked = session_find::rank("orange icon lag", &entries);
         let text = search_text("orange icon lag", &lines, &ranked, &[], None);
-        assert!(text.starts_with("Best fit for \"orange icon lag\" (fits: orange, icon, lag): id s1:"), "{text}");
+        assert!(text.starts_with("Best fit for \"orange icon lag\" (fits: orange, icon, lag): ref s1:"), "{text}");
 
         let ranked = session_find::rank("the voice one", &entries);
         let text = search_text("the voice one", &lines, &ranked, &[], Some("glasscode"));
         assert!(text.starts_with("2 open sessions in glasscode fit \"the voice one\" alike; ask which one is meant:"), "{text}");
-        assert!(text.contains("id s2:") && text.contains("id s3:"), "{text}");
+        assert!(text.contains("ref s2:") && text.contains("ref s3:"), "{text}");
 
         // Nothing open fits, a closed worktree does: it is said to be closed.
         let ranked = session_find::rank("codex full auto", &entries);

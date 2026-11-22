@@ -14,7 +14,7 @@ import LiveKit
 //   lost, 5 the worker reported a failure and closed the room.
 //
 //   stdin    {"say":{"id":"…","text":"…"}}   {"stop":true}
-//            {"config":{"name":"…","listen":"wake|always|never","talker":true,"place":"mac"}}
+//            {"config":{"name":"…","listen":"wake|always|never","talker":true,"place":"mac","now":"…","recent":[{"who","text"}]}}
 //            {"result":{"call":"…","text":"…"}}   (what one of the talker's tools found)
 //            ("wake": after the manager's name; "always": everything counts, as while the
 //            talk key is held; "never": the microphone is off)
@@ -44,6 +44,11 @@ struct Options {
     /// The app runs the talker's tools (it says so in `config`).
     var talker = false
     var place = ""
+    /// Where the person is now, in a sentence ("On the Mac's screen now: …"), for the talker.
+    var now = ""
+    /// The conversation's last turns ({"who": "person|manager", "text"}), so a talk started
+    /// again carries on from them.
+    var recent: [[String: String]] = []
     /// For tests: join and speak the protocol, but touch no microphone and play nothing.
     var noAudio = false
 
@@ -195,6 +200,8 @@ final class Helper {
         var config: [String: Any] = ["name": options.name, "listen": options.listen]
         if options.talker { config["talker"] = true }
         if !options.place.isEmpty { config["place"] = options.place }
+        if !options.now.isEmpty { config["now"] = options.now }
+        if !options.recent.isEmpty { config["recent"] = options.recent }
         await publish(topicConfig, config)
     }
 
@@ -218,6 +225,13 @@ final class Helper {
             if let listen = config["listen"] as? String, listenValues.contains(listen) { options.listen = listen }
             if let talker = config["talker"] as? Bool { options.talker = talker }
             if let place = config["place"] as? String { options.place = place }
+            if let now = config["now"] as? String { options.now = now }
+            if let recent = config["recent"] as? [[String: Any]] {
+                options.recent = recent.compactMap { turn in
+                    guard let who = turn["who"] as? String, let text = turn["text"] as? String, !text.isEmpty else { return nil }
+                    return ["who": who, "text": text]
+                }
+            }
             await applyMicrophone()
             await sendConfig()
         }

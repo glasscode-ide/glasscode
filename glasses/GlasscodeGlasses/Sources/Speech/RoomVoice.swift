@@ -41,6 +41,9 @@ final class RoomVoice {
 
     private(set) var state: State = .off
     var live: Bool { room != nil }
+    /// The person made it silent: the microphone is off and nothing said counts, until they
+    /// talk again. The talk stays open.
+    private(set) var muted = false
     var speaking: Bool { state == .speaking }
     /// The room's worker has a talker: it retells the manager's answer itself, so the answer goes
     /// to it whole, once, not sentence by sentence.
@@ -62,6 +65,10 @@ final class RoomVoice {
     private var events: RoomEvents?
     private var identity = ""
     private var name = "Manager"
+    /// Where the person is ("On the Mac's screen now: …") and the conversation's last turns, for
+    /// the talker: it starts from there, and a talk started again carries on.
+    private var now = ""
+    private var recent: [[String: String]] = []
     private var workerHere = false
     private var generation = 0
     private var lastActivity = Date()
@@ -143,6 +150,17 @@ final class RoomVoice {
         await publish(Topic.say, ["id": id, "text": text])
     }
 
+    /// Make it silent, or let it listen again: the microphone goes off (or on), what it was
+    /// saying stops, and the worker is told that nothing said counts.
+    func setMuted(_ on: Bool) async {
+        guard let room, on != muted else { return }
+        muted = on
+        try? await room.localParticipant.setMicrophone(enabled: !on)
+        if on { await publish(Topic.stop, [:]) }
+        await sendConfig()
+        onState?(state)
+    }
+
     /// Stop speaking now.
     func stop() async {
         guard room != nil else { return }
@@ -151,6 +169,7 @@ final class RoomVoice {
 
     /// Leave the room and give the microphone back.
     func hangUp() async {
+        muted = false
         generation += 1
         stopQuietTimer()
         let leaving = room
@@ -169,7 +188,18 @@ final class RoomVoice {
 
     private func sendConfig() async {
         // The person opened this talk: everything said counts, no wake word.
-        await publish(Topic.config, ["name": name, "listen": "always", "talker": true, "place": "glasses"])
+        var config: [String: Any] = ["name": name, "listen": muted ? "never" : "always", "talker": true, "place": "glasses"]
+        if !now.isEmpty { config["now"] = now }
+        if !recent.isEmpty { config["recent"] = recent }
+        await publish(Topic.config, config)
+    }
+
+    /// Where the person is, and what was said lately: sent now when it changed and a talk is open.
+    func context(now: String, recent: [[String: String]]) async {
+        guard now != self.now || recent != self.recent else { return }
+        self.now = now
+        self.recent = recent
+        if room != nil { await sendConfig() }
     }
 
     private func publish(_ topic: String, _ object: [String: Any], in target: Room? = nil) async {

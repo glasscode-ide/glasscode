@@ -551,6 +551,13 @@ impl TerminalView {
 
     pub(crate) fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.last_typed = Some(std::time::Instant::now());
+        self.paste_as_glasscode(text, cx);
+    }
+
+    /// A paste Glasscode makes itself (a queued message, `ci_fix::deliver`): it is not the person
+    /// typing, so the session's next message does not wait for them to stop
+    /// (`delivery_session::QUIET_TYPING_MS`).
+    pub(crate) fn paste_as_glasscode(&mut self, text: &str, cx: &mut Context<Self>) {
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         let payload = if bracketed {
             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))

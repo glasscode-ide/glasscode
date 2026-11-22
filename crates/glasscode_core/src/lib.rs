@@ -57,6 +57,7 @@ pub mod owners;
 pub mod naming;
 pub mod model;
 pub mod learning;
+pub mod lens;
 pub mod movein;
 pub mod ops;
 pub mod paths;

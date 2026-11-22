@@ -212,7 +212,9 @@ final class ManagerLink: ObservableObject {
         for _ in 0..<2 {
             let poll = carrier === server ? pollWriting(on: carrier, onUpdate) : nil
             defer { poll?.cancel() }
-            let result = try await carrier.call("manager.ask", ["text": text, "voice": true, "focus": focus, "client_id": clientID], timeout: 180)
+            // The Mac may hold it while the manager answers another question first (up to 5
+            // minutes), then answers it (up to 200 s).
+            let result = try await carrier.call("manager.ask", ["text": text, "voice": true, "focus": focus, "client_id": clientID], timeout: 540)
             let json = result as? JSON ?? [:]
             if let elsewhere = json.string("elsewhere") {
                 // The other end is home now: ask there.
@@ -273,11 +275,38 @@ final class ManagerLink: ObservableObject {
         return json.array("items")
     }
 
+    // MARK: - one place everywhere (docs/lens-everywhere.md)
+
+    /// Open a place on the Mac (its window goes there, and every lens follows): its page.
+    func openPlace(_ place: String) async throws -> JSON {
+        guard let mac else { throw LinkError(text: "The Mac is not connected, so nothing opens on it now.") }
+        guard let json = try await mac.call("place.open", ["place": place], timeout: 15) as? JSON else { throw LinkError(text: "The Mac did not answer with the place.") }
+        return json
+    }
+
+    /// The page of a place (the Mac's window's when `place` is empty), without moving the window.
+    func placePage(_ place: String = "") async -> JSON? {
+        try? await mac?.call("place.get", ["place": place], timeout: 10) as? JSON
+    }
+
+    /// One of the voice's tools, answered by the Mac as its own voice answers it (`voice.tool`).
+    /// Nil: the Mac is not connected, or does not know it (then the phone answers itself).
+    func voiceTool(_ name: String, _ arguments: JSON) async -> String? {
+        guard let mac, let json = try? await mac.call("voice.tool", ["name": name, "arguments": arguments], timeout: 15) as? JSON else { return nil }
+        return json.string("text")
+    }
+
     // MARK: - sessions, Today, approvals
+
+    /// The Mac's projects, by name, as its last `state` said (the voice names them exactly).
+    private(set) var projects: [String] = []
 
     /// Sessions: the Mac's own when it answers, else the server's (with the Mac's it mirrors).
     func sessions() async -> [JSON] {
-        if let mac, let json = try? await mac.call("state", [:], timeout: 15) as? JSON { return json.array("sessions") }
+        if let mac, let json = try? await mac.call("state", [:], timeout: 15) as? JSON {
+            projects = json.array("projects").compactMap { $0.string("name") }
+            return json.array("sessions")
+        }
         if let server, let json = try? await server.call("state", [:], timeout: 15) as? JSON {
             return json.array("sessions") + json.array("mirrors")
         }

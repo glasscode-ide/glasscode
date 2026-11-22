@@ -1,8 +1,10 @@
 import MWDATDisplay
+import UIKit
 
 /// The lens's cards (G12, the plan's section 5), drawn with the toolkit's FlexBox: 600 by 600,
 /// redrawn whole on each change. Short words, one thing at a time; the focused row or button has
-/// the card background. This file imports only MWDATDisplay, so `Text` is the toolkit's.
+/// the card background. The colour is in `LensArt`'s small images (the toolkit's text has two
+/// colours only). This file imports no SwiftUI, so `Text` and `Image` are the toolkit's.
 enum LensCards {
     static func render(_ model: LensModel, voice: String) -> FlexBox {
         let focus = model.focus
@@ -18,6 +20,81 @@ enum LensCards {
         case .question(let q): return question(q, focus: focus)
         case .note(let title, let body, let tone, let open): return note(title, body, tone: tone, open: open != nil, focused: focus == 0)
         case .message(let title, let body): return message(title, body)
+        case .page(let page): return self.page(page, focus: focus, voice: voice)
+        }
+    }
+
+    /// How many of a page's rows the lens shows at once.
+    static let pageRows = 3
+
+    /// A place's page: what the Mac's window shows, as the lens shows it. The status orb and the
+    /// accent rule carry its colour; four rows at a time, the focused one on the card background.
+    static func page(_ p: LensPage, focus: Int, voice: String) -> FlexBox {
+        let window = p.window(focus: max(focus, 0), count: pageRows)
+        return FlexBox(direction: .column, spacing: 8) {
+            FlexBox(direction: .row, spacing: 10, crossAlignment: .center) {
+                Image(image: LensArt.orb(p.tone), sizePreset: .icon)
+                FlexBox(direction: .column, spacing: 2) {
+                    Text(clip(p.eyebrow.isEmpty ? kindWord(p.kind) : p.eyebrow, 44), style: .meta, color: .secondary)
+                    if !p.status.isEmpty { Text(clip(p.status, 40), style: .meta) }
+                }
+            }
+            Text(clip(p.title, p.items.isEmpty ? 64 : 44), style: .heading)
+            if let meter = p.meter {
+                Image(image: LensArt.meter(meter.value, p.tone), sizePreset: .fill)
+                Text(clip(meter.label, 60), style: .meta, color: .secondary)
+            } else {
+                Image(image: LensArt.rule(p.tone), sizePreset: .fill)
+            }
+            if !p.body.isEmpty && (p.items.isEmpty || focus < 0) {
+                Text(clip(p.body, p.items.isEmpty ? 200 : 70), style: .meta, color: .secondary)
+            }
+            for (offset, item) in window.rows.enumerated() {
+                pageRow(item, focused: focus == window.start + offset)
+            }
+            hint(pageHint(p, focus: focus, voice: voice))
+        }
+    }
+
+    private static func pageRow(_ item: LensPage.Item, focused: Bool) -> FlexBox {
+        FlexBox(direction: .row, spacing: 10, crossAlignment: .center) {
+            Image(image: LensArt.dot(item.tone), sizePreset: .icon)
+            FlexBox(direction: .column, spacing: 2) {
+                Text((focused && item.open != nil ? "▸ " : "") + clip(item.title, 36), style: .body)
+                if !item.detail.isEmpty { Text(clip(item.detail, 44), style: .meta, color: .secondary) }
+            }
+        }
+        .padding(6)
+        .background(focused ? .card : .none)
+    }
+
+    private static func pageHint(_ p: LensPage, focus: Int, voice: String) -> String {
+        if voice == "speaking" { return "Pinch to stop" }
+        if p.items.isEmpty {
+            switch (p.prev != nil, p.next != nil) {
+            case (true, true): return "▼ next · ▲ previous · ◀ back"
+            case (false, true): return "▼ next · ◀ back · pinch to talk"
+            case (true, false): return "▲ previous · ◀ back · pinch to talk"
+            default: return "Pinch to talk about it · ◀ back"
+            }
+        }
+        let count = p.total > p.items.count ? "\(p.total)" : "\(p.items.count)"
+        if focus < 0 { return "▼ the rows (\(count)) · pinch to talk" }
+        let opens = p.items.indices.contains(focus) && p.items[focus].open != nil
+        return "\(focus + 1) of \(count) · ▼▲ move" + (opens ? " · ▶ open" : "") + " · ◀ back"
+    }
+
+    private static func kindWord(_ kind: String) -> String {
+        switch kind {
+        case "session": return "Session"
+        case "tickets": return "Tickets"
+        case "ticket": return "Ticket"
+        case "prs": return "Pull requests"
+        case "pr": return "Pull request"
+        case "usage": return "Usage"
+        case "today": return "Today"
+        case "sessions": return "Sessions"
+        default: return "Glasscode"
         }
     }
 
@@ -41,7 +118,7 @@ enum LensCards {
                 Text("Listening", style: .heading)
             }
             Text(heard.isEmpty ? "Say what you want…" : clip(heard, 220), style: .body, color: heard.isEmpty ? .secondary : .primary)
-            hint("A pause sends it · pinch sends now · swipe ◀ cancels")
+            hint("A pause sends it · ▼ silent · ◀ ends the talk")
         }
     }
 
@@ -219,6 +296,7 @@ enum LensCards {
     private static func icon(_ tone: LensModel.Tone) -> IconName {
         switch tone {
         case .ok: return .checkmarkCircle
+        case .busy: return .clock
         case .warn: return .exclamationCircle
         case .bad: return .exclamationTriangle
         case .plain: return .bell

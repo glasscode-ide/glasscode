@@ -6,9 +6,12 @@
 //! of the session's terminal (ops-m2). It is pure: the app asks it what to do next and tells it
 //! what happened.
 //!
-//! - **Preconditions** ([`ready`]): the session runs, its turn is over (idle), no prompt or
-//!   question is on its screen, nothing is typed in its message box, and nobody typed in it for
-//!   [`QUIET_TYPING_MS`]. Until then a delivery waits.
+//! - **Preconditions** ([`ready`]): the session runs, no prompt or question is on its screen (and
+//!   its hooks say it waits for nobody), nothing is typed in its message box, nobody typed in it
+//!   for [`QUIET_TYPING_MS`], and its turn is over (idle). A message sent to a session
+//!   (`session.send`, [`Delivery::while_working`]) does not wait for the turn: it goes in as a
+//!   message typed in a chat does, and Claude keeps it and reads it at its next step. Until then a
+//!   delivery waits.
 //! - **Expiry and supersede** ([`Queues::push`], [`Queues::expire`]): a delivery has an expiry,
 //!   and a group with a version (the CI fix of `acme/app#42` at a head SHA): a new version cancels
 //!   the older ones of its group, and the same version again is the same delivery (two playbooks
@@ -17,8 +20,10 @@
 //! - **Never on a permission prompt** (land-m3): right before the Enter the app checks again that
 //!   no prompt is showing and that the box holds exactly the typed text ([`may_press_enter`]).
 //! - **A receipt** (ops-19): each delivery carries a short marker in its last line. The session's
-//!   `UserPromptSubmit` hook event with that marker is the receipt ([`probe`]); a claim cut off by a
-//!   crash is settled by the same check (`effects::settle`).
+//!   `UserPromptSubmit` hook event with that marker is the receipt ([`probe`]). A message typed
+//!   while Claude works fires no such event: its transcript's queue holds it at once, and that is
+//!   the receipt ([`queued`]). A claim cut off by a crash is settled by the same checks
+//!   (`effects::settle`).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -58,6 +63,11 @@ pub struct Delivery {
     pub expires_ms: u64,
     /// Goes before the others (an interrupt).
     pub urgent: bool,
+    /// It goes in while the agent works, as a message typed in its chat does: Claude keeps it and
+    /// reads it at its next step ([`Inputs::takes_while_working`]). The person's and the manager's
+    /// `session.send`. The rest (the CI fix, the manager's own nudges, a child session's report,
+    /// another session's message) wait for the turn to end.
+    pub while_working: bool,
     /// How many times it was not sent (a question came up before the Enter); it is tried again
     /// up to [`MAX_TRIES`] times.
     pub tries: u32,
@@ -86,6 +96,7 @@ impl Delivery {
             queued_ms: now_ms,
             expires_ms: now_ms.saturating_add(EXPIRY_MS),
             urgent: false,
+            while_working: false,
             tries: 0,
             depth: 0,
             causes: Vec::new(),
@@ -132,10 +143,13 @@ impl Delivery {
 pub struct Inputs {
     /// Its terminal is open and its program runs.
     pub running: bool,
-    /// Its agent is working, or waits for an answer (hooks, or a screen that is not quiet yet).
+    /// Its agent is working (hooks, or a screen that is not quiet yet).
     pub busy: bool,
-    /// A prompt or question is on its screen.
+    /// A prompt or question is on its screen, or its hooks say it waits for the person.
     pub asking: bool,
+    /// Its agent keeps a message typed while it works and reads it at its next step (Claude, whose
+    /// transcript's queue says at once that it has it).
+    pub takes_while_working: bool,
     /// Text is typed in its message box.
     pub draft: bool,
     /// How long ago the person last typed in it.
@@ -168,13 +182,14 @@ impl Wait {
     }
 }
 
-/// Whether a session can take a delivery now.
-pub fn ready(inputs: &Inputs) -> Result<(), Wait> {
+/// Whether a session can take a delivery now: one that goes in while its agent works
+/// ([`Delivery::while_working`]) waits for the turn only when the agent cannot take it then.
+pub fn ready(inputs: &Inputs, while_working: bool) -> Result<(), Wait> {
     if !inputs.running {
         Err(Wait::NotRunning)
     } else if inputs.asking {
         Err(Wait::Asking)
-    } else if inputs.busy {
+    } else if inputs.busy && !(while_working && inputs.takes_while_working) {
         Err(Wait::Working)
     } else if inputs.draft {
         Err(Wait::Draft)
@@ -297,7 +312,9 @@ impl Queues {
     }
 
     /// What to do next for `session`, seeing `inputs`: the first delivery, when the session can
-    /// take it and none is in flight (it is in flight from now on).
+    /// take it and none is in flight (it is in flight from now on). While the agent works, the
+    /// first one that goes in while it works ([`Delivery::while_working`]) passes the ones that wait
+    /// only for the turn to end (a CI fix waiting does not hold the person's message).
     pub fn next(&mut self, session: &str, inputs: &Inputs) -> Step {
         let Some(lane) = self.lanes.get_mut(session) else { return Step::Nothing };
         if lane.in_flight.is_some() {
@@ -308,12 +325,18 @@ impl Queues {
             lane.wait = None;
             return Step::Nothing;
         }
-        if let Err(wait) = ready(inputs) {
-            lane.wait = Some(wait);
-            return Step::Wait(wait);
-        }
-        lane.wait = None;
-        let delivery = lane.waiting.pop_front().expect("not empty");
+        let while_working = lane.waiting.front().is_some_and(|d| d.while_working);
+        let at = match ready(inputs, while_working) {
+            Ok(()) => 0,
+            Err(Wait::Working) if ready(inputs, true).is_ok() && lane.waiting.iter().any(|d| d.while_working) => lane.waiting.iter().position(|d| d.while_working).expect("one goes while it works"),
+            Err(wait) => {
+                lane.wait = Some(wait);
+                return Step::Wait(wait);
+            }
+        };
+        // What the ones left wait for: the turn, when one waits only for it.
+        lane.wait = (at > 0).then_some(Wait::Working);
+        let delivery = lane.waiting.remove(at).expect("not empty");
         lane.in_flight = Some(delivery.clone());
         Step::Send(delivery)
     }
@@ -352,6 +375,12 @@ impl Queues {
     /// How many wait for `session`, the one in flight not counted.
     pub fn waiting(&self, session: &str) -> usize {
         self.lanes.get(session).map_or(0, |lane| lane.waiting.len())
+    }
+
+    /// How many waiting for `session` go before a new one: all of them, or for one that goes in
+    /// while the agent works, the others that do (it passes the rest).
+    pub fn ahead(&self, session: &str, while_working: bool) -> usize {
+        self.lanes.get(session).map_or(0, |lane| lane.waiting.iter().filter(|d| !while_working || d.while_working).count())
     }
 
     /// What the session's header says of its queue: how many messages wait, and until when
@@ -398,6 +427,36 @@ pub fn probe(marker: &str, events: &str) -> ProbeResult {
     if restarted { ProbeResult::DidNotHappen } else { ProbeResult::Unknown }
 }
 
+/// Whether Claude has the delivery whose marker is `marker` in its queue, from lines of its
+/// transcript: a message typed while it works is written there at once (a `queue-operation`
+/// "enqueue"), and again when it reads it between two steps (a `queued_command` attachment).
+/// Neither fires `UserPromptSubmit`.
+pub fn queued(marker: &str, transcript: &str) -> bool {
+    use serde_json::Value;
+    let marker = normal(marker);
+    transcript.lines().filter(|line| line.contains("queue")).any(|line| {
+        let Ok(value) = serde_json::from_str::<Value>(line) else { return false };
+        let text = match value.get("type").and_then(Value::as_str) {
+            Some("queue-operation") if value["operation"] == "enqueue" => value["content"].as_str().map(str::to_string),
+            Some("attachment") if value["attachment"]["type"] == "queued_command" => match &value["attachment"]["prompt"] {
+                Value::String(text) => Some(text.clone()),
+                Value::Array(blocks) => Some(blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(" ")),
+                _ => None,
+            },
+            _ => None,
+        };
+        text.is_some_and(|text| normal(&text).contains(&marker))
+    })
+}
+
+/// The agent's transcript, as the session's latest hook event names it.
+pub fn transcript_path(events: &str) -> Option<std::path::PathBuf> {
+    events.lines().rev().filter(|line| line.contains("transcript_path")).find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        value.get("transcript_path")?.as_str().filter(|p| !p.is_empty()).map(std::path::PathBuf::from)
+    })
+}
+
 /// What a probe of a `session.send` claim needs: the session's events file length when it was
 /// claimed, and the marker.
 pub fn evidence(events_len: u64, marker: &str) -> serde_json::Value {
@@ -411,7 +470,16 @@ pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeR
     let from = evidence.get("events_len")?.as_u64()?;
     let bytes = std::fs::read(crate::agents::events_file(session)).unwrap_or_default();
     let from = usize::try_from(from).unwrap_or(usize::MAX).min(bytes.len());
-    Some(probe(marker, &String::from_utf8_lossy(&bytes[from..])))
+    let found = probe(marker, &String::from_utf8_lossy(&bytes[from..]));
+    if matches!(found, ProbeResult::Happened(_)) {
+        return Some(found);
+    }
+    // Typed while Claude worked: its transcript's queue took it (the marker is the delivery's own).
+    let transcript = transcript_path(&String::from_utf8_lossy(&bytes)).and_then(|path| std::fs::read(path).ok());
+    if transcript.is_some_and(|t| queued(marker, &String::from_utf8_lossy(&t))) {
+        return Some(ProbeResult::Happened(serde_json::json!({ "receipt": "queued" })));
+    }
+    Some(found)
 }
 
 #[cfg(test)]
@@ -463,6 +531,74 @@ mod tests {
         queues.push(delivery("s2", "hello"));
         assert!(matches!(queues.next("s2", &idle()), Step::Send(_)));
         assert_eq!(queues.sessions(), ["s1", "s2"]);
+    }
+
+    /// A message sent to a session goes in while Claude works, as one typed in its chat does; it
+    /// still waits for a question, the person's text in the box and the person typing. The other
+    /// deliveries (the CI fix, a nudge) wait for the turn, and so does every one to an agent that
+    /// does not keep what is typed while it works.
+    #[test]
+    fn a_message_goes_in_while_claude_works() {
+        let claude = Inputs { busy: true, takes_while_working: true, ..idle() };
+        assert_eq!(ready(&claude, true), Ok(()));
+        assert_eq!(ready(&claude, false), Err(Wait::Working));
+        assert_eq!(ready(&Inputs { takes_while_working: false, ..claude }, true), Err(Wait::Working));
+        assert_eq!(ready(&Inputs { asking: true, ..claude }, true), Err(Wait::Asking));
+        assert_eq!(ready(&Inputs { draft: true, ..claude }, true), Err(Wait::Draft));
+        assert_eq!(ready(&Inputs { typed_ms_ago: Some(1_000), ..claude }, true), Err(Wait::Typing));
+        assert_eq!(ready(&Inputs { running: false, ..claude }, true), Err(Wait::NotRunning));
+
+        // Several in a row: each goes as soon as the one before it is in, while the agent works.
+        let mut queues = Queues::default();
+        let send = |text: &str| Delivery { while_working: true, ..delivery("s1", text) };
+        queues.push(send("first"));
+        queues.push(send("second"));
+        queues.push(ci("s1", "aaa"));
+        let Step::Send(first) = queues.next("s1", &claude) else { panic!("not sent while Claude works") };
+        assert_eq!(queues.next("s1", &claude), Step::Wait(Wait::InFlight));
+        queues.finish("s1", &first.id);
+        let Step::Send(second) = queues.next("s1", &claude) else { panic!("the second one waited") };
+        assert_eq!(second.text, "second");
+        queues.finish("s1", &second.id);
+        // The CI fix behind them waits for the turn to end.
+        assert_eq!(queues.next("s1", &claude), Step::Wait(Wait::Working));
+        // A message sent after it passes it: the CI fix does not hold the person's message.
+        queues.push(send("third"));
+        assert_eq!(queues.ahead("s1", true), 1);
+        assert_eq!(queues.ahead("s1", false), 2);
+        let Step::Send(third) = queues.next("s1", &claude) else { panic!("held behind the CI fix") };
+        assert_eq!(third.text, "third");
+        queues.finish("s1", &third.id);
+        // Never past a question.
+        queues.push(send("fourth"));
+        assert_eq!(queues.next("s1", &Inputs { asking: true, ..claude }), Step::Wait(Wait::Asking));
+        let Step::Send(fourth) = queues.next("s1", &claude) else { panic!() };
+        queues.finish("s1", &fourth.id);
+        assert_eq!(queues.header("s1").as_deref(), Some("1 message waits until the agent's turn is over"));
+        assert!(matches!(queues.next("s1", &idle()), Step::Send(d) if d.text == "CI failed at aaa"));
+    }
+
+    /// Claude's transcript holds a message typed while it works at once ("enqueue"), and again when
+    /// it reads it (a `queued_command`, its prompt text or blocks): either is the receipt.
+    #[test]
+    fn the_transcript_queue_with_the_marker_is_the_receipt() {
+        let d = Delivery { note: Some("(Sent by Glasscode because the manager asked it to.)".into()), ..delivery("s1", "also check the docs") };
+        let typed = d.typed();
+        let enqueue = serde_json::json!({ "type": "queue-operation", "operation": "enqueue", "content": format!("<pasted_content id=\"a1\">\n{typed}\n</pasted_content>") }).to_string();
+        let dequeue = serde_json::json!({ "type": "queue-operation", "operation": "dequeue" }).to_string();
+        let read = serde_json::json!({ "type": "attachment", "attachment": { "type": "queued_command", "commandMode": "prompt", "prompt": [{ "type": "text", "text": typed }] } }).to_string();
+        let other = serde_json::json!({ "type": "queue-operation", "operation": "enqueue", "content": "something else [gc:00000000]" }).to_string();
+        assert!(queued(&d.marker(), &format!("{other}\n{enqueue}\n")));
+        assert!(queued(&d.marker(), &format!("{dequeue}\n{read}\n")));
+        assert!(!queued(&d.marker(), &format!("{other}\n{dequeue}\nnot json queue\n")));
+        // Said in a user message, not queued: not this receipt (the hook's is).
+        let said = serde_json::json!({ "type": "user", "message": { "content": typed } }).to_string();
+        assert!(!queued(&d.marker(), &said));
+
+        let start = serde_json::json!({ "hook_event_name": "SessionStart", "transcript_path": "/t/old.jsonl" }).to_string();
+        let tool = serde_json::json!({ "hook_event_name": "PreToolUse", "transcript_path": "/t/new.jsonl" }).to_string();
+        assert_eq!(transcript_path(&format!("{start}\n{tool}\n{{\"hook_event_name\":\"Stop\"}}\n")), Some(std::path::PathBuf::from("/t/new.jsonl")));
+        assert_eq!(transcript_path("not json\n"), None);
     }
 
     #[test]

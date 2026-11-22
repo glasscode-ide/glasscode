@@ -303,6 +303,9 @@ pub mod events {
     pub const TODAY: &str = "today";
     /// Where the manager is home changed: `manager.home`'s answer.
     pub const HOME: &str = "manager.home";
+    /// The place the Mac's window shows, or what it shows there, changed: its lens page
+    /// (`lens::Page`). The lens shows the same place as the Mac (`docs/lens-everywhere.md`).
+    pub const PLACE: &str = "place";
 }
 
 /// An event as one line.
@@ -423,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_lists_agree_on_both_ends() {
-        for method in ["manager.ask", "manager.home", "manager.conversation", "manager.stop", "device.presence", "today.op", "sessions.send"] {
+        for method in ["manager.ask", "manager.home", "manager.conversation", "manager.stop", "device.presence", "today.op", "sessions.send", "place.open", "place.get", "voice.tool"] {
             assert!(allowed(method), "{method}");
         }
         for method in ["sessions.create", "phones.add", "caller.declare", "owners.begin", "session.new", "approvals.decide"] {

@@ -30,6 +30,9 @@ final class AppModel: ObservableObject {
     private var asking = false
     private var askedAt = Date()
     private var askActivity = ""
+    /// What the person asked while an answer was on its way: each is asked right after the one
+    /// before, in order, as the Mac's own voice does. Nothing is refused or held back.
+    private var waitingAsks: [String] = []
     /// The room's sentences go out one after another.
     private var sayChain: Task<Void, Never>?
     /// When joining the room last failed: the phone's own speech for a minute.
@@ -43,6 +46,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var problem: String?
     /// The answer being written, for the phone's screen.
     @Published private(set) var writing = ""
+    /// The place the Mac's window shows, as the lens and the phone show it (`docs/lens-everywhere.md`).
+    @Published private(set) var place: LensPage?
+    /// A talk with the voice on the Mac is open, and whether the person made it silent.
+    @Published private(set) var talkOpen = false
+    @Published private(set) var voiceMuted = false
+    /// Where the person is and what is open, as the Mac says it for the voice (`place` events).
+    private var macNow = ""
+    /// The place the person opened from here and is waiting for (it goes on top of the lens).
+    private var openedHere: String?
+    /// The place the Mac last said its window shows: a page for it again only updates it.
+    private var macPlace: String?
 
     private var clock: Task<Void, Never>?
     private var sentences = Sentences()
@@ -59,8 +73,11 @@ final class AppModel: ObservableObject {
         room.onHeard = { [weak self] text, handled in self?.roomHeard(text, handled: handled) }
         room.onSaid = { [weak self] text in self?.roomSaid(text) }
         room.onState = { [weak self] _ in
-            self?.reportPresence()
-            self?.redraw()
+            guard let self else { return }
+            self.talkOpen = self.room.live
+            self.voiceMuted = self.room.muted
+            self.reportPresence()
+            self.redraw()
         }
         room.onTool = { [weak self] name, arguments in await self?.roomTool(name, arguments) ?? "This phone is busy." }
         room.onEnded = { [weak self] why in self?.roomEnded(why) }
@@ -141,6 +158,39 @@ final class AppModel: ObservableObject {
         case .allow(let card): Task { await decide(card, allow: true) }
         case .deny(let card): Task { await decide(card, allow: false) }
         case .answer(let session, let option): Task { await answer(session, option) }
+        case .place(let place): Task { await openPlace(place) }
+        case .mute: setMuted(true)
+        }
+    }
+
+    /// Make the voice silent, or let it listen again (the phone's button, the band's swipe down
+    /// while it listens). Silent: the microphone is off, it stops speaking, and answers that
+    /// come are shown, not spoken.
+    func setMuted(_ on: Bool) {
+        guard room.live else { return }
+        Task {
+            await room.setMuted(on)
+            voiceMuted = room.muted
+            var model = lens
+            if on { model.show(.note(title: "Silent", body: "The microphone is off. Pinch to talk again.", tone: .plain, open: nil)) }
+            else { model.show(.listening("")) }
+            lens = model
+            reportPresence()
+            redraw()
+        }
+    }
+
+    /// End the talk: leave the voice room and give the microphone back.
+    func endTalk() {
+        Task {
+            await room.hangUp()
+            talkOpen = false
+            voiceMuted = false
+            var model = lens
+            if case .listening = model.card { model.back() }
+            lens = model
+            reportPresence()
+            redraw()
         }
     }
 
@@ -149,6 +199,10 @@ final class AppModel: ObservableObject {
     func talk() {
         guard link.status == .connected else {
             showMessage("Not connected", problemText)
+            return
+        }
+        if room.live, room.muted {
+            setMuted(false)
             return
         }
         if room.live {
@@ -209,6 +263,8 @@ final class AppModel: ObservableObject {
     /// Join the Mac's voice room. False: there is none (or it failed), so the phone speaks itself.
     private func joinRoom() async -> Bool {
         if let at = roomFailedAt, Date().timeIntervalSince(at) < 60 { return false }
+        // The talk starts where the person is, and carries on from what was said.
+        tellVoice()
         do {
             let pass = try await link.voicePass()
             try await room.start(pass, name: link.home?.name ?? lens.glance.name)
@@ -265,17 +321,38 @@ final class AppModel: ObservableObject {
         case "ask_manager":
             let request = (arguments.string("request") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !request.isEmpty else { return "There was nothing to ask." }
-            if asking { return "The manager is still on the last request; ask again in a moment." }
+            // While it answers, the request waits its turn here and goes right after.
+            let waits = asking
             ask(request)
-            return "started"
+            return waits ? "started: it is answered right after the request the manager is on now" : "started"
         case "manager_progress":
             guard asking else { return "The manager is not working on anything now." }
             let doing = askActivity.isEmpty ? "" : ", now: \(askActivity)"
-            return "The manager has been working on it for \(Int(Date().timeIntervalSince(askedAt))) seconds\(doing)."
+            let more = waitingAsks.isEmpty ? "" : " \(waitingAsks.count) more \(waitingAsks.count == 1 ? "request waits" : "requests wait") to go after it."
+            return "The manager has been working on it for \(Int(Date().timeIntervalSince(askedAt))) seconds\(doing).\(more)"
         case "stop_manager":
-            guard asking else { return "Nothing was running." }
-            await link.stop()
-            return "Stopped."
+            guard asking || !waitingAsks.isEmpty else { return "Nothing was running." }
+            let dropped = waitingAsks.count
+            waitingAsks.removeAll()
+            if asking { await link.stop() }
+            return dropped > 0 ? "Stopped, and the \(dropped) waiting \(dropped == 1 ? "request is" : "requests are") dropped." : "Stopped."
+        case "list_sessions" where link.macConnected, "open_place" where link.macConnected:
+            // The Mac answers as its own voice does (search, counts, what is open): the same
+            // answer from every device. It opens a place on the Mac, and the lens follows it.
+            if let text = await link.voiceTool(name, arguments) {
+                // What the voice opened is on the lens now, whether or not the Mac was there already.
+                if name == "open_place", text.hasPrefix("Shown"), let json = await link.placePage(), let page = LensPage(json) { showPlace(page) }
+                return text
+            }
+            return await roomToolHere(name, arguments)
+        default:
+            return await roomToolHere(name, arguments)
+        }
+    }
+
+    /// The tools this phone answers itself (without the Mac: the server only).
+    private func roomToolHere(_ name: String, _ arguments: JSON) async -> String {
+        switch name {
         case "list_sessions":
             await refresh()
             let needs = arguments.bool("needs_you") == true
@@ -308,6 +385,8 @@ final class AppModel: ObservableObject {
 
     /// Speak a sentence of the answer in the room, after the ones before it.
     private func roomSay(_ sentence: String) {
+        // Silent: the answer is on the lens and the phone, not spoken.
+        if room.muted { return }
         let before = sayChain
         let id = askID
         sayChain = Task { [room] in
@@ -333,8 +412,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Ask the manager: the answer streams to the lens and the voice.
+    /// Ask the manager: the answer streams to the lens and the voice. Asked while an answer is on
+    /// its way, it waits and is asked right after (one answer streams at a time).
     func ask(_ question: String) {
+        if asking {
+            waitingAsks.append(question)
+            return
+        }
         if !turn.isListening, case .idle = turn.state { turn.talk(now: Date()); turn.heard(question, now: .distantPast); _ = turn.tick(now: Date()) }
         BackgroundKeepAlive.shared.yield()
         // In the room the audio is the room's already.
@@ -364,6 +448,8 @@ final class AppModel: ObservableObject {
                 if room.live { roomSay("I could not get an answer: \(error.localizedDescription)") }
                 resumeKeepAlive()
             }
+            // The next request the person made meanwhile.
+            if !waitingAsks.isEmpty { ask(waitingAsks.removeFirst()) }
             await refresh()
         }
     }
@@ -445,6 +531,11 @@ final class AppModel: ObservableObject {
     private func focusNow() -> JSON {
         for card in lens.stack.reversed() {
             switch card {
+            case .page(let page):
+                var focus: JSON = ["view": page.kind, "place": page.place]
+                if page.kind == "session" { focus["session"] = page.place }
+                if page.kind == "pr", let n = Int(page.place.replacingOccurrences(of: "pr:", with: "")) { focus["pr"] = n }
+                return focus
             case .session(let s): return ["view": "session", "session": s.id] + (s.pr.map { ["pr": $0] } ?? [:])
             case .pr(let pr): return ["view": "pr", "pr": pr.number] + (pr.session.map { ["session": $0] } ?? [:])
             case .question(let q): return ["view": "card", "session": q.session]
@@ -457,6 +548,17 @@ final class AppModel: ObservableObject {
     // MARK: - places
 
     func open(_ target: LensModel.Target) async {
+        // One place everywhere: through the Mac when it is connected (its window goes there,
+        // and its page comes back to the lens); else the phone's own cards.
+        if link.macConnected {
+            switch target {
+            case .session(let id): return await openPlace(id)
+            case .pr(let number, _): return await openPlace("pr:\(number)")
+            case .today: return await openPlace("today")
+            case .project: return await openPlace("sessions")
+            case .conversation: break
+            }
+        }
         await refresh()
         var model = lens
         switch target {
@@ -529,7 +631,14 @@ final class AppModel: ObservableObject {
     private func event(_ name: String, _ data: Any) {
         let json = data as? JSON ?? [:]
         switch name {
+        case "place":
+            guard let page = LensPage(json) else { return }
+            if let now = json.string("now") { macNow = now }
+            takePlace(page)
         case "device.open":
+            // The Mac shows a session or a pull request in its window too: its page comes as a
+            // `place` event. A project or the conversation shows here as before.
+            if link.macConnected, ["session", "pr"].contains(json.string("kind") ?? "") { return }
             switch json.string("kind") {
             case "session": if let id = json.string("id") { Task { await open(.session(id)) } }
             case "pr":
@@ -548,6 +657,7 @@ final class AppModel: ObservableObject {
         case "manager.item":
             conversation.append(json)
             if conversation.count > 200 { conversation.removeFirst(conversation.count - 200) }
+            tellVoice()
         case "today":
             takeToday(json)
         default:
@@ -626,6 +736,86 @@ final class AppModel: ObservableObject {
         redraw()
     }
 
+    // MARK: - one place everywhere
+
+    /// Open a place on the Mac (its window goes there, and the lens follows); an OK card or a
+    /// session's question opens here, from what Today says.
+    func openPlace(_ place: String) async {
+        if let id = place.split(separator: ":").last.flatMap({ Int($0) }), place.hasPrefix("approval:") {
+            guard let a = today?.array("approvals").first(where: { $0.int("id") == id }) else { return showMessage("Not found", "That request is not waiting any more.") }
+            let payload = a.string("payload").flatMap { $0.isEmpty ? nil : $0 } ?? a.string("command") ?? ""
+            var model = lens
+            model.show(.approval(LensModel.ApprovalCard(id: id, launch: today?.string("launch") ?? "", who: a.string("who") ?? "", what: a.string("what") ?? "", payload: payload, fits: payload.count <= LensModel.lensFits)))
+            lens = model
+            return redraw()
+        }
+        if place.hasPrefix("question:") {
+            let session = String(place.dropFirst("question:".count))
+            await refresh()
+            guard let card = questionCard(session) else { return showMessage("Answered", "The session asks nothing now.") }
+            var model = lens
+            model.show(.question(card))
+            lens = model
+            return redraw()
+        }
+        openedHere = place
+        do {
+            if let page = LensPage(try await link.openPlace(place)) { takePlace(page) }
+        } catch {
+            openedHere = nil
+            showMessage("Not opened", (error as? LinkError)?.text ?? error.localizedDescription)
+        }
+    }
+
+    /// The Mac's window shows a place: its page on the lens and the phone, and the voice is told.
+    private func takePlace(_ page: LensPage) {
+        let opened = openedHere != nil && (openedHere == page.place || page.kind == "session")
+        if opened { openedHere = nil }
+        let moved = page.place != macPlace
+        macPlace = page.place
+        place = page
+        var model = lens
+        // The Mac went somewhere (or the person opened it): the lens goes there. Else only what
+        // is shown there changed: the page is updated where it is, and nothing moves.
+        if opened || moved { model.follow(page, opened: opened) } else { model.refresh(page) }
+        lens = model
+        redraw()
+        tellVoice()
+    }
+
+    /// Bring a place's page to the front of the lens: the person asked for it (by voice).
+    private func showPlace(_ page: LensPage) {
+        macPlace = page.place
+        place = page
+        var model = lens
+        model.follow(page, opened: true)
+        lens = model
+        redraw()
+    }
+
+    /// Where the person is and what was said lately, for the voice's talker.
+    private func tellVoice() {
+        var now = macNow
+        if now.isEmpty, let page = place {
+            let what = page.eyebrow.isEmpty ? "“\(page.title)”" : "\(page.eyebrow): “\(page.title)”"
+            let status = page.status.isEmpty ? "" : " (\(page.status.lowercased()))"
+            now = "On the Mac's screen and the lens now: \(what)\(status)."
+        }
+        // A project named by voice is often misheard ("class code"): the projects there are.
+        if macNow.isEmpty, !link.projects.isEmpty {
+            now += " The projects in Glasscode: \(link.projects.joined(separator: ", ")). A project the person names, however it was said or heard, is one of these: use its exact name."
+        }
+        let recent: [[String: String]] = conversation.compactMap { item in
+            let author = item["author"] as? String
+            let kind = item.object("kind")?.string("type")
+            guard let text = item.string("text"), !text.isEmpty else { return nil }
+            if author == "person", kind == "you" { return ["who": "person", "text": String(text.prefix(400))] }
+            if author == "chat", kind == "manager" { return ["who": "manager", "text": String(text.prefix(400))] }
+            return nil
+        }.suffix(8).map { $0 }
+        Task { await room.context(now: now, recent: recent) }
+    }
+
     // MARK: - keeping things current
 
     func refresh() async {
@@ -638,6 +828,8 @@ final class AppModel: ObservableObject {
         noteQuestions()
         if let snapshot = await link.today() { takeToday(snapshot) }
         if conversation.isEmpty { conversation = await link.conversation() }
+        if place == nil, let json = await link.placePage(), let page = LensPage(json) { takePlace(page) }
+        tellVoice()
         if let home = link.home {
             var model = lens
             model.glance.name = home.name

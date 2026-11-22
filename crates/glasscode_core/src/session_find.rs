@@ -68,9 +68,19 @@ pub fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
 }
 
-/// The words said that could name something, as said (filler and single letters left out).
+/// Filler that a title may still be made of ("Claude session", "Codex · main"): when nothing
+/// else was said, these are what the person named.
+const NAMES_TOO: &[&str] = &["claude", "codex", "session", "sessions", "project", "worktree", "branch", "agent", "ticket", "tab", "window", "screen", "pr", "pull", "request", "number", "title"];
+
+/// The words said that could name something, as said (filler and single letters left out). When
+/// only filler was said, the filler a title may be made of counts ("the Claude session").
 fn wanted(said: &str) -> Vec<String> {
-    words(said).into_iter().filter(|w| !FILLER.contains(&w.as_str()) && (w.chars().count() > 1)).collect()
+    let all = words(said);
+    let named: Vec<String> = all.iter().filter(|w| !FILLER.contains(&w.as_str()) && (w.chars().count() > 1)).cloned().collect();
+    if !named.is_empty() {
+        return named;
+    }
+    all.into_iter().filter(|w| NAMES_TOO.contains(&w.as_str())).collect()
 }
 
 fn numeric(word: &str) -> bool {
@@ -213,6 +223,40 @@ pub fn project(said: &str, names: &[&str]) -> Option<usize> {
     ranked.clear().map(|hit| hit.index)
 }
 
+/// The project named among the words said ("the voice session in class code"): its place in
+/// `names` and the words left once its name is taken out. Only a whole name counts, as said or
+/// heard: the same letters ("glass code", "hub 2.0"), one or two letters off a long one ("class
+/// code"), or the start of only one name ("hub"). None when no name is said, or the words could
+/// name several.
+pub fn named_project(said: &str, names: &[&str]) -> Option<(usize, String)> {
+    let flat = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let names: Vec<String> = names.iter().map(|n| flat(n)).collect();
+    let said = words(said);
+    let near = |joined: &str, name: &str, one_word: bool| -> bool {
+        let (j, n) = (joined.chars().count(), name.chars().count());
+        (j >= 6 && n >= 6 && edits(joined, name) <= 1) || (j >= 8 && n >= 8 && edits(joined, name) <= 2) || (one_word && j >= 3 && !FILLER.contains(&joined) && name.starts_with(joined))
+    };
+    // The same letters first (largest first: "where is my uni"), then a name as heard; a name as
+    // heard never starts or ends with a word like "in" ("in glasscode" is glasscode).
+    for exact in [true, false] {
+        for size in (1..=4).rev() {
+            for start in 0..said.len().saturating_sub(size - 1) {
+                let window = &said[start..start + size];
+                if !exact && size > 1 && [&window[0], &window[size - 1]].iter().any(|w| FILLER.contains(&w.as_str())) {
+                    continue;
+                }
+                let joined: String = window.concat();
+                let hits: Vec<usize> = names.iter().enumerate().filter(|(_, n)| if exact { joined == **n } else { near(&joined, n, size == 1) }).map(|(i, _)| i).collect();
+                if let [one] = hits.as_slice() {
+                    let rest: Vec<&str> = said.iter().enumerate().filter(|(i, _)| *i < start || *i >= start + size).map(|(_, w)| w.as_str()).collect();
+                    return Some((*one, rest.join(" ")));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,9 +363,14 @@ mod tests {
 
     #[test]
     fn filler_alone_names_nothing() {
-        let ranked = rank("open the session for me please", &glasscode());
+        let ranked = rank("open it for me please", &glasscode());
         assert_eq!(ranked.words, 0);
         assert!(ranked.hits.is_empty());
+        // A title made of such words is still found by them.
+        let plain = vec![entry("s1", "Claude session", "app", "main"), entry("s2", "Codex session", "app", "main")];
+        assert_eq!(best("open the Claude session", &plain).as_deref(), Some("s1"));
+        assert_eq!(best("the codex one", &plain).as_deref(), Some("s2"));
+        assert!(rank("the session", &plain).clear().is_none());
     }
 
     #[test]
@@ -337,6 +386,22 @@ mod tests {
         assert_eq!(project("whereismy", &names), None);
         assert_eq!(project("nightshift", &names), None);
         assert_eq!(project("", &names), None);
+    }
+
+    #[test]
+    fn a_project_named_among_the_words_is_taken_out_of_them() {
+        let names = ["hub2.0", "glasscode", "whereismypartner", "whereismyuni"];
+        assert_eq!(named_project("the voice session in class code", &names), Some((1, "the voice session in".into())));
+        assert_eq!(named_project("glass code voice", &names), Some((1, "voice".into())));
+        assert_eq!(named_project("what is running in Glasscode", &names), Some((1, "what is running in".into())));
+        assert_eq!(named_project("munich search in hub 2.0", &names), Some((0, "munich search in".into())));
+        assert_eq!(named_project("the hub one", &names), Some((0, "the one".into())));
+        assert_eq!(named_project("where is my uni guides", &names), Some((3, "guides".into())));
+        // No project in the words, or one that could be several.
+        assert_eq!(named_project("orange icon lag", &names), None);
+        assert_eq!(named_project("the mobile glasses session", &names), None);
+        assert_eq!(named_project("where is my", &names), None);
+        assert_eq!(named_project("", &names), None);
     }
 
     #[test]

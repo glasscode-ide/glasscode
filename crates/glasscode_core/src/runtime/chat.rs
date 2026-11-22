@@ -440,7 +440,7 @@ pub fn mac_voice_block(window: Option<&str>) -> String {
     }
 }
 
-pub fn glasses_block(focus: &DeviceFocus, session_title: Option<&str>, window_moves: bool) -> String {
+pub fn glasses_block(focus: &DeviceFocus, session_title: Option<&str>, _window_moves: bool) -> String {
     let mut on_lens = Vec::new();
     if let Some(id) = &focus.session {
         on_lens.push(match session_title {
@@ -455,13 +455,10 @@ pub fn glasses_block(focus: &DeviceFocus, session_title: Option<&str>, window_mo
         on_lens.push(format!("the project {project}"));
     }
     let lens = if on_lens.is_empty() { "nothing in particular (their glance: what needs them)".to_string() } else { on_lens.join(", ") };
-    let window = if window_moves {
-        "You may also show it in the Mac's window: they were at the Mac a moment ago, or asked to see it there."
-    } else {
-        "Do not move the Mac's window: they are away from it."
-    };
+    // One place everywhere (`docs/lens-everywhere.md`): a place shown is shown on every screen.
+    let window = "it appears on their lens and in the Mac's window together, so every screen shows the same place.";
     format!(
-        "[Where the person is: on their glasses (a lens and a voice), away from the Mac's window. What you answer is spoken and shown on a small lens: one to three short sentences, no lists, tables or Markdown. To show them a place, call device.open (a session by id, a pull request by number, a project, today or conversation): it appears on their lens. {window} On the lens now: {lens}. “Here”, “this” and “that” mean what is on the lens.]"
+        "[Where the person is: on their glasses (a lens and a voice), away from the Mac's window. What you answer is spoken and shown on a small lens: one to three short sentences, no lists, tables or Markdown. To show them a place, call device.open (a session by id, a pull request by number, a project, today or conversation): {window} On the lens now: {lens}. “Here”, “this” and “that” mean what is on the lens.]"
     )
 }
 
@@ -1190,8 +1187,8 @@ mod tests {
         let block = glasses_block(&focus, Some("checkout-fix"), false);
         assert!(block.contains("on their glasses") && block.contains("device.open"), "{block}");
         assert!(block.contains("the session “checkout-fix” (s1)") && block.contains("pull request #42"), "{block}");
-        assert!(block.contains("Do not move the Mac's window"), "{block}");
-        assert!(glasses_block(&DeviceFocus::default(), None, true).contains("You may also show it in the Mac's window"));
+        // One place everywhere: whatever is shown is shown on the lens and in the Mac's window.
+        assert!(block.contains("on their lens and in the Mac's window together"), "{block}");
         assert!(glasses_block(&DeviceFocus::default(), None, false).contains("what needs them"));
     }
 

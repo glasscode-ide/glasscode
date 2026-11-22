@@ -698,6 +698,14 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         Some(p) => Some(ws.find_project_as(caller, p)?),
         None => None,
     };
+    // `--match` words that name a project ("voice in class code") list only that project's.
+    let (project, match_words) = match op.text("match").map(str::trim).filter(|w| !w.is_empty()) {
+        Some(words) => {
+            let (project, rest) = ws.project_in_words(project, words);
+            (project, Some(rest))
+        }
+        None => (project, None),
+    };
     let needs = op.on("needs_you");
     let mut rows = Vec::new();
     let mut data = Vec::new();
@@ -705,7 +713,7 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let mut listed: Vec<&glasscode_core::model::Session> =
         ws.state.sessions.iter().filter(|s| !ws.state.session_hidden(s) && project.as_ref().is_none_or(|p| *p == s.project_id)).filter(|s| !needs || ws.session_state(s) == "needs you").collect();
     // `--match`: the ones that fit the words, best first (`session_find`).
-    let matched = op.text("match").map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
+    let matched = match_words.as_deref().map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
     if let Some(words) = matched {
         let entries: Vec<glasscode_core::session_find::Entry> = listed.iter().map(|s| ws.session_entry(s)).collect();
         let ranked = glasscode_core::session_find::rank(words, &entries);
@@ -902,7 +910,10 @@ fn session_send(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 }
 
 /// v2 (M31): `session send` is a queued delivery, from every caller: the session's queue types it
-/// when the session is idle, with a marker, and its hook event with the marker is the receipt. One
+/// with a marker, and its hook event with the marker is the receipt. The person's and the
+/// manager's go in while Claude works, as a message typed in its chat does (Claude reads it at
+/// its next step; its transcript's queue is the receipt), so several can be sent in a row; another
+/// session's waits for the turn to end (what it drives is stamped from the prompt, events-13). One
 /// an agent or the manager sends is claimed in the effect ledger first, with a subject of its own
 /// (a command is never a replay of an earlier one: the ledger records it and dedupes nothing).
 fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String, title: String, from: String, message: String) -> Planned {
@@ -916,6 +927,10 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
     let (project, session, launch) = (caller_key(ws, caller), caller.session.clone(), ws.control.launch.clone());
     // The manager waits to hear back: the session's next finish is said (`finish_ui`).
     let by_manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
+    // The person's words, and the manager's in its chat (it speaks for the person there, by voice
+    // too): typed in while the agent works, as in a chat. The manager woken by events, a playbook,
+    // a schedule, intake and auto-review (its wake lane) send nudges: they wait for the turn.
+    let while_working = person || matches!(caller.channel, glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Chat, .. });
     // What the target's events will descend from (events-13): a playbook's firing; a session's
     // own drive, passed on (a session the manager drives that asks another to go on is the same
     // chain); the manager itself, one step. The person's own sends drive nothing.
@@ -938,6 +953,7 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
             note: Some(format!("(Sent by Glasscode because {from} asked it to.)")),
             depth,
             causes,
+            while_working,
             ..glasscode_core::delivery_session::Delivery::new(&id, &message, glasscode_core::words::InjectKind::SessionSend, glasscode_core::clock::now_ms())
         };
         let intent = (!person).then(|| glasscode_core::effects::Intent {
@@ -956,11 +972,16 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
         if by_manager {
             ws.finish_await(&id);
         }
-        // Said as it is: typed in now when the session can take it, else what it waits for.
-        let ahead = ws.ci_fix.deliveries.waiting(&id) > 1 || ws.ci_fix.deliveries.in_flight(&id).is_some();
-        let wait = if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { glasscode_core::delivery_session::ready(&ws.delivery_inputs(&id, cx)) };
+        // Said as it is: typed in now when the session can take it (by the queue's own rule), else
+        // what it waits for. The message before it goes in within a second or two.
+        // The person's is in the queue already; one with a claim joins it once claimed.
+        let itself = usize::from(person);
+        let ahead = ws.ci_fix.deliveries.ahead(&id, while_working) > itself || ws.ci_fix.deliveries.in_flight(&id).is_some();
+        let inputs = ws.delivery_inputs(&id, cx);
+        let wait = glasscode_core::delivery_session::ready(&inputs, while_working).and(if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { Ok(()) });
         let (text, waits) = match wait {
             _ if starting => (format!("Queued for “{title}”: the session is starting, and it is typed in once it is ready."), Some("the session has started")),
+            Ok(()) if inputs.busy => (format!("Sent to “{title}”: it is typed in now, while it works; it reads it at its next step. Its answer comes when its turn ends."), None),
             Ok(()) => (format!("Sent to “{title}”: it is typed in now. Its answer comes when its turn ends."), None),
             Err(why) => (format!("Queued for “{title}”: it is typed in once {}, and nothing is typed over a question or your own text.", why.words()), Some(why.words())),
         };
@@ -3244,10 +3265,22 @@ fn device_open(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         _ => return Err(denied("Only you, and the manager answering your glasses, show a place on them.")),
     }
     let _ = ws;
-    plan(Kind::Show, format!("show {word} on the glasses"), move |ws, r, _, cx| {
-        let reply = match ws.door_open(place) {
-            Ok(said) => Reply::ok(said, json!({ "place": word, "shown": true })),
-            Err(why) => failed(why),
+    plan(Kind::Show, format!("show {word} on the glasses and in the Mac's window"), move |ws, r, window, cx| {
+        // One place everywhere (`lens_pages`): the Mac's window goes there too, and every lens
+        // follows it.
+        let on_mac = match &place {
+            crate::device_door::DevicePlace::Session(said) => ws.voice_session_for(said).ok(),
+            crate::device_door::DevicePlace::Pr(n) => Some(format!("pr:{n}")),
+            crate::device_door::DevicePlace::Project(_) => Some("sessions".to_string()),
+            crate::device_door::DevicePlace::Today => Some("today".to_string()),
+            crate::device_door::DevicePlace::Conversation => None,
+        };
+        let on_mac = on_mac.and_then(|p| ws.lens_open(&p, window, cx).ok());
+        let reply = match (ws.door_open(place), on_mac) {
+            (Ok(said), Some(_)) => Reply::ok(format!("{said} It is in the Mac's window too."), json!({ "place": word, "shown": true, "mac": true })),
+            (Ok(said), None) => Reply::ok(said, json!({ "place": word, "shown": true })),
+            (Err(_), Some(page)) => Reply::ok(format!("Shown in the Mac's window: {}; the glasses show it too while they are connected.", page.title), json!({ "place": word, "shown": true, "mac": true })),
+            (Err(why), None) => failed(why),
         };
         ws.reply(r, reply);
         cx.notify();

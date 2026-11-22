@@ -56,6 +56,13 @@ in `manager.config`). Its tools run on that device, which reaches the manager wi
 screen or lens shows: `ask_manager`, `manager_progress`, `stop_manager`, `list_sessions`,
 `open_place`. See `worker/talker.py` and the messages in `worker/worker.py`.
 
+One place everywhere (`docs/lens-everywhere.md`): `list_sessions` and `open_place` are always
+answered by the Mac (the phone asks the Mac's door `voice.tool`), so every device answers the
+same, and a place opened shows in the Mac's window and on the lens together. The device's
+`manager.config` also says where the person is (`now`: the place on the screen and the lens, in
+a sentence) and what was said lately (`recent`: the conversation's last turns). The talker
+starts from `now`, and a talk started again carries on from `recent`.
+
 ## The glasses through the server
 
 So that the glasses get a pass to this room from the server (while the Mac is off), put the

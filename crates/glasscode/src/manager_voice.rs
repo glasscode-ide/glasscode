@@ -65,8 +65,11 @@ pub struct VoiceState {
     lines: Option<async_channel::Receiver<Line>>,
     /// The helper joined the room.
     ready: bool,
-    /// The name and how it listens, as last sent.
-    sent: Option<(String, &'static str)>,
+    /// The name, how it listens and where the person is, as last sent.
+    sent: Option<(String, &'static str, String)>,
+    /// Where the person is (`lens_now`), and when it was last looked at.
+    now: String,
+    now_at: Option<Instant>,
     /// The key is held (`Listen::Hold`).
     held: bool,
     /// The connection was lost: when to try again, and how often that was tried.
@@ -338,20 +341,45 @@ impl Workspace {
 
     /// Tell the helper the manager's name and how it listens, when that changed.
     fn manager_voice_configure(&mut self) {
-        let want = (self.state.manager.name.clone(), listen_mode(&self.state.manager, self.manager.voice.held));
+        let want = (self.state.manager.name.clone(), listen_mode(&self.state.manager, self.manager.voice.held), self.manager.voice.now.clone());
         if self.manager.voice.sent.as_ref() == Some(&want) || self.manager.voice.stdin.is_none() {
             return;
         }
+        // The conversation's last turns: a talk started again carries on from them (the worker
+        // takes them once a talk).
+        let recent = recent_turns(&self.mchat.items);
         let voice = &mut self.manager.voice;
         // This app runs the talker's tools (when the worker has a talker).
-        voice.write(serde_json::json!({ "config": { "name": want.0, "listen": want.1, "talker": true, "place": "mac" } }));
+        voice.write(serde_json::json!({ "config": { "name": want.0, "listen": want.1, "talker": true, "place": "mac", "now": want.2, "recent": recent } }));
         voice.sent = Some(want);
+    }
+
+    /// Where the person is and what is going on, for the talker (the Mac's and the phone's): the
+    /// place on the screen, what is open in each project, and the projects by name.
+    pub(crate) fn voice_now(&self, cx: &gpui::App) -> String {
+        format!("{} {} {}", self.lens_now(cx), self.voice_overview(), self.projects_line())
+    }
+
+    /// Where the person is, for the talker: looked at each second while the voice is on.
+    fn manager_voice_where(&mut self, cx: &mut Context<Self>) {
+        if self.manager.voice.now_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.manager.voice.now_at = Some(Instant::now());
+        let now = self.voice_now(cx);
+        if now != self.manager.voice.now {
+            self.manager.voice.now = now;
+            self.manager_voice_configure();
+        }
     }
 
     /// Called from the workspace tick: reads what the helper heard and reported.
     pub fn manager_voice_tick(&mut self, cx: &mut Context<Self>) {
         if !self.manager.voice.on() {
             return;
+        }
+        if self.manager.voice.stdin.is_some() {
+            self.manager_voice_where(cx);
         }
         if !self.state.manager.enabled {
             self.manager_voice_end();
@@ -462,13 +490,15 @@ impl Workspace {
     fn manager_voice_ask(&mut self, text: String, cx: &mut Context<Self>) {
         if self.mchat.turn.is_none() && self.mchat.device_focus.is_none() {
             let window = self.chat_focus(false, glasscode_core::clock::now_ms(), cx);
-            self.mchat.device_focus = Some(glasscode_core::runtime::chat::mac_voice_block(window.as_deref()));
+            // A project named by voice is often misheard ("class code"): the projects there are.
+            let block = glasscode_core::runtime::chat::mac_voice_block(window.as_deref());
+            self.mchat.device_focus = Some(format!("{block}\n[{}]", self.projects_line()));
         }
         self.manager_ask(text, true, cx);
     }
 
     /// One of the talker's tools, run here; what it found, in words for the talker.
-    fn manager_voice_tool(&mut self, name: &str, arguments: &serde_json::Value, cx: &mut Context<Self>) -> String {
+    pub(crate) fn manager_voice_tool(&mut self, name: &str, arguments: &serde_json::Value, cx: &mut Context<Self>) -> String {
         let text = |key: &str| arguments.get(key).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
         match name {
             "ask_manager" => {
@@ -500,6 +530,8 @@ impl Workspace {
                 self.voice_sessions(&text("project"), &text("search"), needs)
             }
             "open_place" => {
+                // One place everywhere: it opens in the Mac's window, and the lens follows it
+                // (`lens_pages`, the door's `place` event).
                 let (kind, id) = (text("kind"), text("id"));
                 let place = match kind.as_str() {
                     // Its id, the start of it, or the person's words of it (`voice_session_for`).
@@ -507,22 +539,27 @@ impl Workspace {
                         Ok(id) => id,
                         Err(say) => return say,
                     },
-                    "pr" => {
-                        let number: Option<u64> = id.trim_start_matches('#').parse().ok();
-                        let session = self.prs.map.iter().find(|(_, p)| p.pr.as_ref().is_some_and(|pr| Some(pr.number as u64) == number)).map(|(s, _)| s.clone());
-                        match session {
-                            Some(session) => session,
-                            None => "pull-requests".into(),
-                        }
-                    }
+                    "pr" => format!("pr:{}", id.trim().trim_start_matches('#').trim()),
+                    // A key as heard: "eng 42", "ENG-42".
+                    "ticket" => format!("ticket:{}", id.split_whitespace().collect::<Vec<_>>().join("-").to_uppercase()),
+                    "board" => "tickets".into(),
+                    "today" | "tickets" | "pull-requests" | "usage" | "sessions" | "settings" => kind.clone(),
                     _ => "today".into(),
                 };
-                let shown = match self.state.session(&place) {
-                    Some(s) => format!("the session \"{}\" in {}", self.session_title(s), self.state.project(&s.project_id).map(|p| p.name.as_str()).unwrap_or_default()),
-                    None => place.clone(),
-                };
-                self.with_main_window(cx, move |ws, window, cx| ws.run_op_named("ui.open", serde_json::json!({ "place": place }), window, cx));
-                format!("Shown on the Mac's screen: {shown}.")
+                if !self.lens_knows(&place) {
+                    let what = place.replace("ticket:", "the ticket ").replace("pr:", "pull request #");
+                    return format!("Nothing opened: {what} is not on this Mac's board or lists now.");
+                }
+                let page = self.lens_page(&place, cx);
+                let lens = if self.door.presence.values().any(|p| p.glasses && p.lens) { " and the lens" } else { "" };
+                self.with_main_window(cx, move |ws, window, cx| {
+                    if let Err(why) = ws.lens_open(&place, window, cx) {
+                        ws.show_toast(why, cx);
+                    }
+                });
+                let what = if page.eyebrow.is_empty() { page.title.clone() } else { format!("{} \"{}\"", page.eyebrow, page.title) };
+                let status = page.status.map(|s| format!(" ({})", s.label.to_lowercase())).unwrap_or_default();
+                format!("Shown on the Mac's screen{lens}: {what}{status}.")
             }
             _ => format!("This Mac does not know the tool {name}."),
         }
@@ -564,6 +601,25 @@ impl Workspace {
         self.manager.voice.held = held;
         self.manager_voice_configure();
     }
+}
+
+/// The conversation's last turns for the talker ([{"who": "person|manager", "text"}]): what the
+/// person said and what the manager answered them, newest last.
+fn recent_turns(items: &[glasscode_core::conversation::Item]) -> Vec<serde_json::Value> {
+    use glasscode_core::conversation::{Author, Kind};
+    let turns: Vec<serde_json::Value> = items
+        .iter()
+        .filter_map(|item| {
+            let who = match (&item.author, &item.kind) {
+                (Author::Person, Kind::You { .. }) => "person",
+                (Author::Chat, Kind::Manager { .. }) => "manager",
+                _ => return None,
+            };
+            let text = glasscode_core::lens::clip(&item.text, 400);
+            (!text.is_empty()).then(|| serde_json::json!({ "who": who, "text": text }))
+        })
+        .collect();
+    turns[turns.len().saturating_sub(8)..].to_vec()
 }
 
 #[cfg(test)]

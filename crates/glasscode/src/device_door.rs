@@ -38,6 +38,10 @@ const LOOK_EVERY: Duration = Duration::from_secs(30);
 pub const PRESENT_FOR: Duration = Duration::from_secs(90);
 /// How long a device's question may wait for its answer.
 const ASK_WITHIN: Duration = Duration::from_secs(200);
+/// How long a device's question may wait for the manager to be free, and how many of a device's
+/// may wait at once.
+const WAIT_WITHIN: Duration = Duration::from_secs(300);
+const WAITING_MAX: usize = 5;
 /// How long after a device's question the manager may show it a place (`device.open`).
 const OPEN_WITHIN_MS: u64 = 30_000;
 
@@ -90,6 +94,17 @@ struct DeviceAsk {
     pub window_moves: bool,
 }
 
+/// A question a device asked while the manager answered another: it is asked once the manager is
+/// free, in order, as the Mac's own chat and voice queue theirs (nothing is refused).
+#[derive(Clone, Debug, PartialEq)]
+struct WaitingAsk {
+    conn: u64,
+    device: String,
+    request: u64,
+    params: Value,
+    since: Instant,
+}
+
 /// The data a connection's handshake needs, made once (the key comes from the Keychain).
 pub struct DoorInfo {
     pub key: DoorKey,
@@ -115,6 +130,8 @@ pub struct DoorUi {
     pub conns: HashMap<u64, Conn>,
     pub presence: HashMap<String, Presence>,
     ask: Option<DeviceAsk>,
+    /// Questions that wait for the manager to be free, oldest first.
+    waiting: std::collections::VecDeque<WaitingAsk>,
     /// The last place a device was asked (device, connection, when): `device.open`'s target.
     last_ask: Option<(String, u64, u64)>,
     /// When a device last did anything here (O9's presence).
@@ -122,6 +139,9 @@ pub struct DoorUi {
     /// What each connection was last told, so it is told again only when that changes.
     told_today: HashMap<u64, String>,
     told_home: HashMap<u64, String>,
+    /// The lens page of the window's place each connection was last sent (`lens_pages`).
+    told_place: HashMap<u64, String>,
+    place_at: Option<Instant>,
     told_items: HashMap<u64, String>,
     today_at: Option<Instant>,
     /// What phones that reach the server said their glasses do (the server's device ids).
@@ -138,6 +158,30 @@ impl DoorUi {
     /// may move for it.
     pub fn asking(&self) -> Option<(&str, bool)> {
         self.ask.as_ref().map(|ask| (ask.device.as_str(), ask.window_moves))
+    }
+
+    /// Keep a device's question for when the manager is free. Err: the device has
+    /// [`WAITING_MAX`] waiting already.
+    fn wait(&mut self, conn: u64, device: &str, request: u64, params: &Value) -> Result<(), ()> {
+        if self.waiting.iter().filter(|w| w.device == device).count() >= WAITING_MAX {
+            return Err(());
+        }
+        self.waiting.push_back(WaitingAsk { conn, device: device.to_string(), request, params: params.clone(), since: Instant::now() });
+        Ok(())
+    }
+
+    /// The waiting questions that waited past [`WAIT_WITHIN`], taken out.
+    fn waited_too_long(&mut self) -> Vec<WaitingAsk> {
+        let (old, keep): (std::collections::VecDeque<WaitingAsk>, _) = self.waiting.drain(..).partition(|w| w.since.elapsed() > WAIT_WITHIN);
+        self.waiting = keep;
+        old.into()
+    }
+
+    /// A device's (or a connection's) waiting questions, taken out.
+    fn drop_waiting(&mut self, gone: impl Fn(&WaitingAsk) -> bool) -> Vec<WaitingAsk> {
+        let (out, keep): (std::collections::VecDeque<WaitingAsk>, _) = self.waiting.drain(..).partition(|w| gone(w));
+        self.waiting = keep;
+        out.into()
     }
 }
 
@@ -434,8 +478,19 @@ impl Workspace {
         self.door.conns.clear();
     }
 
-    /// Four times a second while a device asks something: the answer as it is written.
-    pub fn door_fast_tick(&mut self, _cx: &mut Context<Self>) {
+    /// Four times a second while a device asks something: the answer as it is written, and the
+    /// next waiting question once the manager is free.
+    pub fn door_fast_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.door.waiting.is_empty() {
+            for late in self.door.waited_too_long() {
+                self.door_reply(late.conn, late.request, Err(format!("{} was busy for too long; ask again.", self.state.manager.name)));
+            }
+            if self.door.ask.is_none() && self.mchat.turn.is_none() && self.mchat.queue.is_empty()
+                && let Some(next) = self.door.waiting.pop_front()
+            {
+                self.door_ask_now(next.conn, next.device, next.request, &next.params, cx);
+            }
+        }
         // A question whose answer never came (the turn ended some other way): let it go, so the
         // next one is taken and the person's own chat moves the window again.
         if let Some(ask) = self.door.ask.as_ref().filter(|ask| ask.since.elapsed() > ASK_WITHIN) {
@@ -479,7 +534,23 @@ impl Workspace {
             snapshot["at"] = at;
             (snapshot, text)
         });
+        // The window's place as the lens shows it: sent when it, or what it shows, changes.
+        let place = (!conns.is_empty() && self.door.place_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(500))).then(|| {
+            self.door.place_at = Some(Instant::now());
+            self.lens_refresh_reply(cx);
+            let mut page = serde_json::to_value(self.lens_page(&self.lens_place(), cx)).unwrap_or_default();
+            // What the phone's voice is told with it: where the person is and what is open.
+            page["now"] = json!(self.voice_now(cx));
+            let text = page.to_string();
+            (page, text)
+        });
         for conn in conns {
+            if let Some((page, text)) = &place
+                && self.door.told_place.get(&conn) != Some(text)
+            {
+                self.door.told_place.insert(conn, text.clone());
+                self.door_send(conn, device_link::event_line(events::PLACE, page.clone()));
+            }
             if self.door.told_home.get(&conn) != Some(&home_text) {
                 self.door.told_home.insert(conn, home_text.clone());
                 self.door_send(conn, device_link::event_line(events::HOME, home.clone()));
@@ -533,12 +604,14 @@ impl Workspace {
                         self.door.presence.remove(&gone.device);
                     }
                 }
-                // Its question goes with it.
+                // Its question goes with it, and the ones it had waiting.
                 if self.door.ask.as_ref().is_some_and(|ask| ask.conn == conn) {
                     self.door.ask = None;
                     self.mchat.device_focus = None;
                 }
+                self.door.drop_waiting(|w| w.conn == conn);
                 self.door.told_home.remove(&conn);
+                self.door.told_place.remove(&conn);
                 self.door.told_items.remove(&conn);
                 self.door.told_today.remove(&conn);
                 cx.notify();
@@ -605,6 +678,22 @@ impl Workspace {
             // what needs it in the door's notes.
             "phones.push_token" => Ok(json!({ "ok": true, "push": false })),
             "manager.home" => Ok(self.door_home()),
+            // One place everywhere (`lens_pages`): the phone opens a place on the Mac, reads a
+            // place's page, and its voice's tools answer here as the Mac's do.
+            "place.open" => self.lens_open(&text_param(&params, "place"), window, cx).and_then(|page| serde_json::to_value(page).map_err(|e| e.to_string())),
+            "place.get" => {
+                let place = text_param(&params, "place");
+                let place = if place.trim().is_empty() { self.lens_place() } else { place };
+                serde_json::to_value(self.lens_page(&place, cx)).map_err(|e| e.to_string())
+            }
+            "voice.tool" => {
+                let name = text_param(&params, "name");
+                let arguments = params.get("arguments").cloned().unwrap_or_default();
+                match name.as_str() {
+                    "list_sessions" | "open_place" => Ok(json!({ "text": self.manager_voice_tool(&name, &arguments, cx) })),
+                    other => Err(format!("this Mac runs only list_sessions and open_place for a phone's voice, not {other}")),
+                }
+            }
             "manager.conversation" => {
                 let after = params.get("after").and_then(Value::as_str);
                 let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(40).clamp(1, 200) as usize;
@@ -613,9 +702,16 @@ impl Workspace {
             "manager.ask" => return self.door_ask(conn, device, id, &params, cx),
             "manager.voice" => return self.door_voice(conn, device, id, cx),
             "manager.stop" => {
+                // What it asked is stopped, and what it had waiting is dropped.
+                let dropped = self.door.drop_waiting(|w| w.device == device);
+                for w in &dropped {
+                    self.door_reply(w.conn, w.request, Err("stopped".into()));
+                }
                 if self.door.ask.as_ref().is_some_and(|ask| ask.device == device) {
                     self.chat_stop(cx);
                     Ok(json!({ "ok": true }))
+                } else if !dropped.is_empty() {
+                    Ok(json!({ "ok": true, "dropped": dropped.len() }))
                 } else {
                     Err("nothing this phone asked is being answered".into())
                 }
@@ -636,6 +732,11 @@ impl Workspace {
         self.door_reply(conn, id, result);
     }
 
+    /// This Mac's id and name, as the door says them.
+    pub(crate) fn door_names(&self) -> (String, String) {
+        self.door.info.as_ref().map(|i| (i.mac_id.clone(), i.mac.clone())).unwrap_or_else(|| (String::new(), crate::platform::this_computer().to_string()))
+    }
+
     fn door_hello(&self, device: &str) -> Value {
         let info = self.door.info.as_ref();
         json!({
@@ -646,7 +747,7 @@ impl Workspace {
             "version": glasscode_core::update::VERSION,
             "build": glasscode_core::update::BUILD,
             "device": device,
-            "features": ["manager", "today", "device"],
+            "features": ["manager", "today", "device", "place"],
         })
     }
 
@@ -811,6 +912,24 @@ impl Workspace {
     /// is the request's reply when it is done. While the server is home, the phone is told to ask
     /// there.
     fn door_ask(&mut self, conn: u64, device: String, id: u64, params: &Value, cx: &mut Context<Self>) {
+        // Behind the ones that wait already, in order.
+        if !self.door.waiting.is_empty() && !text_param(params, "text").trim().is_empty() {
+            return self.door_wait(conn, device, id, params);
+        }
+        self.door_ask_now(conn, device, id, params, cx);
+    }
+
+    /// Hold a device's question until the manager is free (`door_fast_tick` asks it then), and
+    /// tell the device it waits.
+    fn door_wait(&mut self, conn: u64, device: String, id: u64, params: &Value) {
+        if self.door.wait(conn, &device, id, params).is_err() {
+            return self.door_reply(conn, id, Err(format!("{} has {WAITING_MAX} of your questions waiting already; ask again once it answers.", self.state.manager.name)));
+        }
+        let client_id: String = text_param(params, "client_id").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(64).collect();
+        self.door_send(conn, device_link::event_line(events::WORKING, json!({ "ask": client_id, "state": "waiting", "line": "It waits for the question before it, then it is answered." })));
+    }
+
+    fn door_ask_now(&mut self, conn: u64, device: String, id: u64, params: &Value, cx: &mut Context<Self>) {
         let text = text_param(params, "text").trim().to_string();
         let client_id: String = text_param(params, "client_id").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(64).collect();
         if text.is_empty() {
@@ -822,8 +941,10 @@ impl Workspace {
         if self.server.config.is_some() && !self.home_here() {
             return self.door_reply(conn, id, Ok(json!({ "elsewhere": "server", "home": self.door_home() })));
         }
-        if self.door.ask.is_some() || self.mchat.turn.is_some() {
-            return self.door_reply(conn, id, Err(format!("{} is answering another question; ask again in a moment.", self.state.manager.name)));
+        // Answering another question (this phone's, the Mac's chat or its voice, a command's):
+        // it waits its turn, as the Mac's own chat queues the person's messages.
+        if self.door.ask.is_some() || self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
+            return self.door_wait(conn, device, id, params);
         }
         let focus: glasscode_core::runtime::chat::DeviceFocus = params.get("focus").cloned().and_then(|f| serde_json::from_value(f).ok()).unwrap_or_default();
         // Only ids this Mac knows: "this" never names a session the brain cannot find.
@@ -835,7 +956,8 @@ impl Workspace {
         let now = glasscode_core::clock::now_ms();
         self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), since: Instant::now(), sent: 0, activity: None, window_moves });
         self.door.last_ask = Some((device.clone(), conn, now));
-        self.mchat.device_focus = Some(glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves));
+        let block = glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves);
+        self.mchat.device_focus = Some(format!("{block}\n[{}]", self.projects_line()));
         let words = glasscode_core::words::record(glasscode_core::words::Origin::Device(device), &text, focus.session.as_deref(), None);
         let on_answer: crate::manager_chat::OnAnswer = Box::new(move |ws, said, _cx| ws.door_answered(conn, id, said));
         self.manager_ask_as(text, false, Some(words), None, Some(on_answer), cx);
@@ -1004,6 +1126,34 @@ mod tests {
 
     fn info() -> Arc<DoorInfo> {
         Arc::new(DoorInfo { key: DoorKey::generate(), mac: "Test Mac".into(), mac_id: "0123456789abcdef".into(), launch: "launch-1".into() })
+    }
+
+    /// A device's questions asked while the manager answers wait, in order, a few per device;
+    /// they go when their connection goes or the device stops, and after WAIT_WITHIN.
+    #[test]
+    fn questions_wait_their_turn() {
+        let mut door = DoorUi::default();
+        let ask = |text: &str| json!({ "text": text, "client_id": text });
+        for (i, text) in ["one", "two"].iter().enumerate() {
+            assert_eq!(door.wait(1, "phone-a", i as u64, &ask(text)), Ok(()));
+        }
+        assert_eq!(door.wait(2, "phone-b", 9, &ask("other")), Ok(()));
+        let order: Vec<&str> = door.waiting.iter().map(|w| w.params["text"].as_str().unwrap()).collect();
+        assert_eq!(order, ["one", "two", "other"]);
+        for i in 2..WAITING_MAX as u64 {
+            assert_eq!(door.wait(1, "phone-a", i, &ask("more")), Ok(()));
+        }
+        assert_eq!(door.wait(1, "phone-a", 99, &ask("too many")), Err(()), "a device has at most WAITING_MAX waiting");
+        assert!(door.waited_too_long().is_empty());
+        // The other phone's stays when this one stops.
+        let dropped = door.drop_waiting(|w| w.device == "phone-a");
+        assert_eq!(dropped.len(), WAITING_MAX);
+        assert_eq!(door.waiting.len(), 1);
+        assert_eq!(door.drop_waiting(|w| w.conn == 2).len(), 1);
+        // One that waited too long is taken out.
+        door.waiting.push_back(WaitingAsk { conn: 3, device: "phone-c".into(), request: 1, params: ask("late"), since: Instant::now() - WAIT_WITHIN - Duration::from_secs(1) });
+        assert_eq!(door.waited_too_long().len(), 1);
+        assert!(door.waiting.is_empty());
     }
 
     /// Connect as a phone with `phone`'s key and do the handshake; the welcome line.

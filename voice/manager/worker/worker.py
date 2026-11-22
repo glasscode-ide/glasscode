@@ -123,6 +123,13 @@ class Ears(Agent):
         # Without the manager's name in front: the talker answers what was asked.
         new_message.content = [text]
 
+    def tts_node(self, text, model_settings):
+        # Never an id aloud, whatever the talker wrote.
+        return Agent.default.tts_node(self, talker.speakable_stream(text), model_settings)
+
+    def transcription_node(self, text, model_settings):
+        return Agent.default.transcription_node(self, talker.speakable_stream(text), model_settings)
+
 
 class ManagerVoice:
     """One stay in the room: from the first client coming in until the room is empty."""
@@ -160,7 +167,9 @@ class ManagerVoice:
         # The talker (None: there is none) and its agent.
         self.talker_llm = None
         self.agent: Ears | None = None
-        self._instructions_for: tuple[str, str] | None = None
+        self._instructions_for: tuple[str, str, str] | None = None
+        # The clients whose talk was given the conversation so far (`_seed`), once each.
+        self._seeded: set[str] = set()
         # The talker's tool calls waiting for the device: call id -> (identity, future).
         self.calls: dict[str, tuple[str, asyncio.Future]] = {}
         self._call_seq = 0
@@ -309,23 +318,40 @@ class ManagerVoice:
         return self.talker_llm is not None and self.asked.get(self._listened(), {}).get("talker") == "1"
 
     def talker_instructions(self) -> str:
-        place = self.asked.get(self._listened(), {}).get("place", "")
-        return talker.instructions(self.attention.name, place, env("MANAGER_LANGUAGE", "en"))
+        asked = self.asked.get(self._listened(), {})
+        return talker.instructions(self.attention.name, asked.get("place", ""), env("MANAGER_LANGUAGE", "en"), asked.get("now", ""))
 
     def _apply_talker(self) -> None:
         """Keep the talker's instructions and thinking-ahead in step with who is listened to."""
         if self.session is None or self.agent is None or self.talker_llm is None:
             return
-        want = (self.attention.name, self.asked.get(self._listened(), {}).get("place", ""))
+        asked = self.asked.get(self._listened(), {})
+        want = (self.attention.name, asked.get("place", ""), asked.get("now", ""))
         if want != self._instructions_for:
             self._instructions_for = want
             self._spawn(self.agent.update_instructions(self.talker_instructions()))
+        # A talk started again carries on: the conversation's last turns, once per client.
+        turns = asked.get("recent")
+        if turns and self._talker_on() and self._listened() not in self._seeded:
+            self._seeded.add(self._listened())
+            self._spawn(self._seed(turns))
         # Thinking ahead sends half-heard words to the talker's service: only when everything
         # said counts anyway ("always"), never while it waits for its name.
         try:
             self.session.options.turn_handling["preemptive_generation"]["enabled"] = self._talker_on() and self.attention.listen == "always"
         except (AttributeError, KeyError, TypeError):
             log.debug("thinking ahead cannot be switched in this version")
+
+    async def _seed(self, turns: list[tuple[str, str]]) -> None:
+        """Put the conversation's last turns into the talker's history."""
+        try:
+            ctx = self.agent.chat_ctx.copy()
+            for role, text in turns:
+                ctx.add_message(role=role, content=text)
+            await self.agent.update_chat_ctx(ctx)
+            log.info("the talk carries on from %d turns of the conversation", len(turns))
+        except Exception:
+            log.exception("could not give the talker the conversation so far")
 
     async def call_device(self, name: str, arguments: dict) -> str:
         """Run one of the talker's tools on the client that is listened to, and wait for it."""
@@ -424,6 +450,12 @@ class ManagerVoice:
         place = message.get("place")
         if isinstance(place, str) and place in talker.PLACES:
             asked["place"] = place
+        # Where the person is, and the conversation so far (`docs/lens-everywhere.md`).
+        if isinstance(message.get("now"), str):
+            asked["now"] = message["now"]
+        turns = talker.recent_turns(message.get("recent"))
+        if turns:
+            asked["recent"] = turns
         self._choose()
         log.info("%s asks for %s; listening to %s (%s)", sender or "a client", asked.get("listen", self.default_listen), self.listened or "nobody", self.attention.listen)
 
@@ -521,7 +553,8 @@ class ManagerVoice:
     # ----- speaking -----------------------------------------------------------------------------
 
     def say(self, say_id: str, text: str) -> None:
-        text = text.strip()
+        # Never an id aloud, whoever wrote the answer.
+        text = talker.speakable(text).strip()
         self.thinking_until = 0.0
         if say_id and say_id in self.cut_ids:
             # The person talked over this answer: the rest of it is not spoken.

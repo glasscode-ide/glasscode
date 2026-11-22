@@ -9,6 +9,10 @@ import Foundation
 ///   previous point.
 /// - **Swipe right**: open the focused row.
 /// - **Swipe left**: back one card, or cancel what is being said. On the glance, nothing.
+///
+/// A place's page (`LensPage`, the Mac's window's place) follows the Mac: it comes when the Mac's
+/// window goes somewhere. Down and up move through its rows (on a page without rows, to the next
+/// or the previous one of its list); right or a pinch on a row opens it, on the lens and the Mac.
 struct LensModel: Equatable {
     enum Gesture { case pinch, up, down, left, right }
 
@@ -34,7 +38,7 @@ struct LensModel: Equatable {
         var target: Target?
     }
 
-    enum Tone: Equatable { case ok, warn, bad, plain }
+    enum Tone: Equatable { case ok, busy, warn, bad, plain }
 
     struct SessionCard: Equatable {
         var id: String
@@ -94,6 +98,8 @@ struct LensModel: Equatable {
         case question(QuestionCard)
         case note(title: String, body: String, tone: Tone, open: Target?)
         case message(title: String, body: String)
+        /// A place's page: what the Mac's window shows, the lens's version of it.
+        case page(LensPage)
     }
 
     enum Effect: Equatable {
@@ -108,6 +114,10 @@ struct LensModel: Equatable {
         case deny(ApprovalCard)
         case answer(session: String, option: Int)
         case back
+        /// Open a place (a page's row, the next ticket): on the Mac, and so on the lens.
+        case place(String)
+        /// Make the voice silent (the talk stays open; a pinch talks again).
+        case mute
     }
 
     /// The glance's data.
@@ -172,8 +182,56 @@ struct LensModel: Equatable {
         case .approval: return 2
         case .question(let q): return q.options.count
         case .note(_, _, _, let open): return open == nil ? 0 : 1
+        case .page(let page): return page.items.count
         case .listening, .working, .points, .message: return 0
         }
+    }
+
+    /// The Mac's window shows a place: its page on the lens. `opened`: the person opened it from
+    /// here (it goes on top, and back returns to where they were); else the Mac went there, and
+    /// the page takes the place of the page shown. While the person talks it waits under that card.
+    mutating func follow(_ page: LensPage, opened: Bool) {
+        if case .page(let shown) = card, shown.place == page.place {
+            stack[stack.count - 1] = .page(page)
+            focus = min(focus, page.items.count - 1)
+            return
+        }
+        // One copy of a place in the stack: the one it goes to now.
+        let top = stack.count - 1
+        stack = stack.enumerated().filter { i, card in
+            if i == top { return true }
+            if case .page(let p) = card, p.place == page.place { return false }
+            return true
+        }.map(\.element)
+        switch card {
+        case .listening, .approval, .question:
+            stack.insert(.page(page), at: stack.count - 1)
+            return
+        case .working:
+            // What the person asked for (opened by the voice): shown now.
+            stack[stack.count - 1] = .page(page)
+        case .page where !opened:
+            stack[stack.count - 1] = .page(page)
+        default:
+            stack.append(.page(page))
+        }
+        if stack.count > 8 { stack.removeFirst(stack.count - 8) }
+        focus = -1
+    }
+
+    /// What the Mac shows there changed, not where it is: the page is updated wherever it is in
+    /// the stack, and nothing moves (an answer being read, a swipe back, a card stay as they are).
+    mutating func refresh(_ page: LensPage) {
+        for i in stack.indices {
+            if case .page(let p) = stack[i], p.place == page.place { stack[i] = .page(page) }
+        }
+        if case .page(let p) = card, p.place == page.place { focus = min(focus, page.items.count - 1) }
+    }
+
+    /// The place on the lens now (for "this" and for the voice), if a page is shown.
+    var page: LensPage? {
+        if case .page(let page) = card { return page }
+        return nil
     }
 
     func sessionChips(_ s: SessionCard) -> [Chip] {
@@ -191,6 +249,9 @@ struct LensModel: Equatable {
             case .left:
                 back()
                 return .cancelListening
+            case .down:
+                back()
+                return .mute
             default: return .none
             }
         }
@@ -199,6 +260,11 @@ struct LensModel: Equatable {
             if speaking { return .stopSpeaking }
             return activate() ?? .talk
         case .up, .down:
+            // A page without rows: the next or the previous one of its list (the tickets one by one).
+            if case .page(let page) = card, page.items.isEmpty {
+                let beside = gesture == .down ? page.next : page.prev
+                return beside.map(Effect.place) ?? .none
+            }
             if case .points(let title, let points, let at) = card {
                 let next = max(0, min(points.count - 1, at + (gesture == .down ? 1 : -1)))
                 replaceTop(.points(title: title, points: points, at: next))
@@ -211,8 +277,11 @@ struct LensModel: Equatable {
             focus = gesture == .down ? min(n - 1, focus + 1) : max(-1, focus - 1)
             return .none
         case .right:
-            guard focus >= 0, let effect = activate(), case .open = effect else { return .none }
-            return effect
+            guard focus >= 0, let effect = activate() else { return .none }
+            switch effect {
+            case .open, .place: return effect
+            default: return .none
+            }
         case .left:
             guard stack.count > 1 else { return .none }
             back()
@@ -243,6 +312,8 @@ struct LensModel: Equatable {
             return focus < q.options.count ? .answer(session: q.session, option: q.options[focus].number) : nil
         case .note(_, _, _, let open):
             return open.map(Effect.open)
+        case .page(let page):
+            return focus < page.items.count ? page.items[focus].open.map(Effect.place) : nil
         default:
             return nil
         }

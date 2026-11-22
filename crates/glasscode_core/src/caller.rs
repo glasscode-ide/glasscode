@@ -296,6 +296,12 @@ fn kind_name(caller: &Caller) -> String {
 /// `manager.conversation`; `manager.stop`, its own answer only), where it is home
 /// (`manager.home`), and what the glasses are doing (`device.presence`). The Mac's device door
 /// keeps the same list (`device_link::allowed`), so a phone has one set of rights at both ends.
+///
+/// One place everywhere (the Mac's door only, `lens_pages`): open a place in the Mac's window
+/// (`place.open`), read a place's page (`place.get`), and the voice's `list_sessions` and
+/// `open_place` answered as the Mac's own voice answers them (`voice.tool`). Without them the Mac
+/// refused the phone, and the phone's voice searched nothing: it answered from its own unsearched
+/// list. Every method the phone app calls is on this list (`the_phone_app_calls_only_its_list`).
 pub const PHONE_ALLOWED: &[&str] = &[
     "hello",
     "state",
@@ -314,6 +320,12 @@ pub const PHONE_ALLOWED: &[&str] = &[
     "manager.stop",
     "manager.voice",
     "device.presence",
+    // One place everywhere (`docs/lens-everywhere.md`): the phone opens a place on the Mac, reads
+    // a place's page, and its voice's session tools are answered by the Mac. They show and read;
+    // they change nothing a phone could not see already.
+    "place.open",
+    "place.get",
+    "voice.tool",
 ];
 
 /// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
@@ -668,6 +680,19 @@ mod tests {
                 assert!(daemon_refusal(&phone, method).is_some(), "{method}");
                 assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
             }
+        }
+    }
+
+    /// Each method the phone app calls (`ManagerLink.swift`) is one a phone may call: a method
+    /// left off the list is refused at the door, and the phone falls back to answering by itself
+    /// (its voice's search then searched nothing).
+    #[test]
+    fn the_phone_app_calls_only_its_list() {
+        let swift = include_str!("../../../glasses/GlasscodeGlasses/Sources/Link/ManagerLink.swift");
+        let called: Vec<&str> = swift.split(".call(\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
+        assert!(called.len() >= 10 && called.contains(&"voice.tool") && called.contains(&"place.open"), "{called:?}");
+        for method in called {
+            assert!(PHONE_ALLOWED.contains(&method), "the phone app calls {method}, which a phone may not call");
         }
     }
 
