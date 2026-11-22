@@ -726,6 +726,10 @@ final class AppModel: ObservableObject {
             let status = page.status.isEmpty ? "" : " (\(page.status.lowercased()))"
             now = "On the Mac's screen and the lens now: \(what)\(status)" + (page.kind == "session" ? ", id \(page.place)." : ".")
         }
+        // A project named by voice is often misheard ("class code"): the projects there are.
+        if !link.projects.isEmpty {
+            now += " The projects in Glasscode: \(link.projects.joined(separator: ", ")). A project the person names, however it was said or heard, is one of these: use its exact name."
+        }
         let recent: [[String: String]] = conversation.compactMap { item in
             let author = item["author"] as? String
             let kind = item.object("kind")?.string("type")
@@ -750,6 +754,7 @@ final class AppModel: ObservableObject {
         if let snapshot = await link.today() { takeToday(snapshot) }
         if conversation.isEmpty { conversation = await link.conversation() }
         if place == nil, let json = await link.placePage(), let page = LensPage(json) { takePlace(page) }
+        tellVoice()
         if let home = link.home {
             var model = lens
             model.glance.name = home.name

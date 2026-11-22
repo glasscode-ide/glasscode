@@ -47,6 +47,11 @@ class Rules(unittest.TestCase):
         self.assertIn("A worktree without a session is closed", text)
         self.assertIn("only as a Count line of a tool result says", text)
 
+    def test_a_named_project_is_passed_on_by_its_exact_name(self):
+        text = instructions("glasscode", "mac", now="On the Mac's screen now: Today. The projects in Glasscode: hub2.0, glasscode.")
+        self.assertIn("pass its exact name as project to list_sessions", text)
+        self.assertIn("The projects in Glasscode: hub2.0, glasscode.", text)
+
 
 class WhereAndWhatWasSaid(unittest.TestCase):
     def test_the_place_on_the_screen_is_in_the_instructions(self):

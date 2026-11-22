@@ -219,6 +219,24 @@ impl Workspace {
         session_find::project(said, &names).map(|i| projects[i].id.clone()).ok_or_else(|| format!("There is no project \"{said}\". The projects: {}.", names.join(", ")))
     }
 
+    /// The project the words name, if they name one (`session_find::named_project`), with the
+    /// words left: a project given already stays, and its name is taken out of the words.
+    pub(crate) fn project_in_words(&self, given: Option<String>, words: &str) -> (Option<String>, String) {
+        let projects: Vec<&Project> = self.state.visible_projects().collect();
+        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        match session_find::named_project(words, &names) {
+            Some((i, rest)) if given.as_ref().is_none_or(|g| *g == projects[i].id) => (Some(projects[i].id.clone()), rest),
+            _ => (given, words.trim().to_string()),
+        }
+    }
+
+    /// The projects the voice and the manager may name, in a sentence: a project said or heard
+    /// differently is the one it sounds like.
+    pub(crate) fn projects_line(&self) -> String {
+        let names: Vec<&str> = self.state.visible_projects().map(|p| p.name.as_str()).collect();
+        format!("The projects in Glasscode: {}. A project the person names, however it was said or heard (\"class code\" or \"glass code\" is glasscode), is one of these: use its exact name, and look only at its sessions.", names.join(", "))
+    }
+
     /// The worktrees without a session whose branch or folder fits the words: (label, project).
     fn closed_fits(&self, said: &str, leftovers: &[Leftover]) -> Vec<(String, String)> {
         let entries: Vec<Entry> = leftovers
@@ -238,6 +256,10 @@ impl Workspace {
                 Err(say) => return say,
             },
         };
+        // A project named among the words ("the voice session in class code"): only its
+        // sessions, and its name is not searched for (other projects' branches have it too).
+        let (within, search) = self.project_in_words(within, search);
+        let search = search.as_str();
         let (sessions, leftovers) = self.sidebar_places();
         let mine = |id: &str| within.as_deref().is_none_or(|p| p == id);
         let sessions: Vec<&Session> = sessions.into_iter().filter(|s| mine(&s.project_id)).filter(|s| !needs || self.session_state(s) == "needs you").collect();
@@ -278,6 +300,13 @@ impl Workspace {
     pub(crate) fn voice_session_for(&self, said: &str) -> Result<String, String> {
         let said = said.trim();
         let (sessions, leftovers) = self.sidebar_places();
+        // Words that name a project ("the voice one in class code") look only there.
+        let (within, words) = self.project_in_words(None, said);
+        let (sessions, leftovers): (Vec<&Session>, Vec<Leftover>) = match &within {
+            Some(p) if !words.is_empty() => (sessions.into_iter().filter(|s| s.project_id == *p).collect(), leftovers.into_iter().filter(|l| l.project_id == *p).collect()),
+            _ => (sessions, leftovers),
+        };
+        let said = if within.is_some() && !words.is_empty() { words.as_str() } else { said };
         if let Some(s) = sessions.iter().find(|s| s.id == said) {
             return Ok(s.id.clone());
         }
