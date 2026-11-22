@@ -792,6 +792,9 @@ impl WorkLedger {
             "review.requested" => f.review_requested = true,
             "review.posted" => f.review_posted = true,
             "decision.made" if text("step").as_deref() == Some("ci_fix") && text("outcome").as_deref() == Some("sent") => f.fix_messages += 1,
+            // The app's finish report: a turn that ends on a question waits for the person, one
+            // that is done or goes on by itself does not (also for turns no hook opened).
+            "session.finished" => f.last_question = data.get("outcome").and_then(Value::as_str) == Some("needs_you"),
             "session.reported" => {
                 f.claimed = text("state");
                 f.claim_told = false;
@@ -1098,6 +1101,17 @@ mod tests {
 
     /// Coming up: work waiting on CI or a review first, then what open work still waits for; not
     /// stuck work, nor work waiting for the person's answer or busy in its session.
+    #[test]
+    fn a_finish_report_that_asks_waits_for_the_person() {
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        ledger.observe(&event(kinds::SESSION_FINISHED, "s1", json!({ "outcome": "needs_you", "question": "Push it?" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Waiting("you".into()));
+        ledger.observe(&event(kinds::SESSION_FINISHED, "s1", json!({ "outcome": "done", "question": "" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert_ne!(ledger.item(&key).unwrap().state, WorkState::Waiting("you".into()));
+    }
+
     #[test]
     fn coming_up_says_what_each_piece_of_work_waits_for() {
         let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");

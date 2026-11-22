@@ -405,6 +405,9 @@ pub enum HeadlessKind {
     Study,
     /// Memory's learning (M62): what the person said, and failures fixed.
     Reflect,
+    /// The check of an unclear finished turn (`finish::check`): done, a question, or work that
+    /// goes on.
+    Finish,
 }
 
 /// The one profile of every non-interactive run that reads outside text (alt-m1, trust-m2): no

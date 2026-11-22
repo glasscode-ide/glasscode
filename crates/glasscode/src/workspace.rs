@@ -150,6 +150,9 @@ pub struct Workspace {
     pub exits: HashMap<String, Option<i32>>,
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
+    /// What each session's last finished turn left (done, a question, work that goes on), and
+    /// the finishes still being decided (`finish_ui`).
+    pub(crate) finishes: crate::finish_ui::Finishes,
     pub worktrees: HashMap<String, Vec<Worktree>>,
     /// How git's last read of each project's worktrees went (`refresh_worktrees`): read, or why
     /// not; none yet just after a start. An unread or failed list is empty in `worktrees`, and the
@@ -328,6 +331,7 @@ impl Workspace {
             exits: HashMap::new(),
             activity: HashMap::new(),
             attention: HashSet::new(),
+            finishes: Default::default(),
             worktrees: HashMap::new(),
             worktree_reads: HashMap::new(),
             changes: Vec::new(),
@@ -1249,7 +1253,10 @@ impl Workspace {
         let sub = cx.subscribe_in(&terminal, window, move |this, _, event, _window, cx| {
             match event {
                 TerminalEvent::Bell => {
-                    if this.state.active_session.as_deref() != Some(&id) {
+                    // An agent whose hooks (Claude) or rollout (Codex) Glasscode follows rings for
+                    // what they report already: Claude's `terminal_bell` channel rings for its idle
+                    // reminder too, a minute after each finish. Its state is theirs.
+                    if this.state.active_session.as_deref() != Some(&id) && !this.finishes.follows(&id) {
                         this.attention.insert(id.clone());
                     }
                 }
@@ -1264,7 +1271,8 @@ impl Workspace {
             cx.notify();
         });
         self._subscriptions.push(sub);
-        self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
+        // The app tells each finished turn itself (`finish_ui`): Claude's idle reminder is no wait.
+        self.tails.insert(session_id.to_string(), EventsTail::new(session_id).reporting_finishes());
         self.journal_tail_started(session_id);
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
         self.exits.remove(session_id);
@@ -1272,6 +1280,8 @@ impl Workspace {
             // A new launch: Claude's first hook event is still to come.
             self.hooked.remove(session_id);
             self.startup_waits.remove(session_id);
+        }
+        if crate::platform::codex_turns() {
             // A resumed Codex conversation is followed from here; a new one once it is found (`tick`).
             if session.agent == AgentKind::Codex {
                 match session.transcript_path.as_deref().filter(|p| session.agent_session_id.is_some() && p.is_file()) {
@@ -1314,8 +1324,9 @@ impl Workspace {
         self.setup_forget(session_id);
         self.tails.remove(session_id);
         self.activity.remove(session_id);
+        self.finishes.forget(session_id);
+        self.rollouts.remove(session_id);
         if crate::platform::chat_status_fixes() {
-            self.rollouts.remove(session_id);
             self.hooked.remove(session_id);
             self.startup_waits.remove(session_id);
         }
@@ -1353,6 +1364,7 @@ impl Workspace {
         self.pr_session_opened(session_id, cx);
         self.state.active_session = Some(session_id.to_string());
         self.attention.remove(session_id);
+        self.finish_seen(session_id);
         self.menu_open = false;
         if let Some(worktree) = self.state.session(session_id).map(|s| s.worktree.clone()) {
             self.last_in_worktree.insert(worktree, session_id.to_string());
@@ -1684,6 +1696,16 @@ impl Workspace {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
             // Its conversation and transcript first: a turn that started and ended in these same
             // lines (a short first turn) is reported from that transcript, not as partial.
+            self.finishes.followed(&id);
+            // The last message of a turn that ended here (a `Stop` in these lines), for its finish
+            // report; its transcript is followed from here, so that its own lines are no new work.
+            if update.stopped_ms.is_some() || update.last_reply.is_some() || update.lines.iter().any(|l| l.contains("\"Stop\"")) {
+                self.finishes.note_stop(&id, update.last_reply.clone(), update.stopped_ms);
+                let path = update.transcript_path.clone().or_else(|| self.state.session(&id).and_then(|s| s.transcript_path.clone()));
+                if let Some(path) = path {
+                    self.finishes.rebase_watch(&id, &path, update.stopped_ms.unwrap_or_else(glasscode_core::clock::now_ms));
+                }
+            }
             if let Some(session) = self.state.session_mut(&id) {
                 if let Some(conversation) = update.conversation_id.clone() {
                     if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
@@ -1724,7 +1746,13 @@ impl Workspace {
                 {
                     self.attention.insert(id.clone());
                 }
-                let previous = self.activity.insert(id.clone(), activity);
+                let mut previous = self.activity.insert(id.clone(), activity);
+                // A turn that began and ended in these same lines (a short one, or the first right
+                // after a launch) worked and finished all the same.
+                if update.worked && activity != AgentActivity::Working && previous != Some(AgentActivity::Working) {
+                    self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                    previous = Some(AgentActivity::Working);
+                }
                 self.activity_changed(&id, previous, activity, cx);
                 redraw = true;
             }
@@ -1761,7 +1789,7 @@ impl Workspace {
                         .iter()
                         .any(|s| s.agent_session_id.as_deref() == Some(conversation.as_str()));
                     if !taken {
-                        if crate::platform::chat_status_fixes() {
+                        if crate::platform::codex_turns() {
                             self.rollouts.insert(id.clone(), RolloutTail::new(&path));
                         }
                         if let Some(session) = self.state.session_mut(&id) {
@@ -1777,10 +1805,14 @@ impl Workspace {
             }
         }
 
-        if crate::platform::chat_status_fixes() {
+        if crate::platform::codex_turns() {
             redraw |= self.codex_turns_tick(cx);
+        }
+        if crate::platform::chat_status_fixes() {
             redraw |= self.claude_start_tick(cx);
         }
+        // Work that starts again with no hook, and the finishes whose report is due.
+        redraw |= self.finish_tick(cx);
 
         if dirty {
             self.save();
@@ -1813,13 +1845,33 @@ impl Workspace {
         let mut changed = false;
         let ids: Vec<String> = self.rollouts.keys().cloned().collect();
         for id in ids {
-            let running = self.terminals.get(&id).is_some_and(|t| t.read(cx).exit_code.is_none());
+            let (running, asking) = self.terminals.get(&id).map(|t| {
+                let t = t.read(cx);
+                (t.exit_code.is_none(), glasscode_core::prompt::parse(&t.text_tail(60)).is_some())
+            }).unwrap_or_default();
             let Some(rollout) = self.rollouts.get_mut(&id) else { continue };
             rollout.poll();
-            let Some(now) = agents::codex_activity(rollout.turn, running) else { continue };
-            // Only a change counts, so each turn tells "finished" once.
-            let previous = self.activity.get(&id).copied();
+            let Some(mut now) = agents::codex_activity(rollout.turn, running) else { continue };
+            self.finishes.followed(&id);
+            // An approval Codex asks for on its screen, while its turn runs: it waits for the person.
+            if asking && now == AgentActivity::Working {
+                now = AgentActivity::NeedsInput;
+            }
+            let last = rollout.last_message.clone();
+            let ended = rollout.ended;
+            // Only a change counts, so each turn tells "finished" once; a turn that began and
+            // ended between two reads is one too.
+            let mut previous = self.activity.get(&id).copied();
+            if self.finishes.codex_ended(&id, ended) && now == AgentActivity::Idle && previous != Some(AgentActivity::Working) {
+                self.activity.insert(id.clone(), AgentActivity::Working);
+                self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                previous = Some(AgentActivity::Working);
+            }
             if previous != Some(now) {
+                // Its turn ended: its last message, for the finish report (none: it said nothing).
+                if now == AgentActivity::Idle {
+                    self.finishes.note_stop(&id, Some(last.unwrap_or_default()), None);
+                }
                 self.activity.insert(id.clone(), now);
                 self.activity_changed(&id, previous, now, cx);
                 changed = true;

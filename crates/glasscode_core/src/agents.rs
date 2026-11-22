@@ -749,6 +749,20 @@ pub fn headless_run(
     answer: Option<&Path>,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
+    headless_run_within(agent, config_dir, profile, input, answer, base_env, Duration::from_secs(300))
+}
+
+/// [`headless_run`] bounded to `limit` instead of five minutes: what a quick check runs with (the
+/// check of a finished turn, `finish::check`), so a slow run is let go long before five minutes.
+pub fn headless_run_within(
+    agent: AgentKind,
+    config_dir: Option<&Path>,
+    profile: &crate::profile::SessionProfile,
+    input: &str,
+    answer: Option<&Path>,
+    base_env: &HashMap<String, String>,
+    limit: Duration,
+) -> anyhow::Result<String> {
     use std::io::Write as _;
     use std::process::Stdio;
     let mut cmd = headless_command(agent, config_dir, profile, base_env)?;
@@ -757,14 +771,14 @@ pub fn headless_run(
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input.as_bytes());
     }
-    let deadline = SystemTime::now() + std::time::Duration::from_secs(300);
+    let deadline = SystemTime::now() + limit;
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
         if SystemTime::now() >= deadline {
             let _ = child.kill();
-            anyhow::bail!("the run timed out after 5 minutes");
+            anyhow::bail!("the run timed out after {} s", limit.as_secs());
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -866,21 +880,53 @@ pub struct HookUpdate {
     pub conversation_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub activity: Option<AgentActivity>,
+    /// The agent's last message of the turn that ended in these lines (the `Stop` hook's
+    /// `last_assistant_message`), for the finish report.
+    pub last_reply: Option<String>,
+    /// When the last `Stop` in these lines came (its `glasscode_at`, ms), when it is stamped.
+    pub stopped_ms: Option<u64>,
+    /// A turn began in these lines (`UserPromptSubmit`): with `activity` idle, it also ended in
+    /// them (a short turn, or the first one right after a launch).
+    pub worked: bool,
     /// The lines read, as they were (the journal's `HookIntake` takes them).
     pub lines: Vec<String>,
+}
+
+/// Whether a `Notification` of `kind` (its `notification_type`) is the agent waiting on the
+/// person: a permission prompt, a question dialog, an MCP server asking for input. Claude Code's
+/// idle reminder (`idle_prompt`, sixty seconds after a turn ended) counts only where `idle_waits`
+/// (the server's reading, as before; the app reports finishes itself, `finish`), and the news
+/// kinds (a sign-in that worked, an agent that finished) never. A notification with no kind (an
+/// older CLI) waits, as it always did.
+pub fn notification_waits(kind: Option<&str>, idle_waits: bool) -> bool {
+    match kind.map(str::trim).unwrap_or_default() {
+        "" => true,
+        "idle_prompt" => idle_waits,
+        "auth_success" | "agent_completed" => false,
+        _ => true,
+    }
 }
 
 /// Reads new hook events appended to a session's events file.
 pub struct EventsTail {
     path: PathBuf,
     offset: u64,
+    /// Claude Code's idle reminder means "needs you" (see [`notification_waits`]).
+    idle_waits: bool,
 }
 
 impl EventsTail {
     pub fn new(session_id: &str) -> Self {
         let path = events_file(session_id);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { path, offset }
+        Self { path, offset, idle_waits: true }
+    }
+
+    /// The app's reading: the idle reminder is not "needs you", since the app tells of each
+    /// finished turn itself, at once (`finish`).
+    pub fn reporting_finishes(mut self) -> Self {
+        self.idle_waits = false;
+        self
     }
 
     /// Read on from `offset`, where a reader stopped before a restart (the journal's cursors,
@@ -924,14 +970,131 @@ impl EventsTail {
             if let Some(path) = value.get("transcript_path").and_then(Value::as_str) {
                 update.transcript_path = Some(PathBuf::from(path));
             }
-            update.activity = match value.get("hook_event_name").and_then(Value::as_str) {
+            let name = value.get("hook_event_name").and_then(Value::as_str);
+            if name == Some("UserPromptSubmit") {
+                update.worked = true;
+            }
+            if name == Some("Stop") {
+                update.last_reply = value.get("last_assistant_message").and_then(Value::as_str).map(str::to_string).filter(|r| !r.trim().is_empty());
+                update.stopped_ms = value.get("glasscode_at").and_then(Value::as_u64);
+            }
+            update.activity = match name {
                 Some("UserPromptSubmit") => Some(AgentActivity::Working),
-                Some("Stop") | Some("SessionStart") => Some(AgentActivity::Idle),
-                Some("Notification") => Some(AgentActivity::NeedsInput),
+                Some("Stop") => Some(AgentActivity::Idle),
+                // After a compaction the conversation goes on: its turn did not end.
+                Some("SessionStart") if value.get("source").and_then(Value::as_str) == Some("compact") => update.activity,
+                Some("SessionStart") => Some(AgentActivity::Idle),
+                Some("Notification") if notification_waits(value.get("notification_type").and_then(Value::as_str), self.idle_waits) => Some(AgentActivity::NeedsInput),
                 _ => update.activity,
             };
         }
         Some(update)
+    }
+}
+
+/// What starts work again in a Claude transcript after a turn ended, when no hook says so: a
+/// turn Claude begins by itself (another session's message, a Stop hook's feedback) fires no
+/// `UserPromptSubmit`, and a tool that runs after a permission prompt fires nothing. An
+/// allow-list: an assistant message, a tool's result, and those two openings. What Claude writes
+/// after every finish (`queue-operation`, `stop_hook_summary`, `turn_duration`, titles, links),
+/// slash commands, compactions and other meta lines are none: they would leave a finished session
+/// "working" (measured on the person's transcripts, 2026-11-22).
+pub fn transcript_line_starts_work(line: &str) -> bool {
+    // Most lines are bookkeeping: parse only those that can be one.
+    if !line.contains("\"assistant\"") && !line.contains("\"user\"") {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else { return false };
+    // A subagent's own lines are its work, not the session's turn.
+    if value["isSidechain"].as_bool() == Some(true) {
+        return false;
+    }
+    match value["type"].as_str() {
+        Some("assistant") => true,
+        Some("user") if value["isCompactSummary"].as_bool() != Some(true) => {
+            let content = &value["message"]["content"];
+            let parts = content.as_array().map(Vec::as_slice).unwrap_or_default();
+            if parts.iter().any(|part| part["type"] == "tool_result") {
+                return true;
+            }
+            let text: String = match content.as_str() {
+                Some(text) => text.to_string(),
+                None => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join(" "),
+            };
+            let text = text.trim_start();
+            text.starts_with("Stop hook feedback") || text.starts_with("Another Claude session sent a message") || text.chars().take(400).collect::<String>().contains("<teammate-message")
+        }
+        _ => false,
+    }
+}
+
+/// An assistant message of the session's own turn (not a subagent's).
+fn transcript_line_is_agent(line: &str) -> bool {
+    line.contains("\"assistant\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| v["type"] == "assistant" && v["isSidechain"].as_bool() != Some(true))
+}
+
+/// When a transcript line was written (its RFC 3339 `timestamp`), in ms since 1970.
+fn transcript_line_ms(line: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let at = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?;
+    u64::try_from(at.timestamp_millis()).ok()
+}
+
+/// Follows a Claude transcript after a turn ended, to see work start again without a hook
+/// ([`transcript_line_starts_work`]). Only lines written after the turn's end count: Claude may
+/// write the turn's last message just after its `Stop` hook ran.
+pub struct TranscriptWatch {
+    path: PathBuf,
+    offset: u64,
+    since_ms: u64,
+    /// The session waits on a prompt mid-turn: only an assistant message says it goes on. A tool's
+    /// result may be a sibling's, run while the dialog still waits (seen in the person's
+    /// transcripts, 2026-11-22).
+    mid_turn: bool,
+}
+
+impl TranscriptWatch {
+    /// From the transcript's end now, for lines written after `since_ms`.
+    pub fn new(path: &Path, since_ms: u64) -> Self {
+        let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        Self { path: path.to_path_buf(), offset, since_ms, mid_turn: false }
+    }
+
+    /// For a session that waits on a prompt mid-turn (see `mid_turn`).
+    pub fn mid_turn(mut self) -> Self {
+        self.mid_turn = true;
+        self
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn is_mid_turn(&self) -> bool {
+        self.mid_turn
+    }
+
+    /// Read what was added: true when work started again.
+    pub fn poll(&mut self) -> bool {
+        let Ok(mut file) = std::fs::File::open(&self.path) else { return false };
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return false };
+        if len < self.offset {
+            // Replaced: from its end again.
+            self.offset = len;
+            return false;
+        }
+        if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return false;
+        }
+        let mut bytes = Vec::new();
+        if (&mut file).take(len - self.offset).read_to_end(&mut bytes).is_err() {
+            return false;
+        }
+        // Whole lines only: a line still being written comes next time.
+        let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { return false };
+        self.offset += end as u64 + 1;
+        let counts = |line: &str| if self.mid_turn { transcript_line_is_agent(line) } else { transcript_line_starts_work(line) };
+        String::from_utf8_lossy(&bytes[..end]).lines().any(|line| counts(line) && transcript_line_ms(line).is_none_or(|at| at > self.since_ms))
     }
 }
 
@@ -1092,6 +1255,12 @@ pub fn codex_turn_event(line: &str) -> Option<CodexTurn> {
     }
 }
 
+/// The last message a `task_complete` line carries (`last_agent_message`), when it has one.
+fn codex_last_message(line: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    value["payload"]["last_agent_message"].as_str().map(str::to_string).filter(|m| !m.trim().is_empty())
+}
+
 /// A rollout line that is part of a turn's state (`task_started`, `task_complete`,
 /// `turn_aborted`, `error`), parsed; None for the rest.
 pub fn codex_turn_line(line: &str) -> Option<Value> {
@@ -1112,6 +1281,12 @@ pub struct RolloutTail {
     path: PathBuf,
     offset: u64,
     pub turn: CodexTurn,
+    /// How many turns have ended since it was made: one that began and ended between two reads
+    /// leaves `turn` as it was, and still ended.
+    pub ended: u64,
+    /// The last message of the turn that completed last (`task_complete`'s `last_agent_message`),
+    /// for the finish report.
+    pub last_message: Option<String>,
     /// The turn's own lines (`task_started`, `task_complete`, `turn_aborted`, `error`), kept for
     /// the reader that asked for them ([`RolloutTail::keeping_events`], M30's turns).
     events: Option<Vec<Value>>,
@@ -1120,7 +1295,7 @@ pub struct RolloutTail {
 impl RolloutTail {
     /// A conversation that this launch started: its turns so far count.
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, events: None }
+        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, ended: 0, last_message: None, events: None }
     }
 
     /// The journal's tail of a Codex session's rollout (M30's turns): from its start when this
@@ -1148,7 +1323,7 @@ impl RolloutTail {
     /// in case Codex writes it somewhere else).
     pub fn resumed(path: &Path) -> Self {
         let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, events: None }
+        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, ended: 0, last_message: None, events: None }
     }
 
     /// Read what was added; true when the turn changed.
@@ -1185,6 +1360,14 @@ impl RolloutTail {
             let text = String::from_utf8_lossy(&line);
             if let Some(turn) = codex_turn_event(&text) {
                 self.turn = turn;
+                match turn {
+                    CodexTurn::Running => self.last_message = None,
+                    CodexTurn::Ended => {
+                        self.ended += 1;
+                        self.last_message = codex_last_message(&text).or(self.last_message.take());
+                    }
+                    CodexTurn::Unknown => {}
+                }
             }
             if let Some(events) = self.events.as_mut()
                 && let Some(event) = codex_turn_line(&text)
@@ -1791,5 +1974,130 @@ mod tests {
         let name = Path::new(&shell.program).file_name().unwrap_or_default().to_ascii_lowercase();
         assert!(name == "pwsh.exe" || name == "powershell.exe", "{}", shell.program);
         assert!(!shell.args.iter().any(|a| a == "-l"), "{:?}", shell.args);
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write as _;
+
+    fn tail_over(lines: &[Value], idle_waits: bool) -> HookUpdate {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+        let mut tail = EventsTail { path: file.path().to_path_buf(), offset: 0, idle_waits };
+        tail.poll().unwrap()
+    }
+
+    fn ms(stamp: &str) -> u64 {
+        chrono::DateTime::parse_from_rfc3339(stamp).unwrap().timestamp_millis() as u64
+    }
+
+    #[test]
+    fn the_idle_reminder_waits_only_where_the_app_does_not_report_finishes() {
+        assert!(notification_waits(Some("permission_prompt"), false));
+        assert!(notification_waits(Some("elicitation_dialog"), false));
+        assert!(notification_waits(Some("agent_needs_input"), false));
+        assert!(notification_waits(None, false), "an older CLI's notification waits, as before");
+        assert!(!notification_waits(Some("idle_prompt"), false));
+        assert!(notification_waits(Some("idle_prompt"), true), "the server reads it as before");
+        assert!(!notification_waits(Some("auth_success"), true));
+        let stop = json!({ "hook_event_name": "Stop", "last_assistant_message": "Pushed. Should I open the PR?", "glasscode_at": 1000 });
+        let idle = json!({ "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Claude is waiting for your input" });
+        let app = tail_over(&[stop.clone(), idle.clone()], false);
+        assert_eq!(app.activity, Some(AgentActivity::Idle));
+        assert_eq!(app.last_reply.as_deref(), Some("Pushed. Should I open the PR?"));
+        assert_eq!(app.stopped_ms, Some(1000));
+        assert_eq!(tail_over(&[stop, idle], true).activity, Some(AgentActivity::NeedsInput));
+        let permission = json!({ "hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission" });
+        assert_eq!(tail_over(&[permission], false).activity, Some(AgentActivity::NeedsInput));
+    }
+
+    #[test]
+    fn a_turn_that_began_and_ended_in_one_read_is_seen() {
+        let lines = [json!({ "hook_event_name": "UserPromptSubmit", "prompt": "hi" }), json!({ "hook_event_name": "Stop", "last_assistant_message": "Hi." })];
+        let update = tail_over(&lines, false);
+        assert_eq!((update.activity, update.worked), (Some(AgentActivity::Idle), true));
+        assert!(!tail_over(&[json!({ "hook_event_name": "SessionStart", "source": "startup" })], false).worked);
+    }
+
+    #[test]
+    fn a_compaction_does_not_end_the_turn() {
+        let lines = [json!({ "hook_event_name": "UserPromptSubmit", "prompt": "go" }), json!({ "hook_event_name": "SessionStart", "source": "compact" })];
+        assert_eq!(tail_over(&lines, false).activity, Some(AgentActivity::Working));
+        assert_eq!(tail_over(&[json!({ "hook_event_name": "SessionStart", "source": "resume" })], false).activity, Some(AgentActivity::Idle));
+    }
+
+    #[test]
+    fn work_starts_again_only_on_the_lines_that_are_work() {
+        let at = "2026-11-22T08:32:00.000Z";
+        let starts = [
+            json!({ "type": "assistant", "timestamp": at, "message": { "content": [{ "type": "text", "text": "On it." }] } }),
+            json!({ "type": "user", "timestamp": at, "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] } }),
+            json!({ "type": "user", "isMeta": true, "timestamp": at, "message": { "content": "Stop hook feedback:\n[keep going]" } }),
+            json!({ "type": "user", "timestamp": at, "message": { "content": [{ "type": "text", "text": "Another Claude session sent a message:\n<teammate-message from=\"a\">hi</teammate-message>" }] } }),
+        ];
+        for line in &starts {
+            assert!(transcript_line_starts_work(&line.to_string()), "{line}");
+        }
+        let bookkeeping = [
+            json!({ "type": "system", "subtype": "stop_hook_summary", "timestamp": at }),
+            json!({ "type": "system", "subtype": "turn_duration", "timestamp": at }),
+            json!({ "type": "queue-operation", "operation": "enqueue", "content": "\"user\"" }),
+            json!({ "type": "ai-title", "title": "x" }),
+            json!({ "type": "user", "isCompactSummary": true, "message": { "content": "This session is being continued" } }),
+            json!({ "type": "user", "isMeta": true, "message": { "content": "<command-name>/model</command-name>" } }),
+            json!({ "type": "user", "message": { "content": "<local-command-stdout>ok</local-command-stdout>" } }),
+            json!({ "type": "user", "message": { "content": "a prompt the person typed (its hook says so)" } }),
+        ];
+        for line in &bookkeeping {
+            assert!(!transcript_line_starts_work(&line.to_string()), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_watch_counts_only_what_was_written_after_the_turn_ended() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "{}", json!({ "type": "assistant", "timestamp": "2026-11-22T08:31:57.000Z", "message": { "content": [] } })).unwrap();
+        let mut watch = TranscriptWatch { path: file.path().to_path_buf(), offset: 0, since_ms: ms("2026-11-22T08:31:57.500Z"), mid_turn: false };
+        assert!(!watch.poll(), "the turn's own last message, written before its end");
+        writeln!(file, "{}", json!({ "type": "system", "subtype": "turn_duration", "timestamp": "2026-11-22T08:31:57.600Z" })).unwrap();
+        assert!(!watch.poll());
+        write!(file, "{}", json!({ "type": "assistant", "timestamp": "2026-11-22T08:31:59.100Z", "message": { "content": [] } })).unwrap();
+        assert!(!watch.poll(), "a line still being written");
+        writeln!(file).unwrap();
+        assert!(watch.poll(), "a new turn began");
+        let new = TranscriptWatch::new(file.path(), 0);
+        assert_eq!(new.offset, std::fs::metadata(file.path()).unwrap().len(), "a new watch starts at the end");
+    }
+
+    #[test]
+    fn waiting_on_a_prompt_only_the_agent_going_on_counts() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut watch = TranscriptWatch::new(file.path(), 0).mid_turn();
+        writeln!(file, "{}", json!({ "type": "user", "timestamp": "2026-11-22T08:40:00.000Z", "message": { "content": [{ "type": "tool_result", "tool_use_id": "sibling", "content": "ok" }] } })).unwrap();
+        assert!(!watch.poll(), "a sibling tool's result while the dialog waits");
+        writeln!(file, "{}", json!({ "type": "assistant", "isSidechain": true, "timestamp": "2026-11-22T08:40:01.000Z", "message": { "content": [] } })).unwrap();
+        assert!(!watch.poll(), "a subagent's line");
+        writeln!(file, "{}", json!({ "type": "assistant", "timestamp": "2026-11-22T08:40:02.000Z", "message": { "content": [{ "type": "text", "text": "Done with that." }] } })).unwrap();
+        assert!(watch.poll(), "the agent goes on");
+    }
+
+    #[test]
+    fn a_codex_turn_keeps_its_last_message() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_started" } })).unwrap();
+        let mut tail = RolloutTail::new(file.path());
+        tail.poll();
+        assert_eq!((tail.turn, tail.last_message.clone()), (CodexTurn::Running, None));
+        writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_complete", "last_agent_message": "All 41 pass." } })).unwrap();
+        tail.poll();
+        assert_eq!((tail.turn, tail.last_message.as_deref(), tail.ended), (CodexTurn::Ended, Some("All 41 pass."), 1));
+        writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_started" } })).unwrap();
+        tail.poll();
+        assert_eq!(tail.last_message, None, "a new turn has said nothing yet");
     }
 }

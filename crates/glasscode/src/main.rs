@@ -15,6 +15,7 @@ mod composer;
 mod dialogs;
 mod editor;
 mod file_view;
+mod finish_ui;
 mod files_ui;
 mod first_run;
 mod github_accounts_ui;

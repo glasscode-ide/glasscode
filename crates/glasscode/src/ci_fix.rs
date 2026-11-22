@@ -455,7 +455,7 @@ impl Workspace {
     }
 
     /// What a session shows now, for its queue: no IO.
-    fn delivery_inputs(&self, id: &str, cx: &mut Context<Self>) -> Inputs {
+    pub(crate) fn delivery_inputs(&self, id: &str, cx: &mut Context<Self>) -> Inputs {
         let (terminal, activity) = match self.terminals.get(id) {
             Some(terminal) => (terminal, self.activity.get(id).copied()),
             None => match (self.server.terminals.get(id), self.server.session(id)) {
