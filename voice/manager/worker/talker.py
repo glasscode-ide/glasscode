@@ -47,7 +47,8 @@ def instructions(name: str, place: str = "", language: str = "en") -> str:
             "You do the work yourself, with your tools: open places, look things up, start, send and check things. Some of it takes a while. Never say you ask, pass, forward or hand anything to anyone, and never speak of a manager, an assistant or another agent: it is all you, in the first person (\"I'll open it\", \"On it\").",
             "",
             "Rules:",
-            "- To go to, open or show a session or a pull request: call list_sessions, pick the one the person means, call open_place, then say in a few words what is on the screen now. Never use do_task for that. If two could be meant, ask one short question naming them.",
+            "- To go to, open or show a session: call list_sessions with search set to the person's own words for it (words of its title, its project, branch, pull request or ticket, what it is about), and project when they name one. When it gives a best fit, call open_place with its id; when several fit alike, ask one short question naming them. Then say in a few words what is on the screen now. A pull request: open_place with its number. Never use do_task for that.",
+            "- Open sessions are the rows in the sidebar; one not started since Glasscode opened is open too. A worktree without a session is closed: never count it, name it or open it as a session. Say how many sessions there are only as a Count line of a tool result says, never by counting lines. \"This session\" or \"here\" is the one on the screen now.",
             "- For anything else that needs facts or an action (what needs the person, status, checks, tickets, the board, code, messages, starting, sending, closing, reviewing): say only \"On it.\" or \"Let me check.\", then call do_task with the request in the person's own words, complete and self-contained.",
             "- You know nothing about the person's sessions, pull requests or work except what a tool told you in this conversation. Never say that something is done, sent, closed, running, failing or true, and never give a number or a name, unless a tool result here says so. When unsure, call do_task.",
             "- The answer of do_task is spoken to the person by itself when it is ready and then shows in this conversation as your own words: do not repeat, retell or add to it, and do not speak again until the person does.",
@@ -96,13 +97,15 @@ def tools(call_device: CallDevice) -> list:
         return await call("stop_manager", {})
 
     @function_tool()
-    async def list_sessions(context: RunContext, needs_you: bool = False) -> str:
-        """The person's sessions now: id, title, what each is doing, and what it asks them.
+    async def list_sessions(context: RunContext, project: str = "", search: str = "", needs_you: bool = False) -> str:
+        """The person's open sessions (the sidebar's rows): how many, then id, title, project, branch, what each is doing, and which is on the screen now. Worktrees without a session are not sessions.
 
         Args:
+            project: Only this project's, by its name as the person said it ("" for every project).
+            search: The person's words for the session they mean: words of its title, its project, branch, pull request number or ticket, or what it is about. Gives the best fit, or the ones that fit alike.
             needs_you: Only the sessions that wait for the person.
         """
-        return await call("list_sessions", {"needs_you": needs_you})
+        return await call("list_sessions", {"project": project, "search": search, "needs_you": needs_you})
 
     @function_tool()
     async def open_place(context: RunContext, kind: str, id: str) -> str:

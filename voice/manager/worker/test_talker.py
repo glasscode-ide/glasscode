@@ -1,0 +1,52 @@
+"""Tests for the talker's tools and rules. Run in this folder with the worker's Python:
+`~/.glasscode/voice/venv/bin/python -m unittest test_talker`."""
+
+import asyncio
+import unittest
+
+from talker import instructions, tools
+
+
+def tool(found, name):
+    for t in found:
+        info = getattr(t, "info", None) or getattr(t, "__livekit_tool_info", None)
+        if (getattr(info, "name", None) or getattr(t, "__name__", "")) == name:
+            return t
+    raise AssertionError(f"no tool {name}")
+
+
+class ListSessions(unittest.TestCase):
+    def test_passes_project_and_search_to_the_device(self):
+        calls = []
+
+        async def device(name, arguments):
+            calls.append((name, arguments))
+            return "Count: glasscode has 2 open sessions (each is a row in the sidebar)."
+
+        found = tools(device)
+        list_sessions = tool(found, "list_sessions")
+        said = asyncio.run(list_sessions(None, project="glass code", search="orange icon lag"))
+        self.assertTrue(said.startswith("Count:"))
+        self.assertEqual(calls, [("list_sessions", {"project": "glass code", "search": "orange icon lag", "needs_you": False})])
+
+    def test_every_argument_may_be_left_out(self):
+        calls = []
+
+        async def device(name, arguments):
+            calls.append(arguments)
+            return "No sessions."
+
+        asyncio.run(tool(tools(device), "list_sessions")(None))
+        self.assertEqual(calls, [{"project": "", "search": "", "needs_you": False}])
+
+
+class Rules(unittest.TestCase):
+    def test_finding_a_session_and_what_is_not_one(self):
+        text = instructions("glasscode", "mac")
+        self.assertIn("call list_sessions with search set to the person's own words", text)
+        self.assertIn("A worktree without a session is closed", text)
+        self.assertIn("only as a Count line of a tool result says", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
