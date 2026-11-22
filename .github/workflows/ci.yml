@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, windows-port]
   push:
-    branches: [main]
+    branches: [main, windows-port]
   # By hand (Actions > CI > Run workflow): all jobs, the Windows installer too.
   workflow_dispatch:
 
@@ -220,8 +220,8 @@ jobs:
 
   # The release programs and the installer (script/bundle-windows.ps1). A release build takes much
   # longer than the checks above, so it is a job of its own, with its own cache. It builds on each
-  # push to main, when started by hand, and for a pull request that changes the release build. For
-  # other pull requests it skips its steps.
+  # push to main and windows-port, when started by hand, and for a pull request that changes the
+  # release build. For other pull requests it skips its steps.
   windows-installer:
     name: Windows installer
     runs-on: windows-latest

@@ -26,8 +26,9 @@ cargo test -p glasscode_cli                         # the console program
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and installed by rustup automatically.
 Please run `cargo fmt` and `cargo clippy` before sending changes — both components are pinned
-with the toolchain. Neither is a CI gate yet, so a warning that was there before your change is
-not yours to fix in the same pull request.
+with the toolchain. Neither is a CI gate yet. In a development build `cargo clippy` stops on an
+older error in `glasscode_core` (`update.rs`, a comparison with the build number, which is 0 there);
+`GLASSCODE_BUILD=1 cargo clippy` gets past it.
 
 To try a change without real agents or accounts, `script/test-agents/` has stand-ins for
 `claude`, `codex` and `gh`, and `script/journeys.sh` drives a debug build through whole journeys

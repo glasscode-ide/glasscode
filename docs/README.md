@@ -17,8 +17,8 @@ Start with the [README](../README.md) for what Glasscode is, how to build it and
 
 ## Design records
 
-Glasscode was built in planned slices, one pull request each, mostly by coding agents working
-from a written plan. These are those plans, the measurements that chose between designs, and the
+Glasscode was built in planned slices, one pull request each, from a written plan. These are
+those plans, the measurements that chose between designs, and the
 acceptance lists, kept as they were written. They explain why the code is the way it is, and the
 code's comments refer to their decision numbers (D17, M11, U02 and so on). Where a record and
 the code disagree, the code and the guides above are right.
@@ -42,5 +42,6 @@ the code disagree, the code and the guides above are right.
 
 ## Screenshots
 
-[screenshots/](screenshots/) holds the pictures the README shows. They come from a demo home with
-made-up projects; keep every screenshot free of real projects, tickets and personal data.
+[screenshots/](screenshots/) is for pictures of the app. Take them from a demo home with made-up
+projects (`script/journeys.sh` makes one); keep every screenshot free of real projects, tickets
+and personal data.

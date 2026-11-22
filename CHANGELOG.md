@@ -27,4 +27,9 @@ becomes the text of the GitHub release.
 - The interface is new: one shell with Today, Sessions, Board, Pull requests and Settings, the
   Jump field, themes, backdrops and a scale for the whole interface.
 
+### Fixed
+
+- `Glasscode --version` and `Glasscode --help` print and exit, as `glasscode --version` does. They
+  used to start a second copy of the app beside the one already running.
+
 No version is released yet. The builds so far call themselves 0.1.0.

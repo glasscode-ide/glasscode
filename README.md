@@ -70,22 +70,6 @@ And, optional:
 Glasscode depends on no hosted service of its own. Your devices reach each other over
 [Tailscale](https://tailscale.com/) or an optional relay you host yourself.
 
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/today.png" alt="Today: what needs you, usage, recent sessions and your tasks" width="900" />
-</p>
-
-| Sessions in chat view | The terminal of the same session |
-|---|---|
-| ![A session in chat view](docs/screenshots/chat.png) | ![A session's terminal](docs/screenshots/terminal.png) |
-
-| Pull requests | Settings |
-|---|---|
-| ![Pull requests and their checks](docs/screenshots/pull-requests.png) | ![Settings, Appearance](docs/screenshots/settings.png) |
-
-The screenshots show a demo home with made-up projects ([docs/screenshots](docs/screenshots/)).
-
 ## How the parts fit together
 
 ```

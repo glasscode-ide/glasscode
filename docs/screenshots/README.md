@@ -1,12 +1,11 @@
 # Screenshots
 
-Drop screenshots of the app here and reference them from the main
-[README](../../README.md#screenshots), e.g.:
+Screenshots of the app for the [README](../../README.md) go here, for example:
 
 ```markdown
-![Sessions](docs/screenshots/sessions.png)
-![Today board](docs/screenshots/today.png)
-![Chat view](docs/screenshots/chat.png)
+![Today](docs/screenshots/today.png)
+![A session in chat view](docs/screenshots/chat.png)
 ```
 
-Keep them free of any real project, ticket, or personal data.
+Take them from a demo home with made-up projects, never from your own: keep them free of any
+real project, ticket, account or personal data.
