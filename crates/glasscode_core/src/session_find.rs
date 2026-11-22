@@ -68,9 +68,19 @@ pub fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
 }
 
-/// The words said that could name something, as said (filler and single letters left out).
+/// Filler that a title may still be made of ("Claude session", "Codex · main"): when nothing
+/// else was said, these are what the person named.
+const NAMES_TOO: &[&str] = &["claude", "codex", "session", "sessions", "project", "worktree", "branch", "agent", "ticket", "tab", "window", "screen", "pr", "pull", "request", "number", "title"];
+
+/// The words said that could name something, as said (filler and single letters left out). When
+/// only filler was said, the filler a title may be made of counts ("the Claude session").
 fn wanted(said: &str) -> Vec<String> {
-    words(said).into_iter().filter(|w| !FILLER.contains(&w.as_str()) && (w.chars().count() > 1)).collect()
+    let all = words(said);
+    let named: Vec<String> = all.iter().filter(|w| !FILLER.contains(&w.as_str()) && (w.chars().count() > 1)).cloned().collect();
+    if !named.is_empty() {
+        return named;
+    }
+    all.into_iter().filter(|w| NAMES_TOO.contains(&w.as_str())).collect()
 }
 
 fn numeric(word: &str) -> bool {
@@ -353,9 +363,14 @@ mod tests {
 
     #[test]
     fn filler_alone_names_nothing() {
-        let ranked = rank("open the session for me please", &glasscode());
+        let ranked = rank("open it for me please", &glasscode());
         assert_eq!(ranked.words, 0);
         assert!(ranked.hits.is_empty());
+        // A title made of such words is still found by them.
+        let plain = vec![entry("s1", "Claude session", "app", "main"), entry("s2", "Codex session", "app", "main")];
+        assert_eq!(best("open the Claude session", &plain).as_deref(), Some("s1"));
+        assert_eq!(best("the codex one", &plain).as_deref(), Some("s2"));
+        assert!(rank("the session", &plain).clear().is_none());
     }
 
     #[test]

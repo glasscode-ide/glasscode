@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_lists_agree_on_both_ends() {
-        for method in ["manager.ask", "manager.home", "manager.conversation", "manager.stop", "device.presence", "today.op", "sessions.send"] {
+        for method in ["manager.ask", "manager.home", "manager.conversation", "manager.stop", "device.presence", "today.op", "sessions.send", "place.open", "place.get", "voice.tool"] {
             assert!(allowed(method), "{method}");
         }
         for method in ["sessions.create", "phones.add", "caller.declare", "owners.begin", "session.new", "approvals.decide"] {

@@ -41,6 +41,9 @@ final class RoomVoice {
 
     private(set) var state: State = .off
     var live: Bool { room != nil }
+    /// The person made it silent: the microphone is off and nothing said counts, until they
+    /// talk again. The talk stays open.
+    private(set) var muted = false
     var speaking: Bool { state == .speaking }
     /// The room's worker has a talker: it retells the manager's answer itself, so the answer goes
     /// to it whole, once, not sentence by sentence.
@@ -147,6 +150,17 @@ final class RoomVoice {
         await publish(Topic.say, ["id": id, "text": text])
     }
 
+    /// Make it silent, or let it listen again: the microphone goes off (or on), what it was
+    /// saying stops, and the worker is told that nothing said counts.
+    func setMuted(_ on: Bool) async {
+        guard let room, on != muted else { return }
+        muted = on
+        try? await room.localParticipant.setMicrophone(enabled: !on)
+        if on { await publish(Topic.stop, [:]) }
+        await sendConfig()
+        onState?(state)
+    }
+
     /// Stop speaking now.
     func stop() async {
         guard room != nil else { return }
@@ -155,6 +169,7 @@ final class RoomVoice {
 
     /// Leave the room and give the microphone back.
     func hangUp() async {
+        muted = false
         generation += 1
         stopQuietTimer()
         let leaving = room
@@ -173,7 +188,7 @@ final class RoomVoice {
 
     private func sendConfig() async {
         // The person opened this talk: everything said counts, no wake word.
-        var config: [String: Any] = ["name": name, "listen": "always", "talker": true, "place": "glasses"]
+        var config: [String: Any] = ["name": name, "listen": muted ? "never" : "always", "talker": true, "place": "glasses"]
         if !now.isEmpty { config["now"] = now }
         if !recent.isEmpty { config["recent"] = recent }
         await publish(Topic.config, config)
