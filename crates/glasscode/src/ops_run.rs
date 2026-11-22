@@ -3244,10 +3244,22 @@ fn device_open(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         _ => return Err(denied("Only you, and the manager answering your glasses, show a place on them.")),
     }
     let _ = ws;
-    plan(Kind::Show, format!("show {word} on the glasses"), move |ws, r, _, cx| {
-        let reply = match ws.door_open(place) {
-            Ok(said) => Reply::ok(said, json!({ "place": word, "shown": true })),
-            Err(why) => failed(why),
+    plan(Kind::Show, format!("show {word} on the glasses and in the Mac's window"), move |ws, r, window, cx| {
+        // One place everywhere (`lens_pages`): the Mac's window goes there too, and every lens
+        // follows it.
+        let on_mac = match &place {
+            crate::device_door::DevicePlace::Session(said) => ws.voice_session_for(said).ok(),
+            crate::device_door::DevicePlace::Pr(n) => Some(format!("pr:{n}")),
+            crate::device_door::DevicePlace::Project(_) => Some("sessions".to_string()),
+            crate::device_door::DevicePlace::Today => Some("today".to_string()),
+            crate::device_door::DevicePlace::Conversation => None,
+        };
+        let on_mac = on_mac.and_then(|p| ws.lens_open(&p, window, cx).ok());
+        let reply = match (ws.door_open(place), on_mac) {
+            (Ok(said), Some(_)) => Reply::ok(format!("{said} It is in the Mac's window too."), json!({ "place": word, "shown": true, "mac": true })),
+            (Ok(said), None) => Reply::ok(said, json!({ "place": word, "shown": true })),
+            (Err(_), Some(page)) => Reply::ok(format!("Shown in the Mac's window: {}; the glasses show it too while they are connected.", page.title), json!({ "place": word, "shown": true, "mac": true })),
+            (Err(why), None) => failed(why),
         };
         ws.reply(r, reply);
         cx.notify();

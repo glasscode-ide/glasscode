@@ -21,6 +21,7 @@
 		65543B1CA24697B1BEED009B /* GlasscodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */; };
 		670C493A07E2BF8DBEE873E8 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */; };
 		71400D9DCCC379C128B7F753 /* ServerLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6605EFDC5271FB10F59DBFE4 /* ServerLink.swift */; };
+		798BA774A49F49069E3838C5 /* LensPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB77ED6D66A9839868772220 /* LensPage.swift */; };
 		7E4D2B0D0D3577ABFD66A038 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F17FB3798408A803A799178 /* AppModel.swift */; };
 		806BEA62EE058DB951E4AEC0 /* LinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 358E31277B01F5102D481811 /* LinkTests.swift */; };
 		8690C5EEE3FC6CC9AE9E1185 /* LensCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EB8114759B3FAA9F6D004D4 /* LensCards.swift */; };
@@ -34,8 +35,11 @@
 		B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */ = {isa = PBXBuildFile; productRef = F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */; };
 		BCE0BC027ABD6C313E70DAAA /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = 2DB5A82AC5377366F47AF18C /* MWDATDisplay */; };
 		D1E76A34140A87E6131FEEF2 /* DeviceKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09131CC2C61A8886BA6D12CD /* DeviceKey.swift */; };
+		DE18D8D10BD18379CAA4A511 /* LensShotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C408E8FF43F1F84DEDC803C /* LensShotsTests.swift */; };
 		E0660AAE4BCA62FED8255F89 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */; };
+		EB674114180A32AB959BD124 /* LensArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1333BEBFB100D790E4DC6A /* LensArt.swift */; };
 		F193555A08BEA5ACD73AA601 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = 7857C5E1450492FEAF2C67DB /* MWDATMockDevice */; };
+		F8AD1DC00B197886A69EED18 /* PageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B750968FCECC7B8AA906F8F7 /* PageTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +57,7 @@
 		09131CC2C61A8886BA6D12CD /* DeviceKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKey.swift; sourceTree = "<group>"; };
 		1EEE44F05E8E4EBDF27807DD /* LensTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensTests.swift; sourceTree = "<group>"; };
 		22D03E4C7937AF4310FE8262 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		2C408E8FF43F1F84DEDC803C /* LensShotsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensShotsTests.swift; sourceTree = "<group>"; };
 		31CE60FC2F92DC2501D1F60B /* GlasscodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlasscodeApp.swift; sourceTree = "<group>"; };
 		358E31277B01F5102D481811 /* LinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTests.swift; sourceTree = "<group>"; };
 		55DA0922DA29476C0F54D6CE /* LinkProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkProtocol.swift; sourceTree = "<group>"; };
@@ -61,12 +66,14 @@
 		6F17FB3798408A803A799178 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		72F4967BB97526E80AE314EE /* DoorLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoorLink.swift; sourceTree = "<group>"; };
 		8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlasscodeGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8D1333BEBFB100D790E4DC6A /* LensArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensArt.swift; sourceTree = "<group>"; };
 		8EB8114759B3FAA9F6D004D4 /* LensCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensCards.swift; sourceTree = "<group>"; };
 		91CE76E135BB3BDD2D2A354C /* GlasscodeGlasses.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GlasscodeGlasses.entitlements; sourceTree = "<group>"; };
 		A3DD5784B61AE7E2F209FD4D /* ManagerLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagerLink.swift; sourceTree = "<group>"; };
 		A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
 		B1D3A4BF8DB346A7E50431CC /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		B36C472175DFBAC9A4C89148 /* LineConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineConnection.swift; sourceTree = "<group>"; };
+		B750968FCECC7B8AA906F8F7 /* PageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageTests.swift; sourceTree = "<group>"; };
 		BCD9442087CCEA0C71750141 /* TurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnTests.swift; sourceTree = "<group>"; };
 		C8E297534B0D5F4CD6197260 /* StayOnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StayOnTests.swift; sourceTree = "<group>"; };
 		CA7030BE5C5E270404A9245D /* GlassesSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesSession.swift; sourceTree = "<group>"; };
@@ -74,6 +81,7 @@
 		D5EC28D51A2ACC2F8932B17A /* Speech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Speech.swift; sourceTree = "<group>"; };
 		DD4A6500D66EF013AB04EB26 /* RoomVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomVoice.swift; sourceTree = "<group>"; };
 		E6CA56B0F8257856E59AA77A /* GlasscodeGlasses.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GlasscodeGlasses.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FB77ED6D66A9839868772220 /* LensPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensPage.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,8 +139,10 @@
 		7D6F3967189D2155309B5FFC /* Lens */ = {
 			isa = PBXGroup;
 			children = (
+				8D1333BEBFB100D790E4DC6A /* LensArt.swift */,
 				8EB8114759B3FAA9F6D004D4 /* LensCards.swift */,
 				07F2911FF0E89522440DF1F8 /* LensModel.swift */,
+				FB77ED6D66A9839868772220 /* LensPage.swift */,
 			);
 			path = Lens;
 			sourceTree = "<group>";
@@ -149,8 +159,10 @@
 		CD943259188683F8ED929F1F /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				2C408E8FF43F1F84DEDC803C /* LensShotsTests.swift */,
 				1EEE44F05E8E4EBDF27807DD /* LensTests.swift */,
 				358E31277B01F5102D481811 /* LinkTests.swift */,
+				B750968FCECC7B8AA906F8F7 /* PageTests.swift */,
 				C8E297534B0D5F4CD6197260 /* StayOnTests.swift */,
 				BCD9442087CCEA0C71750141 /* TurnTests.swift */,
 			);
@@ -291,8 +303,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DE18D8D10BD18379CAA4A511 /* LensShotsTests.swift in Sources */,
 				13A8ABF049F7125F8ABB5B4B /* LensTests.swift in Sources */,
 				806BEA62EE058DB951E4AEC0 /* LinkTests.swift in Sources */,
+				F8AD1DC00B197886A69EED18 /* PageTests.swift in Sources */,
 				871060402E739902C2DFF5AB /* StayOnTests.swift in Sources */,
 				62741EB71EB710741E464A97 /* TurnTests.swift in Sources */,
 			);
@@ -309,8 +323,10 @@
 				86F79AD2A35D6F0A85248B7F /* DoorLink.swift in Sources */,
 				65543B1CA24697B1BEED009B /* GlasscodeApp.swift in Sources */,
 				0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */,
+				EB674114180A32AB959BD124 /* LensArt.swift in Sources */,
 				8690C5EEE3FC6CC9AE9E1185 /* LensCards.swift in Sources */,
 				237CDF6CAC1DBB0CDFAEF9BB /* LensModel.swift in Sources */,
+				798BA774A49F49069E3838C5 /* LensPage.swift in Sources */,
 				0C154818CDF8000E483AEEEB /* LineConnection.swift in Sources */,
 				17FDF0FAB703266ECCD95B52 /* LinkProtocol.swift in Sources */,
 				8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */,

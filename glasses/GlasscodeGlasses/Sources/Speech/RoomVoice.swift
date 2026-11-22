@@ -62,6 +62,10 @@ final class RoomVoice {
     private var events: RoomEvents?
     private var identity = ""
     private var name = "Manager"
+    /// Where the person is ("On the Mac's screen now: …") and the conversation's last turns, for
+    /// the talker: it starts from there, and a talk started again carries on.
+    private var now = ""
+    private var recent: [[String: String]] = []
     private var workerHere = false
     private var generation = 0
     private var lastActivity = Date()
@@ -169,7 +173,18 @@ final class RoomVoice {
 
     private func sendConfig() async {
         // The person opened this talk: everything said counts, no wake word.
-        await publish(Topic.config, ["name": name, "listen": "always", "talker": true, "place": "glasses"])
+        var config: [String: Any] = ["name": name, "listen": "always", "talker": true, "place": "glasses"]
+        if !now.isEmpty { config["now"] = now }
+        if !recent.isEmpty { config["recent"] = recent }
+        await publish(Topic.config, config)
+    }
+
+    /// Where the person is, and what was said lately: sent now when it changed and a talk is open.
+    func context(now: String, recent: [[String: String]]) async {
+        guard now != self.now || recent != self.recent else { return }
+        self.now = now
+        self.recent = recent
+        if room != nil { await sendConfig() }
     }
 
     private func publish(_ topic: String, _ object: [String: Any], in target: Room? = nil) async {

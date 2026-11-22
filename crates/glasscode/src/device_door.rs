@@ -122,6 +122,9 @@ pub struct DoorUi {
     /// What each connection was last told, so it is told again only when that changes.
     told_today: HashMap<u64, String>,
     told_home: HashMap<u64, String>,
+    /// The lens page of the window's place each connection was last sent (`lens_pages`).
+    told_place: HashMap<u64, String>,
+    place_at: Option<Instant>,
     told_items: HashMap<u64, String>,
     today_at: Option<Instant>,
     /// What phones that reach the server said their glasses do (the server's device ids).
@@ -479,7 +482,21 @@ impl Workspace {
             snapshot["at"] = at;
             (snapshot, text)
         });
+        // The window's place as the lens shows it: sent when it, or what it shows, changes.
+        let place = (!conns.is_empty() && self.door.place_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(500))).then(|| {
+            self.door.place_at = Some(Instant::now());
+            self.lens_refresh_reply(cx);
+            let page = serde_json::to_value(self.lens_page(&self.lens_place(), cx)).unwrap_or_default();
+            let text = page.to_string();
+            (page, text)
+        });
         for conn in conns {
+            if let Some((page, text)) = &place
+                && self.door.told_place.get(&conn) != Some(text)
+            {
+                self.door.told_place.insert(conn, text.clone());
+                self.door_send(conn, device_link::event_line(events::PLACE, page.clone()));
+            }
             if self.door.told_home.get(&conn) != Some(&home_text) {
                 self.door.told_home.insert(conn, home_text.clone());
                 self.door_send(conn, device_link::event_line(events::HOME, home.clone()));
@@ -539,6 +556,7 @@ impl Workspace {
                     self.mchat.device_focus = None;
                 }
                 self.door.told_home.remove(&conn);
+                self.door.told_place.remove(&conn);
                 self.door.told_items.remove(&conn);
                 self.door.told_today.remove(&conn);
                 cx.notify();
@@ -605,6 +623,22 @@ impl Workspace {
             // what needs it in the door's notes.
             "phones.push_token" => Ok(json!({ "ok": true, "push": false })),
             "manager.home" => Ok(self.door_home()),
+            // One place everywhere (`lens_pages`): the phone opens a place on the Mac, reads a
+            // place's page, and its voice's tools answer here as the Mac's do.
+            "place.open" => self.lens_open(&text_param(&params, "place"), window, cx).and_then(|page| serde_json::to_value(page).map_err(|e| e.to_string())),
+            "place.get" => {
+                let place = text_param(&params, "place");
+                let place = if place.trim().is_empty() { self.lens_place() } else { place };
+                serde_json::to_value(self.lens_page(&place, cx)).map_err(|e| e.to_string())
+            }
+            "voice.tool" => {
+                let name = text_param(&params, "name");
+                let arguments = params.get("arguments").cloned().unwrap_or_default();
+                match name.as_str() {
+                    "list_sessions" | "open_place" => Ok(json!({ "text": self.manager_voice_tool(&name, &arguments, cx) })),
+                    other => Err(format!("this Mac runs only list_sessions and open_place for a phone's voice, not {other}")),
+                }
+            }
             "manager.conversation" => {
                 let after = params.get("after").and_then(Value::as_str);
                 let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(40).clamp(1, 200) as usize;
@@ -636,6 +670,11 @@ impl Workspace {
         self.door_reply(conn, id, result);
     }
 
+    /// This Mac's id and name, as the door says them.
+    pub(crate) fn door_names(&self) -> (String, String) {
+        self.door.info.as_ref().map(|i| (i.mac_id.clone(), i.mac.clone())).unwrap_or_else(|| (String::new(), crate::platform::this_computer().to_string()))
+    }
+
     fn door_hello(&self, device: &str) -> Value {
         let info = self.door.info.as_ref();
         json!({
@@ -646,7 +685,7 @@ impl Workspace {
             "version": glasscode_core::update::VERSION,
             "build": glasscode_core::update::BUILD,
             "device": device,
-            "features": ["manager", "today", "device"],
+            "features": ["manager", "today", "device", "place"],
         })
     }
 

@@ -247,6 +247,8 @@ pub struct Workspace {
     /// The command palette, while it is open.
     pub palette: Option<crate::palette_ui::Palette>,
     pub usage: crate::usage_ui::UsageUi,
+    /// What the lens pages read off the main thread (`lens_pages`).
+    pub lens: crate::lens_pages::LensState,
     pub themes: crate::themes_ui::ThemesUi,
     /// Sessions shown as a chat (the Claude app's look) over their terminal.
     pub chat: crate::chat_ui::ChatUi,
@@ -392,6 +394,7 @@ impl Workspace {
             palette: None,
             close_asked: None,
             usage: Default::default(),
+            lens: Default::default(),
             themes: Default::default(),
             chat: Default::default(),
             session_more: false,
