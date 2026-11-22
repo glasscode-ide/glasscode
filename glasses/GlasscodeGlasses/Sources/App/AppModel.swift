@@ -45,6 +45,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var writing = ""
     /// The place the Mac's window shows, as the lens and the phone show it (`docs/lens-everywhere.md`).
     @Published private(set) var place: LensPage?
+    /// A talk with the voice on the Mac is open, and whether the person made it silent.
+    @Published private(set) var talkOpen = false
+    @Published private(set) var voiceMuted = false
+    /// Where the person is and what is open, as the Mac says it for the voice (`place` events).
+    private var macNow = ""
     /// The place the person opened from here and is waiting for (it goes on top of the lens).
     private var openedHere: String?
     /// The place the Mac last said its window shows: a page for it again only updates it.
@@ -65,8 +70,11 @@ final class AppModel: ObservableObject {
         room.onHeard = { [weak self] text, handled in self?.roomHeard(text, handled: handled) }
         room.onSaid = { [weak self] text in self?.roomSaid(text) }
         room.onState = { [weak self] _ in
-            self?.reportPresence()
-            self?.redraw()
+            guard let self else { return }
+            self.talkOpen = self.room.live
+            self.voiceMuted = self.room.muted
+            self.reportPresence()
+            self.redraw()
         }
         room.onTool = { [weak self] name, arguments in await self?.roomTool(name, arguments) ?? "This phone is busy." }
         room.onEnded = { [weak self] why in self?.roomEnded(why) }
@@ -148,6 +156,38 @@ final class AppModel: ObservableObject {
         case .deny(let card): Task { await decide(card, allow: false) }
         case .answer(let session, let option): Task { await answer(session, option) }
         case .place(let place): Task { await openPlace(place) }
+        case .mute: setMuted(true)
+        }
+    }
+
+    /// Make the voice silent, or let it listen again (the phone's button, the band's swipe down
+    /// while it listens). Silent: the microphone is off, it stops speaking, and answers that
+    /// come are shown, not spoken.
+    func setMuted(_ on: Bool) {
+        guard room.live else { return }
+        Task {
+            await room.setMuted(on)
+            voiceMuted = room.muted
+            var model = lens
+            if on { model.show(.note(title: "Silent", body: "The microphone is off. Pinch to talk again.", tone: .plain, open: nil)) }
+            else { model.show(.listening("")) }
+            lens = model
+            reportPresence()
+            redraw()
+        }
+    }
+
+    /// End the talk: leave the voice room and give the microphone back.
+    func endTalk() {
+        Task {
+            await room.hangUp()
+            talkOpen = false
+            voiceMuted = false
+            var model = lens
+            if case .listening = model.card { model.back() }
+            lens = model
+            reportPresence()
+            redraw()
         }
     }
 
@@ -156,6 +196,10 @@ final class AppModel: ObservableObject {
     func talk() {
         guard link.status == .connected else {
             showMessage("Not connected", problemText)
+            return
+        }
+        if room.live, room.muted {
+            setMuted(false)
             return
         }
         if room.live {
@@ -288,7 +332,11 @@ final class AppModel: ObservableObject {
         case "list_sessions" where link.macConnected, "open_place" where link.macConnected:
             // The Mac answers as its own voice does (search, counts, what is open): the same
             // answer from every device. It opens a place on the Mac, and the lens follows it.
-            if let text = await link.voiceTool(name, arguments) { return text }
+            if let text = await link.voiceTool(name, arguments) {
+                // What the voice opened is on the lens now, whether or not the Mac was there already.
+                if name == "open_place", text.hasPrefix("Shown"), let json = await link.placePage(), let page = LensPage(json) { showPlace(page) }
+                return text
+            }
             return await roomToolHere(name, arguments)
         default:
             return await roomToolHere(name, arguments)
@@ -330,6 +378,8 @@ final class AppModel: ObservableObject {
 
     /// Speak a sentence of the answer in the room, after the ones before it.
     private func roomSay(_ sentence: String) {
+        // Silent: the answer is on the lens and the phone, not spoken.
+        if room.muted { return }
         let before = sayChain
         let id = askID
         sayChain = Task { [room] in
@@ -569,6 +619,7 @@ final class AppModel: ObservableObject {
         switch name {
         case "place":
             guard let page = LensPage(json) else { return }
+            if let now = json.string("now") { macNow = now }
             takePlace(page)
         case "device.open":
             // The Mac shows a session or a pull request in its window too: its page comes as a
@@ -718,16 +769,26 @@ final class AppModel: ObservableObject {
         tellVoice()
     }
 
+    /// Bring a place's page to the front of the lens: the person asked for it (by voice).
+    private func showPlace(_ page: LensPage) {
+        macPlace = page.place
+        place = page
+        var model = lens
+        model.follow(page, opened: true)
+        lens = model
+        redraw()
+    }
+
     /// Where the person is and what was said lately, for the voice's talker.
     private func tellVoice() {
-        var now = ""
-        if let page = place {
+        var now = macNow
+        if now.isEmpty, let page = place {
             let what = page.eyebrow.isEmpty ? "“\(page.title)”" : "\(page.eyebrow): “\(page.title)”"
             let status = page.status.isEmpty ? "" : " (\(page.status.lowercased()))"
-            now = "On the Mac's screen and the lens now: \(what)\(status)" + (page.kind == "session" ? ", id \(page.place)." : ".")
+            now = "On the Mac's screen and the lens now: \(what)\(status)."
         }
         // A project named by voice is often misheard ("class code"): the projects there are.
-        if !link.projects.isEmpty {
+        if macNow.isEmpty, !link.projects.isEmpty {
             now += " The projects in Glasscode: \(link.projects.joined(separator: ", ")). A project the person names, however it was said or heard, is one of these: use its exact name."
         }
         let recent: [[String: String]] = conversation.compactMap { item in

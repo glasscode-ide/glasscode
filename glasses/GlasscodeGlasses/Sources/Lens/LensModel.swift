@@ -116,6 +116,8 @@ struct LensModel: Equatable {
         case back
         /// Open a place (a page's row, the next ticket): on the Mac, and so on the lens.
         case place(String)
+        /// Make the voice silent (the talk stays open; a pinch talks again).
+        case mute
     }
 
     /// The glance's data.
@@ -247,6 +249,9 @@ struct LensModel: Equatable {
             case .left:
                 back()
                 return .cancelListening
+            case .down:
+                back()
+                return .mute
             default: return .none
             }
         }

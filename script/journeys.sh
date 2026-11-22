@@ -453,6 +453,31 @@ json.dump(doc, open(sys.argv[1], "w"))
   check "the manager answers the glasses from code" j9_has ask '"say"'
   check "a method outside the list is refused" j9_has refused true
   check "the app says the phone connected" grep -q "device door: Journey phone" "$T/app.log"
+  # One place everywhere (docs/lens-everywhere.md): the voice's tools on the Mac, places opened
+  # from the phone, the window going there and its page coming back.
+  check "the phone is sent the window's place when it connects" j9_has place_first '"kind"'
+  check "the voice's session list comes from the Mac, with its count" j9_has tool_list 'Count:'
+  check "the list has short refs, never whole ids to read out" j9_has tool_list 'ref '
+  check "the phone's voice is told where the person is and what is open" j9_has place_first 'What is open in Glasscode now'
+  local page
+  for page in tickets usage pull-requests sessions; do
+    check "the voice opens $page: it says so" j9_has "tool_$page" 'Shown on the Mac'
+    check "the voice opens $page: the window is there" j9_has "window_$page" "\"$page\""
+    check "the voice opens $page: the phone gets its page" j9_has "event_$page" true
+  done
+  local sid; sid=$(j9_line session_id | tr -d '"')
+  check "the scratch home has a session to open" test -n "$sid"
+  check "a search in its project finds the session" j9_has tool_search 'Best fit'
+  check "the voice opens a session by its title and project" j9_has tool_session 'Shown on the Mac'
+  check "the window shows that session" j9_has window_session "$sid"
+  check "the phone gets the session's page" j9_has event_session true
+  check "the phone opens Today: the window is there" j9_has window_today '"today"'
+  check "the phone gets Today's page" j9_has event_today true
+  check "the phone opens the session by its id" j9_has window_back "$sid"
+  check "a ticket that is not there opens nothing" j9_has tool_missing 'Nothing opened'
+  check "the window stays where it was" j9_has window_missing "$sid"
+  check "words that fit no session open nothing" j9_has tool_nobody 'Nothing opened'
+  check "ui state agrees: the session is in the window" shown "$(j9_line session_title | tr -d '"' | cut -c1-20)"
 }
 
 say "Journeys in $T"

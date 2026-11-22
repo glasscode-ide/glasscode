@@ -196,20 +196,41 @@ struct HomeView: View {
                 if app.turn.isListening { app.band(.select) } else { app.talk() }
             } label: {
                 ZStack {
-                    Orb(tone: app.turn.isListening ? .busy : .ok, active: app.turn.isListening).frame(width: 74, height: 74)
-                    Image(systemName: app.turn.isListening ? "waveform" : "mic.fill").font(.title2.weight(.semibold)).foregroundStyle(.black)
+                    Orb(tone: app.voiceMuted ? .plain : app.talkOpen || app.turn.isListening ? .busy : .ok, active: (app.talkOpen && !app.voiceMuted) || app.turn.isListening).frame(width: 74, height: 74)
+                    Image(systemName: app.voiceMuted ? "mic.slash.fill" : app.talkOpen || app.turn.isListening ? "waveform" : "mic.fill").font(.title2.weight(.semibold)).foregroundStyle(.black)
                 }
             }
             .disabled(link.status != .connected)
             pad("chevron.down") { app.band(.down) }
             pad("chevron.right") { app.band(.right) }
         }
-        .padding(.top, 4)
+        .padding(.top, app.talkOpen ? 44 : 4)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
         .overlay(alignment: .topTrailing) {
             Button { talk = true } label: { Image(systemName: "text.bubble").font(.body.weight(.semibold)).foregroundStyle(Look.soft).frame(width: 40, height: 40) }
                 .padding(.trailing, 12)
+        }
+        // While a talk is open: make it silent (or let it listen again), or end the talk.
+        .overlay(alignment: .top) {
+            if app.talkOpen {
+                HStack(spacing: 10) {
+                    Button { app.setMuted(!app.voiceMuted) } label: {
+                        Label(app.voiceMuted ? "Silent · tap to talk" : "Make it silent", systemImage: app.voiceMuted ? "mic.slash.fill" : "mic.slash")
+                            .font(.footnote.weight(.semibold)).padding(.horizontal, 12).padding(.vertical, 7)
+                            .foregroundStyle(app.voiceMuted ? .black : Look.text)
+                            .background(app.voiceMuted ? AnyShapeStyle(Look.tone(.warn)) : AnyShapeStyle(Look.panel), in: Capsule())
+                            .overlay(Capsule().stroke(Look.soft.opacity(app.voiceMuted ? 0 : 0.25), lineWidth: 1))
+                    }
+                    Button { app.endTalk() } label: {
+                        Label("End talk", systemImage: "phone.down.fill")
+                            .font(.footnote.weight(.semibold)).padding(.horizontal, 12).padding(.vertical, 7)
+                            .foregroundStyle(Look.tone(.bad))
+                            .background(Look.panel, in: Capsule())
+                            .overlay(Capsule().stroke(Look.tone(.bad).opacity(0.4), lineWidth: 1))
+                    }
+                }
+            }
         }
     }
 

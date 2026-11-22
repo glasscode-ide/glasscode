@@ -314,6 +314,12 @@ pub const PHONE_ALLOWED: &[&str] = &[
     "manager.stop",
     "manager.voice",
     "device.presence",
+    // One place everywhere (`docs/lens-everywhere.md`): the phone opens a place on the Mac, reads
+    // a place's page, and its voice's session tools are answered by the Mac. They show and read;
+    // they change nothing a phone could not see already.
+    "place.open",
+    "place.get",
+    "voice.tool",
 ];
 
 /// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
