@@ -1169,33 +1169,35 @@ impl Workspace {
                 .into_any_element()
             })
             .collect();
+        // The menu stands where the left sidebar of the other views does, and as it does: a panel
+        // from the title bar to the status bar, beside the rail, with its edge at the right. It is
+        // as wide as that sidebar was left (within what a menu needs), so the page does not jump
+        // when Settings opens.
+        let width = self.sidebar_width().clamp(f32::from(theme::sz(236.)), f32::from(theme::sz(300.)));
         div()
+            .flex()
+            .flex_col()
             .flex_none()
+            .w(px(width))
             .h_full()
-            .pl(theme::sz(12.))
-            .py(theme::sz(12.))
+            .bg(theme::panel())
+            .border_r_1()
+            .border_color(theme::border())
             // In a short window (900 x 560 at 100 %) the menu is taller than its column: it
             // scrolls, with the thumb of `scroll_area` to show that it does.
-            .child(
-                backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+            .child(ui::scroll_area(
+                "settings-menu",
+                &self.settings.menu_scroll,
+                div()
                     .flex()
                     .flex_col()
-                    .w(theme::sz(236.))
-                    .h_full()
-                    .when(theme::is_light(), |d| d.shadow_md())
-                    .child(ui::scroll_area(
-                        "settings-menu",
-                        &self.settings.menu_scroll,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(theme::sz(1.))
-                            .p(theme::sz(8.))
-                            .child(self.settings_back(cx))
-                            .child(div().py(theme::sz(6.)).child(search))
-                            .children(items),
-                    )),
-            )
+                    .gap(theme::sz(1.))
+                    .px(theme::sz(8.))
+                    .py(theme::sz(8.))
+                    .child(self.settings_back(cx))
+                    .child(div().py(theme::sz(6.)).child(search))
+                    .children(items),
+            ))
             .into_any_element()
     }
 
