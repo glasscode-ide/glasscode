@@ -48,6 +48,11 @@ class Rules(unittest.TestCase):
         self.assertIn("A worktree without a session is closed", text)
         self.assertIn("a Count line of list_sessions", text)
 
+    def test_more_requests_go_on_at_once(self):
+        text = instructions("glasscode", "mac")
+        self.assertIn("call do_task for it at once", text)
+        self.assertIn("Never keep a request back to send later", text)
+
     def test_a_named_project_is_passed_on_by_its_exact_name(self):
         text = instructions("glasscode", "mac", now="On the Mac's screen now: Today. The projects in Glasscode: hub2.0, glasscode.")
         self.assertIn("Pass the exact project name", text)

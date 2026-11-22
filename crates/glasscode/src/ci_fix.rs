@@ -463,6 +463,7 @@ impl Workspace {
                 _ => return Inputs::default(),
             },
         };
+        let agent = self.state.session(id).map(|s| s.agent).or_else(|| self.server.session(id).map(|r| r.session.agent));
         let t = terminal.read(cx);
         let quiet = t.last_output.elapsed();
         let busy = match activity {
@@ -474,14 +475,20 @@ impl Workspace {
         Inputs {
             running: t.exit_code.is_none(),
             busy,
-            asking: glasscode_core::prompt::parse(&t.text_tail(60)).is_some(),
+            // Its hooks say it waits on the person (a permission, a question), or one is on its
+            // screen: nothing is typed over it, also while it works.
+            asking: activity == Some(AgentActivity::NeedsInput) || glasscode_core::prompt::parse(&t.text_tail(60)).is_some(),
+            // Claude keeps what is typed while it works and reads it at its next step. Codex is
+            // left as it was: it waits for the turn to end.
+            takes_while_working: agent == Some(AgentKind::Claude),
             draft: has_draft(&t.text_tail_typed(60)),
             typed_ms_ago: t.last_typed.map(|at| at.elapsed().as_millis() as u64),
         }
     }
 
-    /// Type one delivery: check for a prompt again right before the paste and before the Enter,
-    /// then wait for the session's hook event with the marker.
+    /// Type one delivery: check for a prompt again right before the paste and before each Enter,
+    /// then wait for its receipt: the session's hook event with the marker, or (typed while Claude
+    /// works, which fires no hook) its transcript's queue with the marker.
     fn deliver(&mut self, d: Delivery, cx: &mut Context<Self>) {
         let local = self.terminals.get(&d.session).cloned();
         let Some(terminal) = local.clone().or_else(|| self.server.terminals.get(&d.session).cloned()) else {
@@ -495,13 +502,26 @@ impl Workspace {
         let typed = if paste { d.typed() } else { d.typed().split_whitespace().collect::<Vec<_>>().join(" ") };
         // Only a session of this Mac has its events file here.
         let events = local.is_some().then(|| glasscode_core::agents::events_file(&d.session));
+        // Claude's transcript, where a message typed while it works is queued (its latest hook
+        // event names it; the state's is the fallback).
+        let transcript = (local.is_some() && agent == AgentKind::Claude).then(|| self.state.session(&d.session).and_then(|s| s.transcript_path.clone()));
         // A session of the server: its hooks are read there, so the server hears what this message
         // descends from (events-13).
         let server_drive = (local.is_none() && d.depth > 0).then(|| self.server.client.clone()).flatten().map(|client| (client, glasscode_core::journal::drive_params(d.session.strip_prefix("server:").unwrap_or(&d.session), &d.marker(), d.depth, &d.drive_causes())));
         cx.spawn(async move |this, cx| {
-            let events_len = match events.clone() {
-                Some(path) => cx.background_spawn(async move { std::fs::metadata(&path).map(|m| m.len()).ok() }).await,
-                None => None,
+            let (events_len, transcript) = match events.clone() {
+                Some(path) => {
+                    let known = transcript.clone().flatten();
+                    cx.background_spawn(async move {
+                        let len = std::fs::metadata(&path).map(|m| m.len()).ok();
+                        let named = transcript.is_some().then(|| std::fs::read(&path).ok().and_then(|bytes| delivery::transcript_path(&String::from_utf8_lossy(&bytes)))).flatten();
+                        let path = named.or(known);
+                        let from = path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+                        (len, path.map(|p| (p, from)))
+                    })
+                    .await
+                }
+                None => (None, None),
             };
             let asking = this.update(cx, |_, cx| glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some()).unwrap_or(true);
             if asking {
@@ -521,19 +541,31 @@ impl Workspace {
                 }
             }
             let pasted = typed.clone();
-            let _ = terminal.update(cx, |t, cx| if paste { t.paste_text(&pasted, cx) } else { t.write(pasted.into_bytes(), cx) });
-            cx.background_executor().timer(Duration::from_millis(250)).await;
-            // land-m3: a prompt that came up after the paste, or a box holding something else, gets
-            // no Enter.
-            let may = this
-                .update(cx, |_, cx| {
-                    let t = terminal.read(cx);
-                    let asking = glasscode_core::prompt::parse(&t.text_tail(60)).is_some();
-                    // Claude's box must hold the text; an empty box, or none on screen, does not.
-                    let held = (agent == AgentKind::Claude).then(|| prompt_box(&t.text_tail_typed(60)).unwrap_or_default());
-                    delivery::may_press_enter(held.as_deref(), asking, &typed)
-                })
-                .unwrap_or(false);
+            // Glasscode's own paste: the session's next message does not wait for "you" to stop
+            // typing.
+            let _ = terminal.update(cx, |t, cx| if paste { t.paste_as_glasscode(&pasted, cx) } else { t.write(pasted.into_bytes(), cx) });
+            // A long message takes a moment to land in the box (as in the Chat view): it is looked
+            // at after a head start, and again a few times, before the Enter is held back.
+            cx.background_executor().timer(Duration::from_millis((250 + typed.len() as u64 / 4).min(900))).await;
+            let mut may = false;
+            for _ in 0..4 {
+                // land-m3: a prompt that came up after the paste, or a box holding something else,
+                // gets no Enter.
+                let (holds, asking) = this
+                    .update(cx, |_, cx| {
+                        let t = terminal.read(cx);
+                        let asking = glasscode_core::prompt::parse(&t.text_tail(60)).is_some();
+                        // Claude's box must hold the text; an empty box, or none on screen, does not.
+                        let held = (agent == AgentKind::Claude).then(|| prompt_box(&t.text_tail_typed(60)).unwrap_or_default());
+                        (delivery::may_press_enter(held.as_deref(), asking, &typed), asking)
+                    })
+                    .unwrap_or((false, true));
+                if holds || asking {
+                    may = holds;
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+            }
             if !may {
                 let _ = this.update(cx, |ws, cx| ws.delivery_over(d, Outcome::NotEntered("a question came up before the Enter, or its box did not hold the message; what was typed was left there".into()), cx));
                 return;
@@ -559,9 +591,37 @@ impl Workspace {
                         break Outcome::Delivered(receipt);
                     }
                 }
+                // Typed while Claude works: no hook event comes; its transcript queues it at once.
+                if let Some((path, from)) = transcript.clone() {
+                    let marker = marker.clone();
+                    let in_queue = cx
+                        .background_spawn(async move {
+                            // Only what it wrote since the paste: a long session's transcript is large.
+                            let added = (|| -> std::io::Result<Vec<u8>> {
+                                use std::io::{Read, Seek};
+                                let mut file = std::fs::File::open(&path)?;
+                                file.seek(std::io::SeekFrom::Start(from))?;
+                                let mut bytes = Vec::new();
+                                file.read_to_end(&mut bytes)?;
+                                Ok(bytes)
+                            })()
+                            .unwrap_or_default();
+                            delivery::queued(&marker, &String::from_utf8_lossy(&added))
+                        })
+                        .await;
+                    if in_queue {
+                        break Outcome::Delivered(serde_json::json!({ "receipt": "queued: Claude reads it at its next step" }));
+                    }
+                }
                 let elapsed = started.elapsed();
                 if agent == AgentKind::Claude && presses < 3 && elapsed >= Duration::from_millis(600 * (presses + 1)) {
-                    let still = this.update(cx, |_, cx| delivery::squeezed(&crate::chat_ui::claude_box(terminal.read(cx))) == delivery::squeezed(&typed)).unwrap_or(false);
+                    // Never an Enter on a prompt that came up meanwhile: it would answer it.
+                    let still = this
+                        .update(cx, |_, cx| {
+                            let t = terminal.read(cx);
+                            glasscode_core::prompt::parse(&t.text_tail(60)).is_none() && delivery::squeezed(&crate::chat_ui::claude_box(t)) == delivery::squeezed(&typed)
+                        })
+                        .unwrap_or(false);
                     if still {
                         let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
                     }
