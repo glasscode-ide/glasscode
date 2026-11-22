@@ -74,6 +74,7 @@ pub mod review;
 pub mod resources;
 pub mod save;
 pub mod schedule;
+pub mod session_find;
 pub mod settings;
 pub mod signin;
 pub mod store;

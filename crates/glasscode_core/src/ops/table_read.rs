@@ -47,13 +47,20 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["session", "list"],
         aliases: &["", "ls"],
         host: OpHost::SessionHost,
-        summary: "the sessions: what each does, its project, branch and pull request",
+        summary: "the sessions open in the sidebar: what each does, its project, branch and pull request",
         args: &[
             PROJECT,
             ArgSpec { name: "needs_you", kind: ArgKind::Switch, help: "only the ones that need you", at: At::Flag(&["needs-you"]), ..ArgSpec::OPTION },
             ArgSpec { name: "server", kind: ArgKind::Switch, help: "also the sessions on the server", at: At::Flag(&["server", "all"]), ..ArgSpec::OPTION },
+            ArgSpec {
+                name: "match",
+                kind: ArgKind::Text,
+                help: "words of its title, project, branch, pull request or ticket, or of what it is about: the ones that fit, best first",
+                at: At::Flag(&["match", "search"]),
+                ..ArgSpec::OPTION
+            },
         ],
-        examples: &["session list [--project <p>] [--needs-you] [--server]"],
+        examples: &["session list [--project <p>] [--needs-you] [--server] [--match \"<words>\"]"],
         ..OpSpec::READ
     },
     OpSpec {
@@ -113,7 +120,7 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "worktree.list",
         cli: &["worktree", "list"],
         aliases: &["", "ls"],
-        summary: "each project's worktrees: branch, folder and sessions",
+        summary: "each project's worktrees: branch, folder and sessions (one without a session is closed, not a session)",
         args: &[PROJECT],
         examples: &["worktree list [--project <p>]"],
         ..OpSpec::READ
