@@ -885,6 +885,9 @@ pub struct HookUpdate {
     pub last_reply: Option<String>,
     /// When the last `Stop` in these lines came (its `glasscode_at`, ms), when it is stamped.
     pub stopped_ms: Option<u64>,
+    /// A turn began in these lines (`UserPromptSubmit`): with `activity` idle, it also ended in
+    /// them (a short turn, or the first one right after a launch).
+    pub worked: bool,
     /// The lines read, as they were (the journal's `HookIntake` takes them).
     pub lines: Vec<String>,
 }
@@ -968,6 +971,9 @@ impl EventsTail {
                 update.transcript_path = Some(PathBuf::from(path));
             }
             let name = value.get("hook_event_name").and_then(Value::as_str);
+            if name == Some("UserPromptSubmit") {
+                update.worked = true;
+            }
             if name == Some("Stop") {
                 update.last_reply = value.get("last_assistant_message").and_then(Value::as_str).map(str::to_string).filter(|r| !r.trim().is_empty());
                 update.stopped_ms = value.get("glasscode_at").and_then(Value::as_u64);
@@ -999,6 +1005,10 @@ pub fn transcript_line_starts_work(line: &str) -> bool {
         return false;
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else { return false };
+    // A subagent's own lines are its work, not the session's turn.
+    if value["isSidechain"].as_bool() == Some(true) {
+        return false;
+    }
     match value["type"].as_str() {
         Some("assistant") => true,
         Some("user") if value["isCompactSummary"].as_bool() != Some(true) => {
@@ -1018,6 +1028,11 @@ pub fn transcript_line_starts_work(line: &str) -> bool {
     }
 }
 
+/// An assistant message of the session's own turn (not a subagent's).
+fn transcript_line_is_agent(line: &str) -> bool {
+    line.contains("\"assistant\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| v["type"] == "assistant" && v["isSidechain"].as_bool() != Some(true))
+}
+
 /// When a transcript line was written (its RFC 3339 `timestamp`), in ms since 1970.
 fn transcript_line_ms(line: &str) -> Option<u64> {
     let value: Value = serde_json::from_str(line).ok()?;
@@ -1032,13 +1047,31 @@ pub struct TranscriptWatch {
     path: PathBuf,
     offset: u64,
     since_ms: u64,
+    /// The session waits on a prompt mid-turn: only an assistant message says it goes on. A tool's
+    /// result may be a sibling's, run while the dialog still waits (seen in the person's
+    /// transcripts, 2026-11-22).
+    mid_turn: bool,
 }
 
 impl TranscriptWatch {
     /// From the transcript's end now, for lines written after `since_ms`.
     pub fn new(path: &Path, since_ms: u64) -> Self {
         let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, since_ms }
+        Self { path: path.to_path_buf(), offset, since_ms, mid_turn: false }
+    }
+
+    /// For a session that waits on a prompt mid-turn (see `mid_turn`).
+    pub fn mid_turn(mut self) -> Self {
+        self.mid_turn = true;
+        self
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn is_mid_turn(&self) -> bool {
+        self.mid_turn
     }
 
     /// Read what was added: true when work started again.
@@ -1060,7 +1093,8 @@ impl TranscriptWatch {
         // Whole lines only: a line still being written comes next time.
         let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { return false };
         self.offset += end as u64 + 1;
-        String::from_utf8_lossy(&bytes[..end]).lines().any(|line| transcript_line_starts_work(line) && transcript_line_ms(line).is_none_or(|at| at > self.since_ms))
+        let counts = |line: &str| if self.mid_turn { transcript_line_is_agent(line) } else { transcript_line_starts_work(line) };
+        String::from_utf8_lossy(&bytes[..end]).lines().any(|line| counts(line) && transcript_line_ms(line).is_none_or(|at| at > self.since_ms))
     }
 }
 
@@ -1247,6 +1281,9 @@ pub struct RolloutTail {
     path: PathBuf,
     offset: u64,
     pub turn: CodexTurn,
+    /// How many turns have ended since it was made: one that began and ended between two reads
+    /// leaves `turn` as it was, and still ended.
+    pub ended: u64,
     /// The last message of the turn that completed last (`task_complete`'s `last_agent_message`),
     /// for the finish report.
     pub last_message: Option<String>,
@@ -1258,7 +1295,7 @@ pub struct RolloutTail {
 impl RolloutTail {
     /// A conversation that this launch started: its turns so far count.
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, last_message: None, events: None }
+        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, ended: 0, last_message: None, events: None }
     }
 
     /// The journal's tail of a Codex session's rollout (M30's turns): from its start when this
@@ -1286,7 +1323,7 @@ impl RolloutTail {
     /// in case Codex writes it somewhere else).
     pub fn resumed(path: &Path) -> Self {
         let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, last_message: None, events: None }
+        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, ended: 0, last_message: None, events: None }
     }
 
     /// Read what was added; true when the turn changed.
@@ -1325,7 +1362,10 @@ impl RolloutTail {
                 self.turn = turn;
                 match turn {
                     CodexTurn::Running => self.last_message = None,
-                    CodexTurn::Ended => self.last_message = codex_last_message(&text).or(self.last_message.take()),
+                    CodexTurn::Ended => {
+                        self.ended += 1;
+                        self.last_message = codex_last_message(&text).or(self.last_message.take());
+                    }
                     CodexTurn::Unknown => {}
                 }
             }
@@ -1977,6 +2017,14 @@ mod finish_tests {
     }
 
     #[test]
+    fn a_turn_that_began_and_ended_in_one_read_is_seen() {
+        let lines = [json!({ "hook_event_name": "UserPromptSubmit", "prompt": "hi" }), json!({ "hook_event_name": "Stop", "last_assistant_message": "Hi." })];
+        let update = tail_over(&lines, false);
+        assert_eq!((update.activity, update.worked), (Some(AgentActivity::Idle), true));
+        assert!(!tail_over(&[json!({ "hook_event_name": "SessionStart", "source": "startup" })], false).worked);
+    }
+
+    #[test]
     fn a_compaction_does_not_end_the_turn() {
         let lines = [json!({ "hook_event_name": "UserPromptSubmit", "prompt": "go" }), json!({ "hook_event_name": "SessionStart", "source": "compact" })];
         assert_eq!(tail_over(&lines, false).activity, Some(AgentActivity::Working));
@@ -2014,7 +2062,7 @@ mod finish_tests {
     fn the_watch_counts_only_what_was_written_after_the_turn_ended() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(file, "{}", json!({ "type": "assistant", "timestamp": "2026-11-22T08:31:57.000Z", "message": { "content": [] } })).unwrap();
-        let mut watch = TranscriptWatch { path: file.path().to_path_buf(), offset: 0, since_ms: ms("2026-11-22T08:31:57.500Z") };
+        let mut watch = TranscriptWatch { path: file.path().to_path_buf(), offset: 0, since_ms: ms("2026-11-22T08:31:57.500Z"), mid_turn: false };
         assert!(!watch.poll(), "the turn's own last message, written before its end");
         writeln!(file, "{}", json!({ "type": "system", "subtype": "turn_duration", "timestamp": "2026-11-22T08:31:57.600Z" })).unwrap();
         assert!(!watch.poll());
@@ -2027,6 +2075,18 @@ mod finish_tests {
     }
 
     #[test]
+    fn waiting_on_a_prompt_only_the_agent_going_on_counts() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut watch = TranscriptWatch::new(file.path(), 0).mid_turn();
+        writeln!(file, "{}", json!({ "type": "user", "timestamp": "2026-11-22T08:40:00.000Z", "message": { "content": [{ "type": "tool_result", "tool_use_id": "sibling", "content": "ok" }] } })).unwrap();
+        assert!(!watch.poll(), "a sibling tool's result while the dialog waits");
+        writeln!(file, "{}", json!({ "type": "assistant", "isSidechain": true, "timestamp": "2026-11-22T08:40:01.000Z", "message": { "content": [] } })).unwrap();
+        assert!(!watch.poll(), "a subagent's line");
+        writeln!(file, "{}", json!({ "type": "assistant", "timestamp": "2026-11-22T08:40:02.000Z", "message": { "content": [{ "type": "text", "text": "Done with that." }] } })).unwrap();
+        assert!(watch.poll(), "the agent goes on");
+    }
+
+    #[test]
     fn a_codex_turn_keeps_its_last_message() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_started" } })).unwrap();
@@ -2035,7 +2095,7 @@ mod finish_tests {
         assert_eq!((tail.turn, tail.last_message.clone()), (CodexTurn::Running, None));
         writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_complete", "last_agent_message": "All 41 pass." } })).unwrap();
         tail.poll();
-        assert_eq!((tail.turn, tail.last_message.as_deref()), (CodexTurn::Ended, Some("All 41 pass.")));
+        assert_eq!((tail.turn, tail.last_message.as_deref(), tail.ended), (CodexTurn::Ended, Some("All 41 pass."), 1));
         writeln!(file, "{}", json!({ "type": "event_msg", "payload": { "type": "task_started" } })).unwrap();
         tail.poll();
         assert_eq!(tail.last_message, None, "a new turn has said nothing yet");

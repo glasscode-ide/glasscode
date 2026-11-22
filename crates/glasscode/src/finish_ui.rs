@@ -39,8 +39,17 @@ use crate::workspace::Workspace;
 /// 6.6 s in nine cases out of ten (1.6 s for half of them; the person's Mac, 2026-11-22).
 pub(crate) const HOLD: Duration = Duration::from_secs(7);
 
+/// How long a session still shows "working" after its turn ended: a Stop hook's feedback goes on
+/// within this in about half the cases, and the dot does not blink green, blue, green. The check
+/// of an unclear ending starts then too, so a turn that goes on costs no model run.
+pub(crate) const SETTLE: Duration = Duration::from_secs(2);
+
 /// How long a finish waits for the model's check at most; then it is told as done.
 const CHECK_WAIT: Duration = Duration::from_secs(25);
+
+/// How many ticks in a row a prompt that was on a session's screen must be gone before the session
+/// counts as going on (the person answered it, here or from the phone, the glasses, the manager).
+const PROMPT_GONE_TICKS: u8 = 2;
 
 /// Each session's finishes: those being decided and the last one told.
 #[derive(Default)]
@@ -66,6 +75,11 @@ pub(crate) struct Finishes {
     /// Sessions whose state this launch has from their hooks or rollout (a bell of theirs says
     /// nothing new).
     followed: HashSet<String>,
+    /// Claude sessions that wait on a prompt: whether it was seen on their screen, and for how many
+    /// ticks it has been gone.
+    prompts: HashMap<String, (bool, u8)>,
+    /// How many turns of each Codex session's rollout had ended at the last look.
+    codex_ended: HashMap<String, u64>,
 }
 
 struct Pending {
@@ -75,6 +89,10 @@ struct Pending {
     read: Option<Finish>,
     /// The check that decides it, while it runs.
     check: Option<u64>,
+    /// The check is to start once the finish settled ([`SETTLE`]).
+    check_wanted: bool,
+    /// [`SETTLE`] is over: the dot shows what the turn left.
+    settled: bool,
     began_ms: u64,
     by_prompt: bool,
 }
@@ -103,6 +121,8 @@ impl Finishes {
         self.watches.remove(session);
         self.by_prompt.remove(session);
         self.followed.remove(session);
+        self.prompts.remove(session);
+        self.codex_ended.remove(session);
     }
 
     /// The session's hooks (Claude) or rollout (Codex) reported this launch.
@@ -117,19 +137,36 @@ impl Finishes {
         self.followed.contains(session)
     }
 
+    /// A turn of the session ended: its transcript is followed from its end now, for lines written
+    /// after `since_ms` (a watch from before would take the ended turn's lines for new work).
+    pub(crate) fn rebase_watch(&mut self, session: &str, path: &std::path::Path, since_ms: u64) {
+        self.watches.insert(session.to_string(), TranscriptWatch::new(path, since_ms));
+    }
+
+    /// More of the Codex session's turns ended than at the last look. A rollout is read from this
+    /// launch on (`RolloutTail::resumed`), or from its start when this launch began it: the turns
+    /// the first look finds ended are this launch's too (a new conversation is often found only
+    /// once its first turn is over).
+    pub(crate) fn codex_ended(&mut self, session: &str, ended: u64) -> bool {
+        let before = self.codex_ended.insert(session.to_string(), ended);
+        ended > before.unwrap_or(0)
+    }
+
     pub(crate) fn report(&self, session: &str) -> Option<&Report> {
         self.reports.get(session)
     }
 }
 
 /// The icon of a session's last finish, when it shows one: orange while its question waits, the
-/// "finished" mark until the person looked at it.
+/// "finished" mark until the person looked at it, and "working" while its work goes on by itself
+/// (a build, a review, another session it waits for, and then it reports back).
 pub(crate) fn row_state_of(report: Option<&Report>) -> Option<RowState> {
     let report = report?;
     match report.finish.outcome {
         Outcome::NeedsYou => Some(RowState::NeedsYou),
+        Outcome::StillGoing => Some(RowState::Working),
         Outcome::Done if !report.seen => Some(RowState::Finished),
-        _ => None,
+        Outcome::Done => None,
     }
 }
 
@@ -177,10 +214,13 @@ impl Workspace {
     /// Work starts in a session (`activity_changed`): a finish still being decided is not one,
     /// and its last report is over.
     pub(crate) fn finish_working(&mut self, id: &str, previous: Option<AgentActivity>) {
+        // A prompt it waited on was answered (here or elsewhere): it no longer needs the person.
+        self.attention.remove(id);
         let f = &mut self.finishes;
         f.pending.remove(id);
         f.reports.remove(id);
         f.watches.remove(id);
+        f.prompts.remove(id);
         // Going on after an approval is the same turn.
         if previous != Some(AgentActivity::NeedsInput) {
             f.began.insert(id.to_string(), glasscode_core::clock::now_ms());
@@ -195,7 +235,7 @@ impl Workspace {
     /// A session waits on a prompt mid-turn: its transcript says when it goes on (a tool runs).
     pub(crate) fn finish_watch(&mut self, id: &str) {
         let Some(path) = self.state.session(id).filter(|s| s.agent == AgentKind::Claude).and_then(|s| s.transcript_path.clone()) else { return };
-        self.finishes.watches.insert(id.to_string(), TranscriptWatch::new(&path, glasscode_core::clock::now_ms()));
+        self.finishes.watches.insert(id.to_string(), TranscriptWatch::new(&path, glasscode_core::clock::now_ms()).mid_turn());
     }
 
     /// A session's turn ended (`activity_changed`): decide what it left, now by rule or by the
@@ -219,17 +259,13 @@ impl Workspace {
             _ => None,
         };
         let by_prompt = self.finishes.by_prompt.contains(id);
-        let check = read.is_none().then(|| {
-            self.finishes.checks += 1;
-            self.finishes.checks
-        });
-        // The icon at once: what the rules say, else "finished" until the check answers.
+        // What the dot shows once the finish settled: what the rules say, else "finished" until
+        // the check answers.
         let shown = read.clone().unwrap_or_else(|| Finish::done(finish::headline(&reply)));
         self.finishes.reports.insert(id.to_string(), Report { finish: shown, at_ms: now_ms, seen: self.watching_session(id) });
-        self.finishes.pending.insert(id.to_string(), Pending { since: Instant::now(), reply: reply.clone(), read, check, began_ms, by_prompt });
-        if let Some(number) = check {
-            self.finish_check(id, &session, reply, number, cx);
-        }
+        let check_wanted = read.is_none();
+        self.finishes.pending.insert(id.to_string(), Pending { since: Instant::now(), reply, read, check: None, check_wanted, settled: false, began_ms, by_prompt });
+        let _ = cx;
     }
 
     /// The model's check of an unclear ending, off the main thread, on the session's account.
@@ -265,6 +301,50 @@ impl Workspace {
     /// when something changed.
     pub(crate) fn finish_tick(&mut self, cx: &mut Context<Self>) -> bool {
         let mut changed = false;
+        // Every Claude session that does not work is followed in its transcript (not only after a
+        // finish: one that started idle, or resumed, can be begun by another session's message),
+        // and one that waits on a prompt on its screen goes on once the prompt is gone.
+        let claude: Vec<(String, Option<std::path::PathBuf>, bool, bool)> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.agent == AgentKind::Claude && self.terminals.contains_key(&s.id))
+            .filter_map(|s| {
+                let waits = match self.activity.get(&s.id) {
+                    Some(AgentActivity::NeedsInput) => true,
+                    Some(AgentActivity::Idle) => false,
+                    _ => return None,
+                };
+                let asking = waits && self.terminals.get(&s.id).is_some_and(|t| glasscode_core::prompt::parse(&t.read(cx).text_tail(60)).is_some());
+                Some((s.id.clone(), s.transcript_path.clone(), waits, asking))
+            })
+            .collect();
+        for (id, path, waits, asking) in claude {
+            if let Some(path) = path {
+                let fits = self.finishes.watches.get(&id).is_some_and(|w| w.path() == path.as_path() && w.is_mid_turn() == waits);
+                if !fits {
+                    let watch = TranscriptWatch::new(&path, glasscode_core::clock::now_ms());
+                    self.finishes.watches.insert(id.clone(), if waits { watch.mid_turn() } else { watch });
+                }
+            }
+            if !waits {
+                self.finishes.prompts.remove(&id);
+                continue;
+            }
+            let entry = self.finishes.prompts.entry(id.clone()).or_default();
+            if asking {
+                *entry = (true, 0);
+            } else if entry.0 {
+                entry.1 += 1;
+                if entry.1 >= PROMPT_GONE_TICKS {
+                    // Answered: the same turn goes on.
+                    self.finishes.prompts.remove(&id);
+                    let previous = self.activity.insert(id.clone(), AgentActivity::Working);
+                    self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                    changed = true;
+                }
+            }
+        }
         let ids: Vec<String> = self.finishes.watches.keys().cloned().collect();
         for id in ids {
             let waiting = matches!(self.activity.get(&id), Some(AgentActivity::Idle | AgentActivity::NeedsInput));
@@ -277,6 +357,22 @@ impl Workspace {
                 self.activity_changed(&id, previous, AgentActivity::Working, cx);
                 self.finishes.from_transcript = false;
                 changed = true;
+            }
+        }
+        // A finish settles: the dot shows what it left, and the check of an unclear one starts.
+        let settling: Vec<String> = self.finishes.pending.iter().filter(|(_, p)| !p.settled && p.since.elapsed() >= SETTLE).map(|(id, _)| id.clone()).collect();
+        for id in settling {
+            let Some(pending) = self.finishes.pending.get_mut(&id) else { continue };
+            pending.settled = true;
+            changed = true;
+            if std::mem::take(&mut pending.check_wanted) {
+                self.finishes.checks += 1;
+                let number = self.finishes.checks;
+                let reply = pending.reply.clone();
+                pending.check = Some(number);
+                if let Some(session) = self.state.session(&id).cloned() {
+                    self.finish_check(&id, &session, reply, number, cx);
+                }
             }
         }
         let due: Vec<String> = self
@@ -339,8 +435,12 @@ impl Workspace {
         self.finishes.awaiting.insert(id.to_string(), glasscode_core::clock::now_ms());
     }
 
-    /// The icon of the session's last finish (`row_state`).
+    /// The icon of the session's last finish (`row_state`): still "working" while the finish
+    /// settles.
     pub(crate) fn finish_row_state(&self, id: &str) -> Option<RowState> {
+        if self.finishes.pending.get(id).is_some_and(|p| !p.settled) {
+            return Some(RowState::Working);
+        }
         row_state_of(self.finishes.report(id))
     }
 
@@ -381,7 +481,7 @@ mod tests {
         assert_eq!(row_state_of(Some(&report(Outcome::NeedsYou, true))), Some(RowState::NeedsYou), "a question stays until it is answered");
         assert_eq!(row_state_of(Some(&report(Outcome::Done, false))), Some(RowState::Finished));
         assert_eq!(row_state_of(Some(&report(Outcome::Done, true))), None);
-        assert_eq!(row_state_of(Some(&report(Outcome::StillGoing, false))), None);
+        assert_eq!(row_state_of(Some(&report(Outcome::StillGoing, true))), Some(RowState::Working), "its work goes on by itself");
         assert_eq!(row_state_of(None), None);
         assert_eq!(state_word_of(Some(&report(Outcome::Done, true))), Some("finished"), "the manager hears it is finished, seen or not");
         assert_eq!(state_word_of(Some(&report(Outcome::StillGoing, true))), Some("goes on by itself"));
@@ -408,6 +508,7 @@ mod tests {
     #[test]
     fn the_hold_covers_a_stop_hook_that_goes_on() {
         assert!(HOLD >= Duration::from_millis(6600), "nine continuations in ten start within 6.6 s");
+        assert!(SETTLE < HOLD && SETTLE >= Duration::from_millis(1600), "the dot waits out half the continuations, the notification nine in ten");
         assert!(CHECK_WAIT > HOLD && CHECK_WAIT < finish::CHECK_LIMIT);
     }
 }

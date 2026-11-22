@@ -1697,9 +1697,14 @@ impl Workspace {
             // Its conversation and transcript first: a turn that started and ended in these same
             // lines (a short first turn) is reported from that transcript, not as partial.
             self.finishes.followed(&id);
-            // The last message of a turn that ended here (a `Stop` in these lines), for its finish report.
+            // The last message of a turn that ended here (a `Stop` in these lines), for its finish
+            // report; its transcript is followed from here, so that its own lines are no new work.
             if update.stopped_ms.is_some() || update.last_reply.is_some() || update.lines.iter().any(|l| l.contains("\"Stop\"")) {
                 self.finishes.note_stop(&id, update.last_reply.clone(), update.stopped_ms);
+                let path = update.transcript_path.clone().or_else(|| self.state.session(&id).and_then(|s| s.transcript_path.clone()));
+                if let Some(path) = path {
+                    self.finishes.rebase_watch(&id, &path, update.stopped_ms.unwrap_or_else(glasscode_core::clock::now_ms));
+                }
             }
             if let Some(session) = self.state.session_mut(&id) {
                 if let Some(conversation) = update.conversation_id.clone() {
@@ -1741,7 +1746,13 @@ impl Workspace {
                 {
                     self.attention.insert(id.clone());
                 }
-                let previous = self.activity.insert(id.clone(), activity);
+                let mut previous = self.activity.insert(id.clone(), activity);
+                // A turn that began and ended in these same lines (a short one, or the first right
+                // after a launch) worked and finished all the same.
+                if update.worked && activity != AgentActivity::Working && previous != Some(AgentActivity::Working) {
+                    self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                    previous = Some(AgentActivity::Working);
+                }
                 self.activity_changed(&id, previous, activity, cx);
                 redraw = true;
             }
@@ -1847,8 +1858,15 @@ impl Workspace {
                 now = AgentActivity::NeedsInput;
             }
             let last = rollout.last_message.clone();
-            // Only a change counts, so each turn tells "finished" once.
-            let previous = self.activity.get(&id).copied();
+            let ended = rollout.ended;
+            // Only a change counts, so each turn tells "finished" once; a turn that began and
+            // ended between two reads is one too.
+            let mut previous = self.activity.get(&id).copied();
+            if self.finishes.codex_ended(&id, ended) && now == AgentActivity::Idle && previous != Some(AgentActivity::Working) {
+                self.activity.insert(id.clone(), AgentActivity::Working);
+                self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                previous = Some(AgentActivity::Working);
+            }
             if previous != Some(now) {
                 // Its turn ended: its last message, for the finish report (none: it said nothing).
                 if now == AgentActivity::Idle {

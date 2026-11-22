@@ -126,8 +126,10 @@ impl Workspace {
         }
         match self.row_state(s) {
             crate::sidebar::RowState::NeedsYou => "needs you",
-            crate::sidebar::RowState::Working => "working",
-            // Its last turn's report, seen or not: "finished", "goes on by itself".
+            // Its agent works, or its last turn said its work goes on by itself.
+            crate::sidebar::RowState::Working if self.activity.get(&s.id) == Some(&glasscode_core::agents::AgentActivity::Working) => "working",
+            crate::sidebar::RowState::Working => self.finish_state_word(&s.id).unwrap_or("working"),
+            // Its last turn's report, seen or not: "finished".
             _ => self.finish_state_word(&s.id).unwrap_or("idle"),
         }
     }
