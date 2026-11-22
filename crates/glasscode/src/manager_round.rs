@@ -529,6 +529,21 @@ impl Workspace {
         Some(info)
     }
 
+    /// A session's finish was told (`finish_ui`), also of a turn no hook opened: its question or
+    /// the end of what it said, for what the manager sees, and the time it finished, for the
+    /// brief's "finished" (work that goes on, or asks, has not finished).
+    pub(crate) fn v2_session_finished(&mut self, id: &str, finish: &glasscode_core::finish::Finish, reply: &str) {
+        use glasscode_core::finish::Outcome;
+        if finish.outcome == Outcome::Done {
+            self.v2_brief_file().finished_at(id, glasscode_core::clock::now_ms() / 1000);
+            self.v2_keep_brief_file();
+        }
+        let said = if finish.outcome == Outcome::NeedsYou && !finish.question.trim().is_empty() { finish.question.clone() } else { tail_of(reply, REPLY_CHARS) };
+        if !said.trim().is_empty() {
+            self.round.replies.insert(id.to_string(), said);
+        }
+    }
+
     /// A session's turn ended (its report): the end of what it said, for what the manager sees.
     pub(crate) fn v2_turn_ended(&mut self, report: &glasscode_core::turns::TurnReport) {
         if report.end == glasscode_core::turns::TurnEnd::Completed {
@@ -546,7 +561,8 @@ fn state_of(word: &str) -> SessionState {
     match word {
         "needs you" => SessionState::NeedsYou,
         "working" => SessionState::Working,
-        "idle" => SessionState::Idle,
+        // A finished turn's report (`finish_ui`): the session runs and does not work now.
+        "idle" | "finished" | "goes on by itself" => SessionState::Idle,
         _ => SessionState::NotRunning,
     }
 }

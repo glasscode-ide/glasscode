@@ -124,6 +124,7 @@ kinds! {
     SESSION_STARTED = "session.started", Info, "crates/glasscode_core/src/journal.rs", "agent, hook source (startup, resume, clear)", "reconciler";
     SESSION_ACTIVITY = "session.activity", Info, "crates/glasscode_core/src/journal.rs", "activity (working, idle, needs_input), previous", "reconciler, Activity";
     SESSION_NEEDS_INPUT = "session.needs_input", Notice, "crates/glasscode_core/src/journal.rs", "notification_type (permission_prompt, idle_prompt, …), message", "Activity; M40's needs-you rule";
+    SESSION_FINISHED = "session.finished", Info, "crates/glasscode_core/src/journal.rs", "agent, outcome (done, needs_you, still_going), question, summary, checked (by the model run), by_prompt", "the manager (its wake for a question), the work ledger";
     SESSION_ENDED = "session.ended", Info, "crates/glasscode_core/src/journal.rs", "reason (clear, resume, logout, prompt_input_exit, other), or exit", "reconciler";
     SESSION_HOOK = "session.hook", Info, "crates/glasscode_core/src/journal.rs", "the hook's name and its fields, prompts hashed with an excerpt", "M30 (turns)";
     // ----- turns: M30

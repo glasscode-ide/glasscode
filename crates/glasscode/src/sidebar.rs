@@ -25,6 +25,8 @@ use crate::ui;
 pub enum RowState {
     NeedsYou,
     Working,
+    /// Its turn finished and the person has not looked at it since (`finish_ui`).
+    Finished,
     Idle,
 }
 

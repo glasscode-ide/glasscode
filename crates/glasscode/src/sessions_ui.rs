@@ -214,18 +214,27 @@ impl Workspace {
 
     // ----- telling the person -------------------------------------------------------------
 
-    /// A session's agent changed what it is doing: say so when it finished its turn or needs
-    /// the person, unless they are looking at it.
+    /// A session's agent changed what it is doing: a turn that ended is reported (`finish_ui`:
+    /// done, a question, or work that goes on, told once its hold is over), and a prompt that
+    /// waits for the person is said at once, unless they are looking at it.
     pub fn activity_changed(&mut self, id: &str, previous: Option<AgentActivity>, now: AgentActivity, cx: &mut Context<Self>) {
         self.journal_activity(id, previous, now);
         // v2 (M42): working again, what the session said before is over.
         if now == AgentActivity::Working {
             crate::notify_ui::session_moved_on(id);
+            self.finish_working(id, previous);
         }
-        let finished = previous == Some(AgentActivity::Working) && now == AgentActivity::Idle;
+        // Its turn ended: also one that waited on a prompt the person answered.
+        if matches!(previous, Some(AgentActivity::Working | AgentActivity::NeedsInput)) && now == AgentActivity::Idle {
+            self.finish_begin(id, cx);
+        }
         let needs = now == AgentActivity::NeedsInput && previous != Some(AgentActivity::NeedsInput);
-        let wanted = (finished && !self.state.notify.finished_off) || (needs && !self.state.notify.needs_input_off);
-        if !wanted {
+        if !needs {
+            return;
+        }
+        // A tool that runs once the person answered says it goes on (no hook does).
+        self.finish_watch(id);
+        if self.state.notify.needs_input_off {
             return;
         }
         let watching = self.window_active && self.center == Center::Session && self.state.active_session.as_deref() == Some(id);
@@ -233,9 +242,9 @@ impl Workspace {
             return;
         }
         let Some(session) = self.state.session(id).cloned() else { return };
-        let title = format!("{} {}", session.agent.name(), if needs { "needs you" } else { "finished" });
+        let title = format!("{} needs you", session.agent.name());
         let body = self.session_title(&session);
-        self.notify_session(id, session.agent, title, body, needs, cx);
+        self.notify_session(id, session.agent, title, body, true, cx);
     }
 
     // ----- the sidebar --------------------------------------------------------------------
@@ -494,7 +503,8 @@ impl Workspace {
         match self.activity.get(&session.id) {
             Some(AgentActivity::NeedsInput) => RowState::NeedsYou,
             Some(AgentActivity::Working) => RowState::Working,
-            _ => RowState::Idle,
+            // Its last turn's report: orange for its question, the finished mark until seen.
+            _ => self.finish_row_state(&session.id).unwrap_or(RowState::Idle),
         }
     }
 

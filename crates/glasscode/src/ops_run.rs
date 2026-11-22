@@ -701,18 +701,18 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let needs = op.on("needs_you");
     let mut rows = Vec::new();
     let mut data = Vec::new();
-    for s in &ws.state.sessions {
-        // Sessions of a hidden project are invisible to the CLI and Glasscode.
-        if ws.state.session_hidden(s) {
-            continue;
-        }
-        if project.as_ref().is_some_and(|p| *p != s.project_id) {
-            continue;
-        }
+    // Sessions of a hidden project are invisible to the CLI and Glasscode.
+    let mut listed: Vec<&glasscode_core::model::Session> =
+        ws.state.sessions.iter().filter(|s| !ws.state.session_hidden(s) && project.as_ref().is_none_or(|p| *p == s.project_id)).filter(|s| !needs || ws.session_state(s) == "needs you").collect();
+    // `--match`: the ones that fit the words, best first (`session_find`).
+    let matched = op.text("match").map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
+    if let Some(words) = matched {
+        let entries: Vec<glasscode_core::session_find::Entry> = listed.iter().map(|s| ws.session_entry(s)).collect();
+        let ranked = glasscode_core::session_find::rank(words, &entries);
+        listed = ranked.hits.iter().map(|h| listed[h.index]).collect();
+    }
+    for s in listed {
         let state = ws.session_state(s);
-        if needs && state != "needs you" {
-            continue;
-        }
         let project_name = ws.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
         let pr = ws.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|p| format!(" · PR #{}", p.number)).unwrap_or_default();
         let here = if caller.session.as_deref() == Some(s.id.as_str()) { "  (this session)" } else { "" };
@@ -734,7 +734,13 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             data.push(json!({ "id": r.session.id, "title": r.session.title, "agent": r.session.agent.name().to_lowercase(), "branch": r.session.branch, "state": state, "on_server": true, "last_reply": r.last_reply }));
         }
     }
-    let text = if rows.is_empty() { "No sessions.".to_string() } else { rows.join("\n") };
+    let mut text = if rows.is_empty() { "No sessions.".to_string() } else { rows.join("\n") };
+    // What the rows are, and that a worktree without a session is not one (the manager took
+    // "not running" for a leftover worktree).
+    if !needs {
+        text.push('\n');
+        text.push_str(&ws.session_list_footer(rows.len(), project.as_deref(), matched));
+    }
     answer(Reply::ok(text, Value::Array(data)))
 }
 
@@ -757,6 +763,21 @@ fn session_show(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     if let Some(t) = ws.state.ticket_of.get(&s.id) {
         lines.push(format!("Ticket {t}"));
     }
+    // What its last turn left (`finish_ui`), and the messages still waiting to be typed in.
+    if let Some(report) = ws.finishes.report(&s.id) {
+        let ago = glasscode_core::clock::now_ms().saturating_sub(report.at_ms) / 1000;
+        let what = match report.finish.outcome {
+            glasscode_core::finish::Outcome::NeedsYou => format!("Its last turn ended {ago} s ago on a question for you: {}", report.finish.question),
+            glasscode_core::finish::Outcome::StillGoing => format!("Its last turn ended {ago} s ago; it goes on by itself: {}", report.finish.summary),
+            glasscode_core::finish::Outcome::Done => format!("It finished {ago} s ago: {}", report.finish.summary),
+        };
+        lines.push(what.trim_end_matches(": ").to_string());
+    }
+    let waiting = ws.ci_fix.deliveries.header(&s.id);
+    if let Some(waiting) = &waiting {
+        lines.push(waiting.clone());
+    }
+    data["waiting_messages"] = json!(waiting);
     // The agent's last reply is in its transcript, a file: read off the main thread.
     let (agent, transcript) = (s.agent, s.transcript_path.clone());
     read_later(move || {
@@ -893,6 +914,8 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
     let who = caller.describe();
     let origin = caller.session.as_ref().map(|s| format!("session:{s}")).unwrap_or_else(|| caller.who.clone());
     let (project, session, launch) = (caller_key(ws, caller), caller.session.clone(), ws.control.launch.clone());
+    // The manager waits to hear back: the session's next finish is said (`finish_ui`).
+    let by_manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
     // What the target's events will descend from (events-13): a playbook's firing; a session's
     // own drive, passed on (a session the manager drives that asks another to go on is the same
     // chain); the manager itself, one step. The person's own sends drive nothing.
@@ -906,7 +929,8 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
             .or_else(|| matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. }).then(|| (1, Vec::new())))
     };
     plan(Kind::Send, what(op, &Names { title: title.clone(), ..Names::default() }, day::today()), move |ws, r, window, cx| {
-        if !ws.terminals.contains_key(&id) && ws.state.session(&id).is_some() {
+        let starting = !ws.terminals.contains_key(&id) && ws.state.session(&id).is_some();
+        if starting {
             ws.ensure_terminal(&id, window, cx);
         }
         let (depth, causes) = drive.clone().unwrap_or_default();
@@ -929,7 +953,18 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
         });
         let marker = delivery.marker();
         ws.queue_delivery(delivery, intent, cx);
-        ws.reply(r, Reply::ok(format!("Queued for “{title}”: it is typed in when the session is idle, and nothing is typed over a question or your own text."), json!({ "id": id, "queued": true, "marker": marker })));
+        if by_manager {
+            ws.finish_await(&id);
+        }
+        // Said as it is: typed in now when the session can take it, else what it waits for.
+        let ahead = ws.ci_fix.deliveries.waiting(&id) > 1 || ws.ci_fix.deliveries.in_flight(&id).is_some();
+        let wait = if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { glasscode_core::delivery_session::ready(&ws.delivery_inputs(&id, cx)) };
+        let (text, waits) = match wait {
+            _ if starting => (format!("Queued for “{title}”: the session is starting, and it is typed in once it is ready."), Some("the session has started")),
+            Ok(()) => (format!("Sent to “{title}”: it is typed in now. Its answer comes when its turn ends."), None),
+            Err(why) => (format!("Queued for “{title}”: it is typed in once {}, and nothing is typed over a question or your own text.", why.words()), Some(why.words())),
+        };
+        ws.reply(r, Reply::ok(text, json!({ "id": id, "queued": true, "sent_now": waits.is_none(), "waits_until": waits, "marker": marker })));
     })
 }
 
@@ -1473,7 +1508,8 @@ fn worktree_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 if branch.is_empty() { "(no branch)".to_string() } else { branch.clone() },
                 home_relative(&path),
                 if main { "  · main checkout" } else { "" },
-                if sessions > 0 { format!("  · {}", plural(sessions, "session", "sessions")) } else { String::new() },
+                // One without a session is closed: it is not a session (`voice_sessions`).
+                if sessions > 0 { format!("  · {}", plural(sessions, "session", "sessions")) } else { "  · no session (closed)".to_string() },
                 if removing { "  · removing…" } else { "" }
             ));
             data.push(json!({ "project": p.name, "path": path, "branch": branch, "main": main, "sessions": sessions }));

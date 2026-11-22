@@ -324,6 +324,12 @@ pub fn wake_for_event(event: &crate::journal::Event, now_ms: u64) -> Option<Wake
         let mut w = Wake::new(format!("approval:{id}"), Priority::Playbook, now_ms);
         w.precondition = Precondition::Approval { id };
         w
+    } else if let (true, Some(session)) = (event.kind == k::SESSION_FINISHED && data["outcome"] == "needs_you", &event.session) {
+        // The app's finish report of a turn that ends on a question for the person: the wake a
+        // session's own prompt would have (a finish that is done wakes nobody).
+        let mut w = Wake::new(format!("needs:{session}"), Priority::Playbook, now_ms);
+        w.precondition = Precondition::SessionNeedsYou { session: session.clone() };
+        w
     } else if matches!(event.source, Source::Manager | Source::Control | Source::App | Source::Clock) || kind.starts_with("brain.") || kind.starts_with("wake.") || kind.starts_with("source.") || kind.starts_with("decision.") {
         return None;
     } else if let (true, (Some(repo), Some(number))) = (event.kind == k::CI_FAILED, pr) {
@@ -776,5 +782,21 @@ mod tests {
         let (second, _) = lane.ask(&host, &mut Ledger::default(), "and now?", "", 2, &mut |_| {}).unwrap();
         assert_eq!(second.end, TurnEnd::Answered("Still two.".into()));
         lane.brain.stop();
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use crate::journal::{Event, Source, kinds};
+    use serde_json::json;
+
+    #[test]
+    fn a_finish_that_asks_wakes_the_manager_and_one_that_is_done_does_not() {
+        let finished = |outcome: &str| Event::new(kinds::SESSION_FINISHED, Source::App, "x").session(Some("s1")).data(json!({ "outcome": outcome, "question": "Push it?" }));
+        let wake = super::wake_for_event(&finished("needs_you"), 5).expect("a question wakes it");
+        assert_eq!(wake.key, "needs:s1");
+        assert!(matches!(&wake.precondition, super::Precondition::SessionNeedsYou { session } if session == "s1"));
+        assert!(super::wake_for_event(&finished("done"), 5).is_none(), "a model run for every finish would cost too much");
+        assert!(super::wake_for_event(&finished("still_going"), 5).is_none());
     }
 }

@@ -268,6 +268,17 @@ sys.exit(0 if any(r['event'] == 'SessionStart' and sys.argv[2] in r['stdout'] fo
 memory_has() { grep -rqF "$1" "$T/home/glasscode/memory" 2>/dev/null; }
 board_count() { gc board 2>/dev/null | grep -cF "$1"; }
 
+# finished <session> <outcome>: the app reported a finish of the session with that outcome.
+finished() { journal | python3 -c "
+import json, sys
+sys.exit(0 if any(d['kind'] == 'session.finished' and d.get('session') == sys.argv[1] and d['data'].get('outcome') == sys.argv[2] for d in map(json.loads, sys.stdin)) else 1)" "$1" "$2"; }
+# idle_waits <session>: a needs-input event of the session came from Claude's idle reminder.
+idle_waits() { journal | python3 -c "
+import json, sys
+sys.exit(0 if any(d['kind'] == 'session.needs_input' and d.get('session') == sys.argv[1] and d['data'].get('notification_type') == 'idle_prompt' for d in map(json.loads, sys.stdin)) else 1)" "$1"; }
+no_idle_waits() { ! idle_waits "$1"; }
+state_is() { gc session show "$1" --json 2>/dev/null | python3 -c "import json, sys; d = json.load(sys.stdin); d = d.get('data', d); sys.exit(0 if d.get('state') == sys.argv[1] else 1)" "$2"; }
+
 journey2() {
   say "2. A stand-in Claude session's turn"
   gc session new --project app --message "Fix the typo in the README" > /dev/null 2>&1
@@ -275,6 +286,15 @@ journey2() {
   check "the session started" test -n "$id"
   check "its turn's report has its tools, read from its transcript" wait_for 60 turn_reported "$id"
   check "its work item has the turn" wait_for 20 work_has_turn "$id"
+  # The finish report (finish_ui): told within seconds, by what the turn's last message says.
+  check "its finish is reported at once, as done" wait_for 30 finished "$id" done
+  check "the manager hears it finished" wait_for 10 state_is "$id" finished
+  gc session send "$id" "and the setup doc?" > /dev/null 2>&1
+  check "a turn that ends on a question is reported as needing you" wait_for 60 finished "$id" needs_you
+  check "the manager hears it needs you" wait_for 10 state_is "$id" "needs you"
+  # The stand-in's idle reminder comes a minute after the turn: it is no wait in the app.
+  sleep 75
+  check "Claude's idle reminder is no needs-input event" no_idle_waits "$id"
 }
 
 # last_approval: the number of the newest card asked.

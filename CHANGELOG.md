@@ -20,8 +20,23 @@ becomes the text of the GitHub release.
   Rust package in the programs (`THIRD-PARTY-NOTICES.html`).
 - `glasscode --version` shows the version beside the build number.
 - The Board scrolls sideways with the mouse wheel, and a GitHub board shows all its columns.
+- A session's finish is told at once: within seconds of a Claude or Codex turn ending, its dot
+  turns orange when it asks you something (and the notification says the question), or blue,
+  "finished", until you open it. A small model reads only the endings the rules cannot (it runs on
+  the session's own account, without tools). The manager knows it too: when it sent the session a
+  message, it says the answer in the chat and aloud.
 
 ### Changed
+
+- Claude's reminder a minute after each turn ("Claude is waiting for your input") no longer turns
+  the session orange or sends "needs you"; neither does its terminal bell. Messages to a finished
+  session are typed in instead of waiting for you, and `session send` says "Sent" when it is typed
+  in at once.
+- Codex sessions on macOS show working, finished and needs-you as on Windows.
+- A session's dot is green whenever it works: also for a turn another session's message began, a
+  turn a Stop hook keeps going, a very short turn, and work going on after you answered a prompt
+  (here, on the phone or the glasses). It stays green for 2 s after a turn ends, so it does not
+  blink, and while a turn's work goes on by itself (up to 30 minutes).
 
 - Glasscode is licensed under the Apache License 2.0.
 - The interface is new: one shell with Today, Sessions, Board, Pull requests and Settings, the

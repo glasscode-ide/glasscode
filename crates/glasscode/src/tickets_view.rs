@@ -1424,6 +1424,7 @@ impl Workspace {
                 let (color, state_label) = match w.state {
                     RowState::NeedsYou => (sidebar::attention(), "needs you"),
                     RowState::Working => (theme::added(), "working"),
+                    RowState::Finished => (theme::link(), "finished"),
                     RowState::Idle => (theme::muted(), "idle"),
                 };
                 div()
