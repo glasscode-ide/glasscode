@@ -927,9 +927,10 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
     let (project, session, launch) = (caller_key(ws, caller), caller.session.clone(), ws.control.launch.clone());
     // The manager waits to hear back: the session's next finish is said (`finish_ui`).
     let by_manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
-    // The person's words, and the manager's (it speaks for the person): typed in while the agent
-    // works, as in a chat.
-    let while_working = person || by_manager;
+    // The person's words, and the manager's in its chat (it speaks for the person there, by voice
+    // too): typed in while the agent works, as in a chat. The manager woken by events, a playbook,
+    // a schedule, intake and auto-review (its wake lane) send nudges: they wait for the turn.
+    let while_working = person || matches!(caller.channel, glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Chat, .. });
     // What the target's events will descend from (events-13): a playbook's firing; a session's
     // own drive, passed on (a session the manager drives that asks another to go on is the same
     // chain); the manager itself, one step. The person's own sends drive nothing.
@@ -973,7 +974,9 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
         }
         // Said as it is: typed in now when the session can take it (by the queue's own rule), else
         // what it waits for. The message before it goes in within a second or two.
-        let ahead = ws.ci_fix.deliveries.waiting(&id) > 1 || ws.ci_fix.deliveries.in_flight(&id).is_some();
+        // The person's is in the queue already; one with a claim joins it once claimed.
+        let itself = usize::from(person);
+        let ahead = ws.ci_fix.deliveries.ahead(&id, while_working) > itself || ws.ci_fix.deliveries.in_flight(&id).is_some();
         let inputs = ws.delivery_inputs(&id, cx);
         let wait = glasscode_core::delivery_session::ready(&inputs, while_working).and(if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { Ok(()) });
         let (text, waits) = match wait {

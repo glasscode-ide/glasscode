@@ -312,7 +312,9 @@ impl Queues {
     }
 
     /// What to do next for `session`, seeing `inputs`: the first delivery, when the session can
-    /// take it and none is in flight (it is in flight from now on).
+    /// take it and none is in flight (it is in flight from now on). While the agent works, the
+    /// first one that goes in while it works ([`Delivery::while_working`]) passes the ones that wait
+    /// only for the turn to end (a CI fix waiting does not hold the person's message).
     pub fn next(&mut self, session: &str, inputs: &Inputs) -> Step {
         let Some(lane) = self.lanes.get_mut(session) else { return Step::Nothing };
         if lane.in_flight.is_some() {
@@ -324,12 +326,17 @@ impl Queues {
             return Step::Nothing;
         }
         let while_working = lane.waiting.front().is_some_and(|d| d.while_working);
-        if let Err(wait) = ready(inputs, while_working) {
-            lane.wait = Some(wait);
-            return Step::Wait(wait);
-        }
-        lane.wait = None;
-        let delivery = lane.waiting.pop_front().expect("not empty");
+        let at = match ready(inputs, while_working) {
+            Ok(()) => 0,
+            Err(Wait::Working) if ready(inputs, true).is_ok() && lane.waiting.iter().any(|d| d.while_working) => lane.waiting.iter().position(|d| d.while_working).expect("one goes while it works"),
+            Err(wait) => {
+                lane.wait = Some(wait);
+                return Step::Wait(wait);
+            }
+        };
+        // What the ones left wait for: the turn, when one waits only for it.
+        lane.wait = (at > 0).then_some(Wait::Working);
+        let delivery = lane.waiting.remove(at).expect("not empty");
         lane.in_flight = Some(delivery.clone());
         Step::Send(delivery)
     }
@@ -368,6 +375,12 @@ impl Queues {
     /// How many wait for `session`, the one in flight not counted.
     pub fn waiting(&self, session: &str) -> usize {
         self.lanes.get(session).map_or(0, |lane| lane.waiting.len())
+    }
+
+    /// How many waiting for `session` go before a new one: all of them, or for one that goes in
+    /// while the agent works, the others that do (it passes the rest).
+    pub fn ahead(&self, session: &str, while_working: bool) -> usize {
+        self.lanes.get(session).map_or(0, |lane| lane.waiting.iter().filter(|d| !while_working || d.while_working).count())
     }
 
     /// What the session's header says of its queue: how many messages wait, and until when
@@ -549,6 +562,18 @@ mod tests {
         queues.finish("s1", &second.id);
         // The CI fix behind them waits for the turn to end.
         assert_eq!(queues.next("s1", &claude), Step::Wait(Wait::Working));
+        // A message sent after it passes it: the CI fix does not hold the person's message.
+        queues.push(send("third"));
+        assert_eq!(queues.ahead("s1", true), 1);
+        assert_eq!(queues.ahead("s1", false), 2);
+        let Step::Send(third) = queues.next("s1", &claude) else { panic!("held behind the CI fix") };
+        assert_eq!(third.text, "third");
+        queues.finish("s1", &third.id);
+        // Never past a question.
+        queues.push(send("fourth"));
+        assert_eq!(queues.next("s1", &Inputs { asking: true, ..claude }), Step::Wait(Wait::Asking));
+        let Step::Send(fourth) = queues.next("s1", &claude) else { panic!() };
+        queues.finish("s1", &fourth.id);
         assert_eq!(queues.header("s1").as_deref(), Some("1 message waits until the agent's turn is over"));
         assert!(matches!(queues.next("s1", &idle()), Step::Send(d) if d.text == "CI failed at aaa"));
     }
