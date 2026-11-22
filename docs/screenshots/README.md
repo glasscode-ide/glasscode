@@ -1,11 +1,7 @@
 # Screenshots
 
-Screenshots of the app for the [README](../../README.md) go here, for example:
+The pictures the [README](../../README.md#screenshots) shows. They come from a demo home with
+made-up projects, the stand-in agents of `script/test-agents` and no real account.
 
-```markdown
-![Today](docs/screenshots/today.png)
-![A session in chat view](docs/screenshots/chat.png)
-```
-
-Take them from a demo home with made-up projects, never from your own: keep them free of any
-real project, ticket, account or personal data.
+Take any new one the same way, never from your own home: keep every screenshot free of real
+projects, tickets, accounts and personal data.

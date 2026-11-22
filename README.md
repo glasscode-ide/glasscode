@@ -4,11 +4,13 @@
 
 # Glasscode
 
+*Survival of the simplest.*
+
 **A workspace for running Claude Code and Codex agents side by side, each in its own git
 worktree, on the subscription account you choose. With a manager above your sessions, and a
 companion app for Meta Ray-Ban Display glasses.**
 
-[What it is](#what-it-is) · [Install](#install) · [Usage](#usage) · [Build](#build-from-source) ·
+[Glass coding](#glass-coding) · [What it is](#what-it-is) · [Install](#install) · [Usage](#usage) · [Build](#build-from-source) ·
 [Docs](docs/README.md) · [Contributing](#contributing) · [License](#license)
 
 </div>
@@ -18,6 +20,16 @@ companion app for Meta Ray-Ban Display glasses.**
 > **Status: pre-release.** Glasscode is in active development and no version is released yet
 > (the builds call themselves 0.1.0). macOS is the main platform; Windows builds are in test.
 > You build it from source for now.
+
+## Glass coding
+
+Vibe coding put a conversation where the code used to be. Glass coding takes that conversation
+away from the desk. Your agents keep working in Glasscode; you put on display glasses, ask the
+manager what needs you, hear the answer and see it on the lens, and approve with a pinch of the
+Neural Band, while you make coffee or walk the dog. Back at the desk, everything is in one window.
+
+The glasses app is experimental: it works with Meta Ray-Ban Display and the Neural Band in
+Meta's developer mode ([glasses/README.md](glasses/README.md)). The desktop app works on its own.
 
 ## What it is
 
@@ -69,6 +81,20 @@ And, optional:
 
 Glasscode depends on no hosted service of its own. Your devices reach each other over
 [Tailscale](https://tailscale.com/) or an optional relay you host yourself.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/today.png" alt="Today: what needs you, what comes up, and the manager" width="900" />
+</p>
+
+| A session, its pull request beside it | The same kind of session in its terminal |
+|---|---|
+| ![A session in chat view with its pull request](docs/screenshots/session.png) | ![A session in terminal view](docs/screenshots/terminal.png) |
+
+![Pull requests: yours and the ones that ask for your review](docs/screenshots/pull-requests.png)
+
+The screenshots come from a demo home with made-up projects ([docs/screenshots](docs/screenshots/)).
 
 ## How the parts fit together
 
