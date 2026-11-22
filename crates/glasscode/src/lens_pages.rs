@@ -24,6 +24,10 @@ const REPLY_FRESH: Duration = Duration::from_secs(4);
 pub struct LensState {
     replies: HashMap<String, (Instant, String)>,
     reading: HashSet<String>,
+    /// A page shown on the lens that the window has no view of its own for (the list of
+    /// sessions: the window shows one session), with the window's place when it was opened. It
+    /// is the place until the window goes somewhere else.
+    over: Option<(String, String)>,
 }
 
 /// A percentage used of a limit, as its tone.
@@ -74,8 +78,18 @@ fn checks_of(ci: Option<&glasscode_core::github::CiStatus>) -> (String, Tone) {
 }
 
 impl Workspace {
-    /// The place the window shows, as `place.open` takes it.
+    /// The place every screen shows, as `place.open` takes it: the window's, or the page shown
+    /// over it (`LensState::over`) while the window stays where it was.
     pub(crate) fn lens_place(&self) -> String {
+        let window = self.window_place();
+        match &self.lens.over {
+            Some((page, at)) if *at == window => page.clone(),
+            _ => window,
+        }
+    }
+
+    /// The place the window itself shows.
+    fn window_place(&self) -> String {
         match self.view {
             View::Sessions => match self.state.active_session.as_deref().filter(|_| self.center == Center::Session).and_then(|id| self.state.session(id)) {
                 Some(s) if !self.state.session_hidden(s) => s.id.clone(),
@@ -133,8 +147,8 @@ impl Workspace {
         let page = self.lens_page(&self.lens_place(), cx);
         let status = page.status.as_ref().map(|s| format!(" ({})", s.label.to_lowercase())).unwrap_or_default();
         let what = if page.eyebrow.is_empty() { page.title.clone() } else { format!("{}: \"{}\"", page.eyebrow, page.title) };
-        let id = if page.kind == "session" { format!(", id {}", page.place) } else { String::new() };
-        format!("On the Mac's screen now: {what}{status}{id}.")
+        // No id: the voice names a session by its title (an id read aloud is noise).
+        format!("On the Mac's screen now: {what}{status}.")
     }
 
     fn lens_project(&self, s: &Session) -> String {
@@ -309,6 +323,10 @@ impl Workspace {
 
     /// Keep the last reply of the session on screen fresh for its page, read off the main thread.
     pub(crate) fn lens_refresh_reply(&mut self, cx: &mut Context<Self>) {
+        // The window went somewhere else: the page shown over it is over.
+        if self.lens.over.as_ref().is_some_and(|(_, at)| *at != self.window_place()) {
+            self.lens.over = None;
+        }
         let place = self.lens_place();
         let Some(s) = self.state.session(&place) else { return };
         if self.lens.reading.contains(&s.id) || self.lens.replies.get(&s.id).is_some_and(|(at, _)| at.elapsed() < REPLY_FRESH) {
@@ -356,6 +374,12 @@ impl Workspace {
                 self.tickets.selected = None;
             }
             self.run_op_named("ui.open", serde_json::json!({ "place": word }), window, cx);
+            // The list of sessions has no view of its own in the window (it shows one session):
+            // it is the lens's page until the window goes somewhere else.
+            self.lens.over = (word == "sessions").then(|| ("sessions".to_string(), self.window_place()));
+        }
+        if place != "sessions" {
+            self.lens.over = None;
         }
         cx.notify();
         Ok(self.lens_page(&self.lens_place(), cx))

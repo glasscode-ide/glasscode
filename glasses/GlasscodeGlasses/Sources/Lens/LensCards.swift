@@ -118,7 +118,7 @@ enum LensCards {
                 Text("Listening", style: .heading)
             }
             Text(heard.isEmpty ? "Say what you want…" : clip(heard, 220), style: .body, color: heard.isEmpty ? .secondary : .primary)
-            hint("A pause sends it · pinch sends now · swipe ◀ cancels")
+            hint("A pause sends it · ▼ silent · ◀ ends the talk")
         }
     }
 

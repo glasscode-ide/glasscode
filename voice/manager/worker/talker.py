@@ -18,6 +18,7 @@ retells it: a retelling added guesses of its own.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 
 from livekit.agents import RunContext, ToolError, function_tool
@@ -35,6 +36,48 @@ PLACES = {
 }
 
 CallDevice = Callable[[str, dict], Awaitable[str]]
+
+
+# An id as it must never be spoken: a UUID, or a run of eight or more hex letters with a digit
+# and a letter in it (a ref, a commit), with the words that lead to it ("with id", "its ref is").
+_ID = re.compile(
+    r"(?:,?\s*\b(?:with|and its|its|whose|has|under)\s+)?(?:\bthe\s+)?(?:\b(?:id|ref)s?\b\s*(?:is|:|#)?\s*)?"
+    r"\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{8,40})\b",
+    re.IGNORECASE,
+)
+
+
+def speakable(text: str) -> str:
+    """The text without ids: an id read aloud is noise, whoever wrote it."""
+    cleaned = _ID.sub("", text)
+    if cleaned == text:
+        return text
+    # What an id leaves behind: empty brackets, a space before a comma, double spaces.
+    cleaned = re.sub(r"\s*\(\s*[,;:]?\s*\)", "", cleaned)
+    cleaned = re.sub(r"\s+([,.;!?])", r"\1", cleaned)
+    cleaned = re.sub(r",\s*([.;!?])", r"\1", cleaned)
+    return re.sub(r"[ \t]{2,}", " ", cleaned)
+
+
+async def speakable_stream(text):
+    """`speakable` over text as it is written, a sentence at a time (an id and the words that
+    lead to it are in one sentence); a long sentence goes on at a space, a few words held back."""
+    held = ""
+    async for delta in text:
+        if not isinstance(delta, str):
+            yield delta
+            continue
+        held += delta
+        ends = [m.end() for m in re.finditer(r"[.!?\n]\s", held)]
+        cut = ends[-1] if ends else 0
+        if not cut and len(held) > 160:
+            words = [m.start() for m in re.finditer(r"\s\S", held)]
+            cut = words[-5] + 1 if len(words) > 5 else 0
+        if cut:
+            head, held = held[:cut], held[cut:]
+            yield speakable(head)
+    if held:
+        yield speakable(held)
 
 
 # How many of the conversation's last turns a talk starts with, and how long each may be.
@@ -62,7 +105,7 @@ def instructions(name: str, place: str = "", language: str = "en", now: str = ""
     the person is (the place on the screen and the lens), as the device said it."""
     where = PLACES.get(place, "by voice")
     tongue = {"en": "English", "de": "German"}.get(language, language)
-    here = [f"Where the person is: {' '.join(now.split())[:900]} \"This\" and \"here\" mean it; start from there.", ""] if now.strip() else [""]
+    here = [f"What you know right now, without asking (it is kept current): {' '.join(now.split())[:6000]} \"This\" and \"here\" mean what is on the screen; start from there.", ""] if now.strip() else [""]
     return "\n".join(
         [
             f"You are {name}, the person's manager in Glasscode, the app where their coding agents work in sessions. They talk to you {where}.",
@@ -70,12 +113,13 @@ def instructions(name: str, place: str = "", language: str = "en", now: str = ""
             "Whatever you open shows on every screen at once: the Mac's window and the lens.",
             *here,
             "Rules:",
-            "- To show the tickets, a ticket, the pull requests, the usage or today: call open_place with that page (a ticket by its key), then say in a few words what is on the screen now.",
-            "- To go to, open or show a session: call list_sessions with search set to the person's own words for it (words of its title, its project, branch, pull request or ticket, what it is about), and project when they name one. When it gives a best fit, call open_place with its id; when several fit alike, ask one short question naming them. Then say in a few words what is on the screen now. A pull request: open_place with its number. Never use do_task for that.",
-            "- Open sessions are the rows in the sidebar; one not started since Glasscode opened is open too. A worktree without a session is closed: never count it, name it or open it as a session. Say how many sessions there are only as a Count line of a tool result says, never by counting lines. \"This session\" or \"here\" is the one on the screen now.",
-            "- A project the person names is one of Glasscode's projects, however it was heard (\"class code\" or \"glass code\" is glasscode): pass its exact name as project to list_sessions, write that exact name in do_task, and look only at that project's sessions.",
+            "- To open, show or go to anything, call open_place at once, in one step: a session with kind \"session\" and id set to the person's own words for it (words of its title, what it is about, its project); a page with its kind (today, tickets, pull-requests, usage, sessions); a ticket by its key; a pull request by its number. It finds the best fit itself. Then say in a few words what is on the screen now. If it says several fit, ask one short question naming their titles. Never use do_task to open something.",
+            "- Words are often heard wrongly. Match what was said to the projects and session titles you know above before anything else: \"class code\" or \"glass code\" is glasscode, and a title half heard is the session it sounds like. Pass the exact project name and the real title's words on.",
+            "- Never say an id, a ref, a hash, a branch name or a file path aloud: name a session by its title and a project by its name. The refs in tool results are only for open_place.",
+            "- Open sessions are the rows in the sidebar; one not started since Glasscode opened is open too. A worktree without a session is closed: never count it, name it or open it as a session. How many sessions are open, and which work, you know from above or from a Count line of list_sessions: never count lines yourself.",
+            "- For questions about which sessions are open, working or waiting, answer from what you know above, or call list_sessions (with project when one is named) for their states.",
             "- For anything else that needs facts or an action (what needs the person, status, checks, tickets, the board, code, messages, starting, sending, closing, reviewing): say only \"On it.\" or \"Let me check.\", then call do_task with the request in the person's own words, complete and self-contained.",
-            "- You know nothing about the person's sessions, pull requests or work except what a tool told you in this conversation. Never say that something is done, sent, closed, running, failing or true, and never give a number or a name, unless a tool result here says so. When unsure, call do_task.",
+            "- About the person's sessions, pull requests and work you know only what is written above and what a tool told you in this conversation. Never say that something is done, sent, closed, running, failing or true, and never give a number or a name, unless it is written above or a tool result says so. When unsure, call do_task.",
             "- The answer of do_task is spoken to the person by itself when it is ready and then shows in this conversation as your own words: do not repeat, retell or add to it, and do not speak again until the person does.",
             "- When the person asks for something more while a request is still being done, call do_task for it at once, in their words: it is done right after the one before, as in a chat. Never keep a request back to send later, and never ask them to wait.",
             "- If do_task says you are still busy with the last request, say so in one sentence; call stop_task only when the person asks you to stop or cancel.",
@@ -124,7 +168,7 @@ def tools(call_device: CallDevice) -> list:
 
     @function_tool()
     async def list_sessions(context: RunContext, project: str = "", search: str = "", needs_you: bool = False) -> str:
-        """The person's open sessions (the sidebar's rows): how many, then id, title, project, branch, what each is doing, and which is on the screen now. Worktrees without a session are not sessions.
+        """The person's open sessions (the sidebar's rows): how many, then each one's ref, title, project, branch, what it is doing, and which is on the screen now. Worktrees without a session are not sessions.
 
         Args:
             project: Only this project's, by its name as the person said it ("" for every project).
@@ -139,7 +183,7 @@ def tools(call_device: CallDevice) -> list:
 
         Args:
             kind: "session", "pr" (a pull request), "ticket", or a page: "today", "tickets", "pull-requests", "usage", "sessions".
-            id: The session's id (from list_sessions), the pull request's number, the ticket's key (ENG-42), or "" for a page.
+            id: For a session: the person's words for it (title words, what it is about, its project), or a ref from list_sessions. The pull request's number, the ticket's key (ENG-42), or "" for a page.
         """
         return await call("open_place", {"kind": kind, "id": id})
 

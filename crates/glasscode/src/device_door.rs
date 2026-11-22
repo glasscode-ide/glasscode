@@ -538,7 +538,9 @@ impl Workspace {
         let place = (!conns.is_empty() && self.door.place_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(500))).then(|| {
             self.door.place_at = Some(Instant::now());
             self.lens_refresh_reply(cx);
-            let page = serde_json::to_value(self.lens_page(&self.lens_place(), cx)).unwrap_or_default();
+            let mut page = serde_json::to_value(self.lens_page(&self.lens_place(), cx)).unwrap_or_default();
+            // What the phone's voice is told with it: where the person is and what is open.
+            page["now"] = json!(self.voice_now(cx));
             let text = page.to_string();
             (page, text)
         });

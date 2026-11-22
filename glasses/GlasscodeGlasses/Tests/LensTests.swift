@@ -20,6 +20,10 @@ final class LensTests: XCTestCase {
         XCTAssertEqual(lens.handle(.pinch, speaking: false), .sendNow)
         XCTAssertEqual(lens.handle(.left, speaking: false), .cancelListening)
         XCTAssertEqual(lens.card, .glance)
+        // A swipe down while it listens makes it silent (the talk stays open).
+        lens.show(.listening(""))
+        XCTAssertEqual(lens.handle(.down, speaking: false), .mute)
+        XCTAssertEqual(lens.card, .glance)
     }
 
     func testSwipingDownFocusesTheLinksAndPinchOpens() {

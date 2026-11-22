@@ -123,6 +123,13 @@ class Ears(Agent):
         # Without the manager's name in front: the talker answers what was asked.
         new_message.content = [text]
 
+    def tts_node(self, text, model_settings):
+        # Never an id aloud, whatever the talker wrote.
+        return Agent.default.tts_node(self, talker.speakable_stream(text), model_settings)
+
+    def transcription_node(self, text, model_settings):
+        return Agent.default.transcription_node(self, talker.speakable_stream(text), model_settings)
+
 
 class ManagerVoice:
     """One stay in the room: from the first client coming in until the room is empty."""
@@ -546,7 +553,8 @@ class ManagerVoice:
     # ----- speaking -----------------------------------------------------------------------------
 
     def say(self, say_id: str, text: str) -> None:
-        text = text.strip()
+        # Never an id aloud, whoever wrote the answer.
+        text = talker.speakable(text).strip()
         self.thinking_until = 0.0
         if say_id and say_id in self.cut_ids:
             # The person talked over this answer: the rest of it is not spoken.

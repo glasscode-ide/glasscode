@@ -78,6 +78,31 @@ near-black ground, edge to edge.
 4. Lens: the page card, its gestures, `LensArt`, following the Mac's place.
 5. Phone: one full-screen view, the place's page and a talk button, in the same look.
 
+## The voice knows, and stays quiet when asked
+
+- **What it knows without asking.** `now` is the place on the screen, then what is open in
+  Glasscode (each project: how many sessions are open, which work or wait for the person, and
+  every open session's title), then the projects by name. The Mac sends it to its own voice and,
+  with each `place` event, to the phone's. A name heard wrongly is matched to these.
+- **One step to open.** `open_place` takes the person's own words for a session; the Mac finds
+  the best fit (`session_find`), in the project they named.
+- **No ids aloud.** Tool results carry short refs for `open_place` only, and the worker takes
+  ids out of everything that is spoken (`talker.speakable`), whoever wrote it.
+- **Silent.** On the phone "Make it silent" (and a swipe down on the lens while it listens)
+  switches the microphone off and stops the voice; the talk stays open, and answers are shown,
+  not spoken, until the person talks again. "End talk" leaves the room.
+- **The list of sessions** has no view of its own in the Mac's window (it shows one session), so
+  it is a page over the window's place until the window goes somewhere else.
+
+## Checked against a whole Glasscode
+
+`script/journeys.sh 9` runs a real Glasscode on a scratch home and a stand-in phone built from
+the iPhone app's own link code. It checks, over the real link: the voice's tools answered by the
+Mac, every page and a session (by its title and project, and by its id) opening in the window,
+the page coming back to the phone, and that what is not there opens nothing. It found that the
+door's list of what a phone may call (`caller::PHONE_ALLOWED`) lacked `place.open`, `place.get`
+and `voice.tool`: every open from the phone had been refused.
+
 ## Status (2026-11-22)
 
 All five slices are built. Not covered yet: a phone that reaches only the server (the Mac off)

@@ -354,13 +354,19 @@ impl Workspace {
         voice.sent = Some(want);
     }
 
+    /// Where the person is and what is going on, for the talker (the Mac's and the phone's): the
+    /// place on the screen, what is open in each project, and the projects by name.
+    pub(crate) fn voice_now(&self, cx: &gpui::App) -> String {
+        format!("{} {} {}", self.lens_now(cx), self.voice_overview(), self.projects_line())
+    }
+
     /// Where the person is, for the talker: looked at each second while the voice is on.
     fn manager_voice_where(&mut self, cx: &mut Context<Self>) {
         if self.manager.voice.now_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
             return;
         }
         self.manager.voice.now_at = Some(Instant::now());
-        let now = format!("{} {}", self.lens_now(cx), self.projects_line());
+        let now = self.voice_now(cx);
         if now != self.manager.voice.now {
             self.manager.voice.now = now;
             self.manager_voice_configure();
