@@ -698,6 +698,14 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         Some(p) => Some(ws.find_project_as(caller, p)?),
         None => None,
     };
+    // `--match` words that name a project ("voice in class code") list only that project's.
+    let (project, match_words) = match op.text("match").map(str::trim).filter(|w| !w.is_empty()) {
+        Some(words) => {
+            let (project, rest) = ws.project_in_words(project, words);
+            (project, Some(rest))
+        }
+        None => (project, None),
+    };
     let needs = op.on("needs_you");
     let mut rows = Vec::new();
     let mut data = Vec::new();
@@ -705,7 +713,7 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let mut listed: Vec<&glasscode_core::model::Session> =
         ws.state.sessions.iter().filter(|s| !ws.state.session_hidden(s) && project.as_ref().is_none_or(|p| *p == s.project_id)).filter(|s| !needs || ws.session_state(s) == "needs you").collect();
     // `--match`: the ones that fit the words, best first (`session_find`).
-    let matched = op.text("match").map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
+    let matched = match_words.as_deref().map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
     if let Some(words) = matched {
         let entries: Vec<glasscode_core::session_find::Entry> = listed.iter().map(|s| ws.session_entry(s)).collect();
         let ranked = glasscode_core::session_find::rank(words, &entries);

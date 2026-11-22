@@ -296,9 +296,15 @@ final class ManagerLink: ObservableObject {
 
     // MARK: - sessions, Today, approvals
 
+    /// The Mac's projects, by name, as its last `state` said (the voice names them exactly).
+    private(set) var projects: [String] = []
+
     /// Sessions: the Mac's own when it answers, else the server's (with the Mac's it mirrors).
     func sessions() async -> [JSON] {
-        if let mac, let json = try? await mac.call("state", [:], timeout: 15) as? JSON { return json.array("sessions") }
+        if let mac, let json = try? await mac.call("state", [:], timeout: 15) as? JSON {
+            projects = json.array("projects").compactMap { $0.string("name") }
+            return json.array("sessions")
+        }
         if let server, let json = try? await server.call("state", [:], timeout: 15) as? JSON {
             return json.array("sessions") + json.array("mirrors")
         }
