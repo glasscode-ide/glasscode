@@ -33,6 +33,10 @@ becomes the text of the GitHub release.
   session are typed in instead of waiting for you, and `session send` says "Sent" when it is typed
   in at once.
 - Codex sessions on macOS show working, finished and needs-you as on Windows.
+- A session's dot is green whenever it works: also for a turn another session's message began, a
+  turn a Stop hook keeps going, a very short turn, and work going on after you answered a prompt
+  (here, on the phone or the glasses). It stays green for 2 s after a turn ends, so it does not
+  blink, and while a turn's work goes on by itself (up to 30 minutes).
 
 - Glasscode is licensed under the Apache License 2.0.
 - The interface is new: one shell with Today, Sessions, Board, Pull requests and Settings, the

@@ -49,7 +49,36 @@ const CHECK_WAIT: Duration = Duration::from_secs(25);
 
 /// How many ticks in a row a prompt that was on a session's screen must be gone before the session
 /// counts as going on (the person answered it, here or from the phone, the glasses, the manager).
-const PROMPT_GONE_TICKS: u8 = 2;
+const PROMPT_GONE_TICKS: u8 = 3;
+
+/// How long after that a prompt back on the screen means it still waits (it was misread).
+const PROMPT_RECHECK: Duration = Duration::from_secs(10);
+
+/// How long a turn that said its work goes on by itself shows "working": nine in ten went on
+/// within 30 minutes on the person's Mac (half within 20 s; 2 of 21 never did, 2026-11-22).
+const STILL_GOING_FOR_MS: u64 = 30 * 60_000;
+
+/// What the screen of a session that waits on a prompt said, look after look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PromptLooks {
+    seen: bool,
+    gone: u8,
+}
+
+impl PromptLooks {
+    /// One look: true when the prompt it saw has been gone long enough to count as answered. A
+    /// prompt never seen (the screen did not read as one) says nothing: the transcript decides.
+    pub(crate) fn look(&mut self, on_screen: bool) -> bool {
+        if on_screen {
+            *self = PromptLooks { seen: true, gone: 0 };
+            return false;
+        }
+        if self.seen {
+            self.gone = self.gone.saturating_add(1);
+        }
+        self.seen && self.gone >= PROMPT_GONE_TICKS
+    }
+}
 
 /// Each session's finishes: those being decided and the last one told.
 #[derive(Default)]
@@ -75,9 +104,10 @@ pub(crate) struct Finishes {
     /// Sessions whose state this launch has from their hooks or rollout (a bell of theirs says
     /// nothing new).
     followed: HashSet<String>,
-    /// Claude sessions that wait on a prompt: whether it was seen on their screen, and for how many
-    /// ticks it has been gone.
-    prompts: HashMap<String, (bool, u8)>,
+    /// Claude sessions that wait on a prompt: what their screen said ([`PromptLooks`]).
+    prompts: HashMap<String, PromptLooks>,
+    /// Claude sessions that went on because their prompt left the screen, and when.
+    answered: HashMap<String, Instant>,
     /// How many turns of each Codex session's rollout had ended at the last look.
     codex_ended: HashMap<String, u64>,
 }
@@ -122,6 +152,7 @@ impl Finishes {
         self.by_prompt.remove(session);
         self.followed.remove(session);
         self.prompts.remove(session);
+        self.answered.remove(session);
         self.codex_ended.remove(session);
     }
 
@@ -160,11 +191,12 @@ impl Finishes {
 /// The icon of a session's last finish, when it shows one: orange while its question waits, the
 /// "finished" mark until the person looked at it, and "working" while its work goes on by itself
 /// (a build, a review, another session it waits for, and then it reports back).
-pub(crate) fn row_state_of(report: Option<&Report>) -> Option<RowState> {
+pub(crate) fn row_state_of(report: Option<&Report>, now_ms: u64) -> Option<RowState> {
     let report = report?;
     match report.finish.outcome {
         Outcome::NeedsYou => Some(RowState::NeedsYou),
-        Outcome::StillGoing => Some(RowState::Working),
+        Outcome::StillGoing if now_ms.saturating_sub(report.at_ms) < STILL_GOING_FOR_MS => Some(RowState::Working),
+        Outcome::StillGoing => None,
         Outcome::Done if !report.seen => Some(RowState::Finished),
         Outcome::Done => None,
     }
@@ -223,6 +255,9 @@ impl Workspace {
         f.prompts.remove(id);
         // Going on after an approval is the same turn.
         if previous != Some(AgentActivity::NeedsInput) {
+            f.answered.remove(id);
+        }
+        if previous != Some(AgentActivity::NeedsInput) {
             f.began.insert(id.to_string(), glasscode_core::clock::now_ms());
             // A hook's prompt began it; a Stop hook's feedback goes on with what began the turn,
             // and another session's message begins work of no prompt.
@@ -243,7 +278,9 @@ impl Workspace {
     pub(crate) fn finish_begin(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(session) = self.state.session(id).cloned() else { return };
         let now_ms = glasscode_core::clock::now_ms();
-        let (reply, stopped_ms) = self.finishes.stops.remove(id).unwrap_or_default();
+        // Only a turn's end is a finish: a `SessionStart` after work (`/clear`, a resume, a start)
+        // makes the session idle, and ends nothing.
+        let Some((reply, stopped_ms)) = self.finishes.stops.remove(id) else { return };
         let reply = reply.unwrap_or_default();
         if session.agent == AgentKind::Claude
             && let Some(path) = session.transcript_path.as_deref()
@@ -304,22 +341,34 @@ impl Workspace {
         // Every Claude session that does not work is followed in its transcript (not only after a
         // finish: one that started idle, or resumed, can be begun by another session's message),
         // and one that waits on a prompt on its screen goes on once the prompt is gone.
-        let claude: Vec<(String, Option<std::path::PathBuf>, bool, bool)> = self
+        let claude: Vec<(String, Option<std::path::PathBuf>, Option<AgentActivity>, bool)> = self
             .state
             .sessions
             .iter()
-            .filter(|s| s.agent == AgentKind::Claude && self.terminals.contains_key(&s.id))
+            .filter(|s| s.agent == AgentKind::Claude && self.terminals.contains_key(&s.id) && !self.waits_to_start(&s.id))
             .filter_map(|s| {
-                let waits = match self.activity.get(&s.id) {
-                    Some(AgentActivity::NeedsInput) => true,
-                    Some(AgentActivity::Idle) => false,
-                    _ => return None,
-                };
-                let asking = waits && self.terminals.get(&s.id).is_some_and(|t| glasscode_core::prompt::parse(&t.read(cx).text_tail(60)).is_some());
-                Some((s.id.clone(), s.transcript_path.clone(), waits, asking))
+                let activity = self.activity.get(&s.id).copied();
+                let recheck = activity == Some(AgentActivity::Working) && self.finishes.answered.get(&s.id).is_some_and(|at| at.elapsed() < PROMPT_RECHECK);
+                if !(matches!(activity, Some(AgentActivity::Idle | AgentActivity::NeedsInput)) || recheck) {
+                    return None;
+                }
+                let looked = activity == Some(AgentActivity::NeedsInput) || recheck;
+                let asking = looked && self.terminals.get(&s.id).is_some_and(|t| glasscode_core::prompt::parse(&t.read(cx).text_tail(60)).is_some());
+                Some((s.id.clone(), s.transcript_path.clone(), activity, asking))
             })
             .collect();
-        for (id, path, waits, asking) in claude {
+        for (id, path, activity, asking) in claude {
+            if activity == Some(AgentActivity::Working) {
+                // Just answered by its prompt leaving the screen: a prompt back there still waits.
+                if asking {
+                    self.finishes.answered.remove(&id);
+                    let previous = self.activity.insert(id.clone(), AgentActivity::NeedsInput);
+                    self.activity_changed(&id, previous, AgentActivity::NeedsInput, cx);
+                    changed = true;
+                }
+                continue;
+            }
+            let waits = activity == Some(AgentActivity::NeedsInput);
             if let Some(path) = path {
                 let fits = self.finishes.watches.get(&id).is_some_and(|w| w.path() == path.as_path() && w.is_mid_turn() == waits);
                 if !fits {
@@ -331,18 +380,13 @@ impl Workspace {
                 self.finishes.prompts.remove(&id);
                 continue;
             }
-            let entry = self.finishes.prompts.entry(id.clone()).or_default();
-            if asking {
-                *entry = (true, 0);
-            } else if entry.0 {
-                entry.1 += 1;
-                if entry.1 >= PROMPT_GONE_TICKS {
-                    // Answered: the same turn goes on.
-                    self.finishes.prompts.remove(&id);
-                    let previous = self.activity.insert(id.clone(), AgentActivity::Working);
-                    self.activity_changed(&id, previous, AgentActivity::Working, cx);
-                    changed = true;
-                }
+            if self.finishes.prompts.entry(id.clone()).or_default().look(asking) {
+                // Answered: the same turn goes on.
+                self.finishes.prompts.remove(&id);
+                let previous = self.activity.insert(id.clone(), AgentActivity::Working);
+                self.activity_changed(&id, previous, AgentActivity::Working, cx);
+                self.finishes.answered.insert(id.clone(), Instant::now());
+                changed = true;
             }
         }
         let ids: Vec<String> = self.finishes.watches.keys().cloned().collect();
@@ -441,7 +485,7 @@ impl Workspace {
         if self.finishes.pending.get(id).is_some_and(|p| !p.settled) {
             return Some(RowState::Working);
         }
-        row_state_of(self.finishes.report(id))
+        row_state_of(self.finishes.report(id), glasscode_core::clock::now_ms())
     }
 
     /// The state word of the session's last finish (`session_state`).
@@ -478,11 +522,12 @@ mod tests {
 
     #[test]
     fn the_icon_is_orange_for_a_question_and_marked_until_a_finish_is_seen() {
-        assert_eq!(row_state_of(Some(&report(Outcome::NeedsYou, true))), Some(RowState::NeedsYou), "a question stays until it is answered");
-        assert_eq!(row_state_of(Some(&report(Outcome::Done, false))), Some(RowState::Finished));
-        assert_eq!(row_state_of(Some(&report(Outcome::Done, true))), None);
-        assert_eq!(row_state_of(Some(&report(Outcome::StillGoing, true))), Some(RowState::Working), "its work goes on by itself");
-        assert_eq!(row_state_of(None), None);
+        assert_eq!(row_state_of(Some(&report(Outcome::NeedsYou, true)), 0), Some(RowState::NeedsYou), "a question stays until it is answered");
+        assert_eq!(row_state_of(Some(&report(Outcome::Done, false)), 0), Some(RowState::Finished));
+        assert_eq!(row_state_of(Some(&report(Outcome::Done, true)), 0), None);
+        assert_eq!(row_state_of(Some(&report(Outcome::StillGoing, true)), 60_000), Some(RowState::Working), "its work goes on by itself");
+        assert_eq!(row_state_of(Some(&report(Outcome::StillGoing, true)), STILL_GOING_FOR_MS), None, "not green for good");
+        assert_eq!(row_state_of(None, 0), None);
         assert_eq!(state_word_of(Some(&report(Outcome::Done, true))), Some("finished"), "the manager hears it is finished, seen or not");
         assert_eq!(state_word_of(Some(&report(Outcome::StillGoing, true))), Some("goes on by itself"));
     }
@@ -503,6 +548,18 @@ mod tests {
         assert_eq!(spoken_of("Ali's PR work", &finish(Outcome::Done, "", "Ali has no open pull requests")).as_deref(), Some("“Ali's PR work” finished: Ali has no open pull requests."));
         assert_eq!(spoken_of("Voice fix", &finish(Outcome::NeedsYou, "Should I push it?", "")).as_deref(), Some("“Voice fix” asks: Should I push it?"));
         assert_eq!(spoken_of("Voice fix", &finish(Outcome::StillGoing, "", "Waits for CI.")), None);
+    }
+
+    #[test]
+    fn a_prompt_is_answered_once_it_has_left_the_screen_for_a_while() {
+        let mut looks = PromptLooks::default();
+        assert!(!looks.look(false), "a prompt the screen never showed says nothing");
+        assert!(!looks.look(false));
+        assert!(!looks.look(true));
+        assert!(!looks.look(false), "a redraw is not an answer");
+        assert!(!looks.look(true), "back: it still waits");
+        assert!(!looks.look(false) && !looks.look(false));
+        assert!(looks.look(false), "gone three looks in a row: answered");
     }
 
     #[test]
