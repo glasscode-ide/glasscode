@@ -495,30 +495,18 @@ impl Workspace {
                 "Stopped.".into()
             }
             "list_sessions" => {
+                // Only what the sidebar holds: a worktree left without a session is not one.
                 let needs = arguments.get("needs_you").and_then(|v| v.as_bool()) == Some(true);
-                let mut lines = Vec::new();
-                for s in &self.state.sessions {
-                    if self.state.session_hidden(s) {
-                        continue;
-                    }
-                    let state = self.session_state(s);
-                    if needs && state != "needs you" {
-                        continue;
-                    }
-                    let pr = self.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|p| format!(", pull request #{}", p.number)).unwrap_or_default();
-                    let project = self.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
-                    lines.push((state != "not running", format!("id {}: \"{}\" in {project}, {state}{pr}", s.id, self.session_title(s))));
-                }
-                // The ones that run first; a spoken answer needs no more than these.
-                lines.sort_by_key(|(running, _)| !*running);
-                let lines: Vec<String> = lines.into_iter().take(15).map(|(_, l)| l).collect();
-                if lines.is_empty() { if needs { "No session waits for the person.".into() } else { "No sessions.".into() } } else { lines.join("\n") }
+                self.voice_sessions(&text("project"), &text("search"), needs)
             }
             "open_place" => {
                 let (kind, id) = (text("kind"), text("id"));
                 let place = match kind.as_str() {
-                    "session" if self.state.session(&id).is_some() => id.clone(),
-                    "session" => return format!("There is no session with the id {id}."),
+                    // Its id, the start of it, or the person's words of it (`voice_session_for`).
+                    "session" => match self.voice_session_for(&id) {
+                        Ok(id) => id,
+                        Err(say) => return say,
+                    },
                     "pr" => {
                         let number: Option<u64> = id.trim_start_matches('#').parse().ok();
                         let session = self.prs.map.iter().find(|(_, p)| p.pr.as_ref().is_some_and(|pr| Some(pr.number as u64) == number)).map(|(s, _)| s.clone());
@@ -529,9 +517,12 @@ impl Workspace {
                     }
                     _ => "today".into(),
                 };
-                let shown = place.clone();
+                let shown = match self.state.session(&place) {
+                    Some(s) => format!("the session \"{}\" in {}", self.session_title(s), self.state.project(&s.project_id).map(|p| p.name.as_str()).unwrap_or_default()),
+                    None => place.clone(),
+                };
                 self.with_main_window(cx, move |ws, window, cx| ws.run_op_named("ui.open", serde_json::json!({ "place": place }), window, cx));
-                format!("Shown on the Mac's screen ({shown}).")
+                format!("Shown on the Mac's screen: {shown}.")
             }
             _ => format!("This Mac does not know the tool {name}."),
         }

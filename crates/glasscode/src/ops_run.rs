@@ -701,18 +701,18 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let needs = op.on("needs_you");
     let mut rows = Vec::new();
     let mut data = Vec::new();
-    for s in &ws.state.sessions {
-        // Sessions of a hidden project are invisible to the CLI and Glasscode.
-        if ws.state.session_hidden(s) {
-            continue;
-        }
-        if project.as_ref().is_some_and(|p| *p != s.project_id) {
-            continue;
-        }
+    // Sessions of a hidden project are invisible to the CLI and Glasscode.
+    let mut listed: Vec<&glasscode_core::model::Session> =
+        ws.state.sessions.iter().filter(|s| !ws.state.session_hidden(s) && project.as_ref().is_none_or(|p| *p == s.project_id)).filter(|s| !needs || ws.session_state(s) == "needs you").collect();
+    // `--match`: the ones that fit the words, best first (`session_find`).
+    let matched = op.text("match").map(str::trim).filter(|w| !w.is_empty() && glasscode_core::session_find::rank(w, &[]).words > 0);
+    if let Some(words) = matched {
+        let entries: Vec<glasscode_core::session_find::Entry> = listed.iter().map(|s| ws.session_entry(s)).collect();
+        let ranked = glasscode_core::session_find::rank(words, &entries);
+        listed = ranked.hits.iter().map(|h| listed[h.index]).collect();
+    }
+    for s in listed {
         let state = ws.session_state(s);
-        if needs && state != "needs you" {
-            continue;
-        }
         let project_name = ws.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
         let pr = ws.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|p| format!(" · PR #{}", p.number)).unwrap_or_default();
         let here = if caller.session.as_deref() == Some(s.id.as_str()) { "  (this session)" } else { "" };
@@ -734,7 +734,13 @@ fn session_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             data.push(json!({ "id": r.session.id, "title": r.session.title, "agent": r.session.agent.name().to_lowercase(), "branch": r.session.branch, "state": state, "on_server": true, "last_reply": r.last_reply }));
         }
     }
-    let text = if rows.is_empty() { "No sessions.".to_string() } else { rows.join("\n") };
+    let mut text = if rows.is_empty() { "No sessions.".to_string() } else { rows.join("\n") };
+    // What the rows are, and that a worktree without a session is not one (the manager took
+    // "not running" for a leftover worktree).
+    if !needs {
+        text.push('\n');
+        text.push_str(&ws.session_list_footer(rows.len(), project.as_deref(), matched));
+    }
     answer(Reply::ok(text, Value::Array(data)))
 }
 
@@ -1502,7 +1508,8 @@ fn worktree_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 if branch.is_empty() { "(no branch)".to_string() } else { branch.clone() },
                 home_relative(&path),
                 if main { "  · main checkout" } else { "" },
-                if sessions > 0 { format!("  · {}", plural(sessions, "session", "sessions")) } else { String::new() },
+                // One without a session is closed: it is not a session (`voice_sessions`).
+                if sessions > 0 { format!("  · {}", plural(sessions, "session", "sessions")) } else { "  · no session (closed)".to_string() },
                 if removing { "  · removing…" } else { "" }
             ));
             data.push(json!({ "project": p.name, "path": path, "branch": branch, "main": main, "sessions": sessions }));

@@ -20,7 +20,7 @@ Today board
   <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
 
 Sessions
-  session list [--project <p>] [--needs-you] [--server]
+  session list [--project <p>] [--needs-you] [--server] [--match "<words>"]
   session show <session>         details, its pull request, and the agent's last reply
   session read <session> [--last 5]     the conversation's last messages
   session new                    a new session (in the background; --open shows it)
@@ -318,7 +318,7 @@ Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiti
 5 not allowed (you said no, or Settings › Permissions).
 == help session
 Sessions
-  session list [--project <p>] [--needs-you] [--server]
+  session list [--project <p>] [--needs-you] [--server] [--match "<words>"]
   session show <session>         details, its pull request, and the agent's last reply
   session read <session> [--last 5]     the conversation's last messages
   session new                    a new session (in the background; --open shows it)
@@ -343,7 +343,7 @@ Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiti
 5 not allowed (you said no, or Settings › Permissions).
 == help sessions
 Sessions
-  session list [--project <p>] [--needs-you] [--server]
+  session list [--project <p>] [--needs-you] [--server] [--match "<words>"]
   session show <session>         details, its pull request, and the agent's last reply
   session read <session> [--last 5]     the conversation's last messages
   session new                    a new session (in the background; --open shows it)
