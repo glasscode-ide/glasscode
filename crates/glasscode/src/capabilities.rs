@@ -69,7 +69,7 @@ impl Place {
 pub const VIEWS: [View; 7] = [View::Today, View::Sessions, View::Board, View::PullRequests, View::Usage, View::Settings, View::FirstRun];
 
 /// Every tab of a session's side panel.
-pub const TABS: [RightTab; 5] = [RightTab::PullRequest, RightTab::Checks, RightTab::Changes, RightTab::Files, RightTab::Glasscode];
+pub const TABS: [RightTab; 4] = [RightTab::PullRequest, RightTab::Checks, RightTab::Changes, RightTab::Files];
 
 /// The name of a view's place; a new view does not compile until it has one. The words are the
 /// `glasscode open` ones where it has them ("tickets" is the Board).
@@ -92,7 +92,6 @@ fn tab_name(tab: RightTab) -> &'static str {
         RightTab::Checks => "checks",
         RightTab::Changes => "changes",
         RightTab::Files => "files",
-        RightTab::Glasscode => "glasscode",
     }
 }
 
@@ -338,7 +337,6 @@ pub const INVENTORY: &[Capability] = &[
     planned("Session view", "tab: files, mention a file", "files_mention", "composer.attach"),
     local("Session view", "tab: files, copy a path", "files_copy"),
     person("Session view", "tab: files, reveal in Finder", "reveal", "Only you can show a file in Finder.", Place::Tab(RightTab::Files)),
-    op("Session view", "tab: Glasscode", "glasscode_toggle", "ui.panel"),
     // ----- file tabs and the editor
     planned("File tabs", "open a file at a line", "open_file_tab", "file.open"),
     planned("Editor", "key editor::Save", "file_tab_edit", "file.save"),
@@ -575,6 +573,15 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "add a check", "manager_next", "manager.check.add"),
     op("Manager", "stop a check", "manager_next", "manager.check.remove"),
     op("Manager", "a token for a device's voice", "manager_voice_keys_check", "manager.voice_token"),
+    person("Manager", "the voice on this Mac: on or off", "settings_manager", "Only you switch the voice on this Mac on or off: Settings › Manager › Voice.", Place::Settings(Section::Manager)),
+    person("Manager", "start the voice on this Mac again", "voice_server_restart", "Only you start the voice on this Mac again: Settings › Manager › Voice.", Place::Settings(Section::Manager)),
+    person("Manager", "save the Soniox key or the talker's key", "manager_save_secret", "Only you can save a key of the voice: Settings › Manager › Voice keeps it in the Keychain.", Place::Settings(Section::Manager)),
+    person("Manager", "remove the Soniox key or the talker's key", "manager_save_secret", "Only you can remove a key of the voice: Settings › Manager › Voice.", Place::Settings(Section::Manager)),
+    person("Manager", "the talker, its model and its address", "settings_manager", "Only you choose the voice's talker: Settings › Manager › Voice.", Place::Settings(Section::Manager)),
+    person("Manager", "Soniox's region", "settings_manager", "Only you choose where Soniox is reached: Settings › Manager › Voice.", Place::Settings(Section::Manager)),
+    op("Glasses", "the paired phones and glasses", "door_devices", "device.list"),
+    local("Title bar", "glasses icon: open Settings › Glasses", "render_glasses_icon"),
+    op("Glasses", "show a place on the lens", "door_open", "device.open"),
     op("Manager", "Daily tokens: the manager's daily cap, or off", "manager_budget_set", "manager.budget"),
     op("Command", "glasscode manager budget", "control_handle_as", "manager.budget"),
     // ----- what the manager reads and shows (the v2 engine's ops, M33.2)
@@ -718,7 +725,7 @@ mod tests {
     #[test]
     fn every_view_section_and_tab_has_a_place() {
         let places: Vec<Place> = VIEWS.into_iter().map(Place::View).chain(Section::all().into_iter().map(Place::Settings)).chain(TABS.into_iter().map(Place::Tab)).chain([Place::Manager]).collect();
-        assert_eq!(places.len(), 7 + 13 + 5 + 1);
+        assert_eq!(places.len(), 7 + 13 + 4 + 1);
         let mut names = BTreeSet::new();
         for place in places {
             let name = place.name();

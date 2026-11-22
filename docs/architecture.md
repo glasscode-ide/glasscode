@@ -1352,84 +1352,86 @@ to the Docker test server and back, and 30 worktrees in two projects four at a t
   a review session's PR number instead of looking one up by branch. Server mode carries a
   review's notes with the session (they are not in git).
 
-## iPhone
+## The glasses app
+
+One app on the person's iPhone with their Meta Ray-Ban Display and Neural Band
+(`glasses/GlasscodeGlasses`; the plan is [`mobile-glasses-plan.md`](mobile-glasses-plan.md)). It
+talks to the manager, wherever the manager is home, over the person's tailnet.
 
 ```
-iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate --device <id>" ──▶ glasscoded rpc / attach <id>
-   ▲                                                        │
-   └──────────── APNs (openssl JWT + curl) ◀────────────────┘ needs: permission prompts, questions
-Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
+glasses ◀─DAT (Bluetooth)─▶ iPhone app ──device link──▶ Mac: the device door (in the app, tailnet address only)
+                               │        └─device link──▶ server: ssh → glasscoded gate --device <id>
+                               └─ speech to text and voices on the phone; the lens and the band
+Mac ◀─one-time POST {token, name, key}── iPhone        (pairing: the Mac pins the key; with a server, phones.add)
 ```
 
-A phone's key runs only `glasscoded gate`, and the gate only `rpc` (as the phone's declared
-connection, within `caller::PHONE_ALLOWED`) and `attach <session>`. **A phone's terminal is view
-only**: `sessions.attach` gives a phone tmux's read-only client (`attach-session -r`, which
-drops what is typed in it; only detaching works), and the gate runs no other attach for a phone.
-A phone types only through `sessions.send`, `sessions.keys` and `sessions.answer`, which reach an
-agent's session only and refuse a shell, the agent's `!`, `BTab`, keys while it asks something
-and an answer that allows for good (`daemon::phone_session_refusal`).
-
-- **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
-  added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
-  allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
-  phone pins the server's host keys it received while pairing. `crates/glasscoded/src/phones.rs`
-  validates keys and names before writing that file, and never rewrites a line it wrote before:
-  a line without `--device` runs as the device `unknown`.
-- **Callers** (Manager v2's M13.2): each connection to the daemon may name its caller once,
-  with `caller.declare` (`{"kind":"machine","id":…}`, `{"kind":"phone","device":…}` or
-  `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
-  `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
-  it forwards anything, and each of the Mac's connections declares its `MachineId`
-  (`authority/machine.json`). A connection that declares nothing is the app, as before; the gate
-  never forwards a phone on one (a daemon that refuses the declaration serves the phone nothing).
-  A phone may call only `caller::PHONE_ALLOWED` (the server-sync plan's phase 0b): `hello`,
-  `state`, `sessions.transcript` and `sessions.peek`; `sessions.send`, `sessions.keys`,
-  `sessions.answer` and `sessions.attach` (view only) for an agent's session only (never a shell's; no text
-  starting with the agent's `!`, no `BTab`, no keys while the session asks something, no answer
-  that allows for good: `daemon::phone_session_refusal`); `today.get`, `today.op` (the board, and
-  approvals answered with the phone's signature, checked on the Mac); and `phones.push_token`. It
-  starts no session. Only a machine may call `owners.*` (`glasscode_core::caller::daemon_refusal`).
-  The manager's stores in a `mirror.sync` are taken only from a machine's connection, as the
-  machine it declared.
-- **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
-  shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
-  addresses first, then the LAN). The phone tries every address at once and POSTs its public
-  key with the token; the Mac calls `phones.add` on the server and answers with the SSH
-  endpoint (host, port, user, host keys, binary path). Nothing else crosses.
-- **Protocol**: still version 2; `Hello.features` says what is new (`phone`, and `push` when
-  `~/.glasscode/push.json` exists), so older Macs keep working. The daemon answers requests
-  concurrently (a thread per request, one writer) so a slow `gh` never holds up the list.
-- **What the server works out for the phone**, in `RemoteSession`:
-  - `prompt`: the menu the agent's terminal shows now (`glasscode_core::prompt`), read from the
-    visible tmux screen every 2 s. Only a numbered list with exactly one highlighted entry and
-    nothing but footers below it counts, so a list in a reply or an answered menu does not.
-    `sessions.answer` replays the keys (arrows to the option, Enter; text for "No, and tell
-    Claude…").
-  - `last_reply`, `updated_at`: from the Claude transcript or the Codex rollout
-    (`glasscode_core::transcript`), which `sessions.transcript` also pages through by byte
-    offset.
-  - `pr`: a `PrSummary` (approved, CI, preview)
-    refreshed every minute by `pr_loop` with the server's `gh`, and right away after
-    `github.action`.
-- **Push**: `announce_needs` sends each new need once per session (`push.rs`); the first pass
-  after a restart only records what is already waiting.
-- **The app** (its source, `ios/`, is not in this repository; `glasses/` holds the glasses app, a
-  different one): SwiftUI, iOS 18+. `GlasscodeKit` is the transport and the model
-  (swift-nio-ssh, the same JSON lines as the Mac) plus `Present.swift`, which turns a session
-  into words ("Claude wants to push to GitHub", "CI failing · 2 checks"). The terminal is
-  SwiftTerm's headless emulator drawn by our own SwiftUI view. Widgets and the Live Activity
-  read a snapshot the app writes to the shared app group.
-- **Tests**: `GlasscodeKit` unit tests, `EndToEndTests` (the phone's path against the Docker
-  server: pair, gate, prompt, answer, chat, terminal) and UI tests in the simulator, all with the
-  app's source outside this repository.
-- **Windows**: pairing is not ported (slice S16, after release 1).
+- **Pairing** (`crates/glasscode/src/pair_ui.rs`, Settings › Server › Glasses): the Mac shows
+  `glasscode://pair?v=2&t=<token>&a=<ip:port,…>&n=<name>` as a QR code for 10 minutes. The phone
+  makes its key (P-256, in the Secure Enclave) and posts the public half with the token. The Mac
+  pins it in `authority/devices.json` (a server is not needed), and with a server connected adds
+  it there first (`phones.add`, the forced command `glasscoded gate --device <id>`). The answer
+  carries what the phone pins: the Mac's door (name, machine id, door key, tailnet address) and the
+  server's SSH endpoint and host keys.
+- **The device link** (`glasscode_core::device_link`): one protocol, the JSON lines of
+  `glasscoded rpc`, on two carriers.
+  - **To the Mac**: the device door (`crates/glasscode/src/device_door.rs`) listens on the Mac's
+    tailnet address (`tailscale ip -4`, port 4519 or `GLASSCODE_DOOR_PORT`) while a phone is
+    paired, and refuses any peer outside 100.64.0.0/10 and fd7a:115c:a1e0::/48. The door speaks
+    first: its key (kept in the Keychain), this run of the app (`launch`), a nonce, and its
+    signature; the phone checks it against the key it pinned and answers with its own signature
+    over both nonces; the door checks that against the pinned phones. From then on the connection
+    is `Caller::Phone { device }`. WireGuard carries confidentiality and integrity.
+  - **To the server**: SSH with the same key (swift-nio-ssh), into the gate, as before.
+  - **What a phone may call**, at both ends: `caller::PHONE_ALLOWED` (below). Refused on the
+    door's connection thread, before the window hears of it.
+  - **Events**, from the door only: `manager.answer` (an answer as it is written),
+    `manager.working`, `manager.item`, `manager.home`, `today`, `device.open`. The server's
+    `manager.conversation` says what is being written instead.
+- **A phone's rights** (G06): narrower than the person. It reads, moves a view and confirms an
+  approval it signed; a person-only op asks in the app; everything else it asks the manager for.
+  `gate::phone()` and `caller::rule` agree. Its words are tier 2 (`Origin::Device`): they cannot
+  back a chat grant, so in a Careful project the manager's acts become cards the phone approves
+  (`today.op` decide, signed over `decide_message`, with `shown` = lens only when the payload fits,
+  `remote::LENS_FITS`). Its own input to a session is signed (`input_message`) and checked by
+  `remote::check_relayed` (#288) whichever carrier brought it: agent sessions only, no `!`, no
+  `BTab`, no keys while a question is open, no answer that allows for good. A phone's terminal is
+  view only (#305; on the Mac, `sessions.peek`).
+- **The manager over the link** (G07, G08): `manager.home` says which machine is home;
+  `manager.ask` posts the person's question as the device's in the one conversation (the Manager
+  page shows it with the rest), with the lens's focus. The brain gets a glasses block
+  (`runtime::chat::glasses_block`): short spoken answers, `device.open` to show a session, PR,
+  project, Today or the conversation on the lens (only in answer to that device within 30 s), and
+  the Mac's window moves only while the person was at it or asked for it there (O8). While the
+  server is home, its chat lane answers phone questions at once (it is woken) and keeps what it
+  writes for the phone; while the Mac is home, the server tells the phone to ask the Mac. Door use
+  counts as presence when the Mac claims home after a wake (O9).
+- **The title bar** (G10): a glasses icon while a phone is paired. Grey: not connected; a green
+  dot: connected (through the door, or through the server: its sync carries the glasses'
+  presence) with the glasses on; highlighted while the person talks from them; amber: the lens is
+  off or the door cannot open. A click opens Settings › Glasses. The right panel's Glasscode tab
+  is gone.
+- **The app** (Swift, iOS 18): `Link/` (the key, the protocol, pairing, the door client, the SSH
+  carrier, `ManagerLink`, which keeps both ends and routes each call), `Speech/` (on-device speech
+  recognition, a pause ends the turn, the system voice speaks sentence by sentence to the glasses),
+  `Lens/` (the cards and the band's moves: a pinch talks or picks, swipes move and open, left goes
+  back), `App/` and `Phone/` (the phone's screens: the manager, cards, sessions with a view-only
+  terminal, the conversation, pairing, settings).
+- **Tests**: Rust: `device_link` (handshake, refusals, peers, the pinned cross-language vector),
+  `device_door` (a phone stand-in over TCP, the allow-list, and an end-to-end run of the app's own
+  Swift link code built for macOS: `script/glasses-e2e/build.sh`, then
+  `GLASSCODE_DOOR_E2E=<binary> cargo test -p glasscode door_end_to_end`), `phone_manager` (the
+  server's side). Swift: the vector, the signed texts, pairing links, the lens's moves, turn-taking
+  and sentences, and the toolkit's simulated glasses (`StayOnTests`).
+- **Push**: the server sends notes through APNs (`push.rs`, topic `dev.glasscode.glasses`) to the
+  token the app registers.
+- **Glasscode for iPhone** (`ios/`, outside this repository) is retired; its server side (pairing,
+  the gate, the allow-list, push) serves the glasses app.
 
 ## What is not built yet
 
 - Moving a session automatically when the lid closes (sync already keeps the server current;
   a session can be continued there from the iPhone).
 - Git panel and diff view for server worktrees.
-- The Ask Glasscode harness on the server (the phone has the interface, marked BETA).
 - Terminal extras: search, clickable links, IME composition for CJK input (on the Mac; on Windows
   the terminal takes IME, dead-key and emoji-panel text through an input handler, not yet checked
   on screen).

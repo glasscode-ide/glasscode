@@ -117,8 +117,6 @@ pub enum RightTab {
     Changes,
     /// The worktree as a tree; a click opens a file in a tab of the centre.
     Files,
-    /// Glasscode, the voice copilot (macOS): the mirror of the glasses' lens.
-    Glasscode,
 }
 
 pub struct Workspace {
@@ -232,6 +230,10 @@ pub struct Workspace {
     /// A sidebar edge being dragged: which, where the mouse started, its width then.
     pub(crate) resizing: Option<(Side, f32, f32)>,
     pub pairing: Option<crate::pair_ui::Pairing>,
+    /// The device door: the glasses app on the person's iPhone, over the tailnet (G04).
+    pub door: crate::device_door::DoorUi,
+    /// The manager's voice on this Mac: LiveKit and the voice worker (`voice_server.rs`).
+    pub vserver: crate::voice_server::VoiceServer,
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
@@ -340,6 +342,8 @@ impl Workspace {
             cli_status: Vec::new(),
             cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
+            door: Default::default(),
+            vserver: Default::default(),
             manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
@@ -444,6 +448,7 @@ impl Workspace {
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
+        this.door_start(window, cx);
         this.journal_start(cx);
         // Going to sleep: the server hears it in one last sync (best effort).
         let weak = cx.entity().downgrade();
@@ -519,6 +524,7 @@ impl Workspace {
                 let ticked = this.update(cx, |this, cx| {
                     let begun = Instant::now();
                     this.glasscode_tick(cx);
+                    this.door_fast_tick(cx);
                     crate::shell::frames::tick(0, begun.elapsed());
                 });
                 if ticked.is_err() {
@@ -1663,6 +1669,7 @@ impl Workspace {
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);
+        self.door_tick(cx);
         self.tickets_tick(cx);
         self.usage_tick(cx);
         self.themes_tick(cx);
@@ -1784,6 +1791,7 @@ impl Workspace {
         }
         self.glasscode_tick(cx);
         self.manager_view_tick(cx);
+        self.voice_server_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);
@@ -2139,13 +2147,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The glasses navigated to a session (desk mode) → open it here. Deferred from the
-        // poll tick, which has no Window; render does. Guarded, so it runs once per change.
-        if let Some(id) = self.glasscode.pending_open.take() {
-            if self.state.active_session.as_deref() != Some(id.as_str()) {
-                self.select_session(&id, window, cx);
-            }
-        }
         let shell = self.render_shell(window, cx);
         // "Save the changes?" (U20) over every view, as it can come from Quit or a session's ×.
         let unsaved = self.render_unsaved_question(window, cx);

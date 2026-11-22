@@ -1,6 +1,0 @@
-{
-  "agentId": "",
-  "connectionType": "webrtc",
-  "note": "agentId is filled in by scripts/create-agent.mjs after it provisions Glasscode in your ElevenLabs account. Set ELEVENLABS_API_KEY in the environment for private-agent tokens and for provisioning.",
-  "voiceId": "CwhRBWXzGAHq8TQ4Fs17"
-}

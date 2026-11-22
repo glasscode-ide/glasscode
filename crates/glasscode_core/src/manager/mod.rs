@@ -97,6 +97,20 @@ pub struct Voice {
     pub stt: String,
     pub tts: String,
     pub voice: String,
+    /// The voice runs on this Mac: Glasscode starts LiveKit and the voice worker itself
+    /// (`voice_server.rs`) and `livekit_url` is not used. Off: nothing of it runs.
+    pub local: bool,
+    /// The talker, the fast model that holds the conversation and hands the work to the
+    /// manager: "anthropic", "openai", "mistral", "groq" or "custom" (empty: none, every
+    /// sentence goes to the manager as before). Its key is in the Keychain.
+    pub talker: String,
+    /// Its model (empty: the worker's default for it) and, for "custom", its address.
+    pub talker_model: String,
+    pub talker_url: String,
+    /// The language spoken ("en", "de", …; empty: English).
+    pub language: String,
+    /// Where Soniox is reached: "eu" (its EU addresses) or empty (its global ones).
+    pub soniox_region: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,103 +2,71 @@
 
 Glasscode has three pieces that talk to each other:
 
-- **The IDE** (your Mac) — runs your coding sessions and the voice server on port **4517**.
-- **The glasses app** (iPhone + Ray-Ban Display) — mirrors a session and lets you drive it by voice and a glance.
-- *(Optional)* **A remote build server** — runs sessions over SSH.
+- **The IDE** (your Mac): runs your coding sessions and the manager while you work there.
+- *(Optional)* **Your server**: keeps sessions running, and is the manager's home while the Mac
+  sleeps.
+- **The glasses app** (iPhone with Meta Ray-Ban Display and the Neural Band): you talk to the
+  manager from it. See [`mobile-glasses-plan.md`](mobile-glasses-plan.md) and
+  [`architecture.md`](architecture.md#the-glasses-app).
 
-The phone reaches the Mac's voice server at `http://<mac-address>:4517`. The only
-question is what `<mac-address>` is on your network. There are three ways to set it,
-from simplest to most involved.
+They reach each other over **Tailscale**: one private network (a tailnet) of your own devices,
+encrypted end to end (WireGuard), on any internet connection, with no port to open and no server
+to run. On the same Wi-Fi, Tailscale goes direct.
 
-> **Windows:** this guide is for the Mac. On Windows (the `windows-port` branch, release 1)
-> the voice panel is hidden, the remote build server connection and phone pairing are not
-> ported yet, and the self-hosted relay is not configured in this build. None of the paths
-> below has been tried with a Windows PC. See [`windows.md`](windows.md#what-is-not-ported).
-
----
-
-## 1. Same Wi-Fi (LAN) — zero setup
-
-If the Mac and the phone are on the same Wi-Fi, use the Mac's local IP.
-
-1. On the Mac: **System Settings → Network** and note the IP (e.g. `192.168.1.20`),
-   or run `ipconfig getifaddr en0`.
-2. In `glasses/GlasscodeGlasses/Sources/GlasscodeConfig.swift`, set:
-   ```swift
-   static let controlBaseURL = "http://192.168.1.20:4517"
-   ```
-3. Build and run the glasses app.
-
-This stops working the moment the phone leaves that Wi-Fi (cellular, a different
-network). For "works anywhere," use Tailscale.
+> **Windows:** this guide is for the Mac. On Windows the glasses' door, pairing and the server
+> features are not ported yet. See [`windows.md`](windows.md#what-is-not-ported).
 
 ---
 
-## 2. Tailscale — works on any network (recommended)
+## 1. Put your devices on one tailnet
 
-[Tailscale](https://tailscale.com) puts your Mac and phone on one private network
-(a "tailnet") with stable addresses, over any internet connection, with no relay to
-run and no ports to open. This is the recommended Glasscode setup.
+1. Install Tailscale and sign in with the same account on the **Mac**, the **iPhone** and the
+   **server** if you have one. A free personal account covers them.
+2. On the Mac, `tailscale ip -4` prints its tailnet address (`100.x.y.z`). Glasscode finds it by
+   itself; you never type it.
 
-1. Install Tailscale and sign in on **both** the Mac and the iPhone (and the remote
-   build server, if you use one). A free personal account covers all your own devices.
-2. On the Mac, find its tailnet address:
-   ```sh
-   tailscale ip -4
-   ```
-   It looks like `100.x.y.z` and does not change.
-3. In `GlasscodeConfig.swift`, point Glasscode at it:
-   ```swift
-   static let controlBaseURL = "http://100.101.102.103:4517"
-   ```
-4. Build and run. The glasses now reach the Mac from anywhere — home Wi-Fi, office,
-   or cellular — as long as both devices have Tailscale on.
+## 2. Pair the glasses app with the Mac
 
-For a remote build server, add it to the same tailnet; the IDE reaches it over SSH
-on its tailnet address with no extra configuration.
+1. On the Mac: **Settings › Server › Glasses › Pair glasses**. A code shows for ten minutes.
+2. On the iPhone: open Glasscode and scan it (or paste the pairing link).
+3. That is all. The phone made its own key in its Secure Enclave; the Mac pinned it, and the phone
+   pinned the Mac's door key. With your server connected, the phone is paired with it too, in the
+   same step.
 
-**Why this is the default:** Tailscale is end-to-end encrypted, needs no server you
-operate, and replaces what a relay would do for nearly everyone.
+The Mac's **device door** opens on its tailnet address (port 4519) while a phone is paired, and
+answers only a phone it paired, from the tailnet. The title bar's glasses icon shows a green dot
+while the glasses are connected.
+
+## 3. Away from the Mac
+
+The phone talks to wherever the manager is home:
+
+- **The Mac is awake**: through its door, from anywhere on the tailnet.
+- **The Mac sleeps**: through your server, over SSH with the same key, into
+  `glasscoded gate --device <id>`. The server's manager answers, in the same conversation. What
+  only the Mac can do (its window, your messenger) waits for it, and the manager says so.
+
+Press **Server mode** before you leave, so your open sessions move to the server and the manager
+can drive them while the Mac sleeps.
 
 ---
 
-## 3. Self-hosted relay — optional, for when you can't use Tailscale
+## Self-hosted relay (optional, the Mac and the server only)
 
-If you cannot run Tailscale (locked-down network, a device you don't control), you
-can deploy the optional Glasscode relay: a small open-source WebSocket switchboard
-you host, which forwards control traffic between the phone and the Mac using a
-shared secret you set. It is **off by default** and not required for the LAN or
-Tailscale paths above.
-
-1. **Deploy the relay** and pick a shared secret — see [`relay/README.md`](../relay/README.md).
-2. **On the Mac**, point the daemon at it:
-   ```sh
-   glasscoded relay wss://relay.example.com <the shared secret>
-   ```
-   It prints this Mac's **device id** (used in the next step) and starts keeping a
-   `listen` socket open. `glasscoded relay status` shows whether it's connected, and
-   `glasscoded relay off` stops using it.
-3. **In the glasses app**, set the matching values in `GlasscodeConfig.swift` and
-   flip the switch:
-   ```swift
-   static let useRelay = true
-   static let relayURL = "wss://relay.example.com"
-   static let relaySecret = "<the same shared secret>"
-   static let macDeviceID = "<the device id glasscoded printed>"
-   ```
-   Build and run. The glasses now reach the Mac through the relay; `controlBaseURL`
-   is ignored while `useRelay` is on.
-
-Nothing in Glasscode depends on any hosted service; the relay is yours to run.
+When the Mac cannot reach the server over Tailscale or SSH directly (a locked-down network), the
+optional relay joins them: see [`relay/README.md`](../relay/README.md) and `glasscoded relay`. It
+carries SSH only. The glasses app does not use it.
 
 ---
 
 ## Troubleshooting
 
-- **Glasses show "Can't reach Glasscode."** Confirm the IDE is running and the Mac
-  is awake and unlocked. Check the address in `GlasscodeConfig.swift` matches the Mac's
-  current LAN or Tailscale IP. From the phone's browser, `http://<mac-address>:4517`
-  should respond.
-- **Works on Wi-Fi, not on cellular.** That's the LAN path — move to Tailscale.
-- **Tailscale address changed.** It shouldn't, but if you reset Tailscale, re-run
-  `tailscale ip -4` and update `GlasscodeConfig.swift`.
+- **The phone says the Mac cannot be reached.** Is the Mac awake, with Glasscode open, and
+  Tailscale on, on both? Settings › Server › Glasses on the Mac says "Not reachable" when
+  Tailscale is not running there.
+- **"This phone is not paired with this Mac."** It was removed in Settings › Glasses, or the
+  pairing was made on another Mac: pair again.
+- **"This is not the Mac you paired."** Another machine answered on that address. Pair again
+  on the right Mac.
+- **The server cannot be reached.** Is it on the tailnet, and does `ssh` to it work from the Mac?
+  Pairing again copies its current host keys.

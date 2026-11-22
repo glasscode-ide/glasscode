@@ -6,6 +6,7 @@ backdrop.rs 8
 browser_ui.rs 14
 chat_ui.rs 39
 composer.rs 29
+device_door.rs 2
 dialogs.rs 131
 editor.rs 44
 file_view.rs 18
@@ -13,7 +14,6 @@ files_ui.rs 23
 first_run.rs 32
 github_accounts_ui.rs 12
 github_ui.rs 52
-glasscode_ui.rs 2
 kit.rs 14
 manager_chat.rs 32
 manager_settings.rs 48

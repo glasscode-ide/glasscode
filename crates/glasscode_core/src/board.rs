@@ -1750,7 +1750,7 @@ mod sync_tests {
         let mut board = Board::default();
         apply_op(&mut board, &crate::remote::TodayOp::Add { text: "Send Sam the wording by Friday".into() }, today, &["Sam".into()]).unwrap();
         assert_eq!(board.tasks.len(), 1);
-        let decide = crate::remote::TodayOp::Decide { approval: 1, allow: true, launch: String::new(), key: String::new(), sig: String::new() };
+        let decide = crate::remote::TodayOp::Decide { approval: 1, allow: true, launch: String::new(), key: String::new(), sig: String::new(), shown: None };
         assert!(apply_op(&mut board, &decide, today, &[]).is_err());
     }
 }

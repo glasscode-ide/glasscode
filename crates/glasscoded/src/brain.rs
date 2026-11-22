@@ -62,7 +62,8 @@ fn chat_thread(host: Arc<DaemonHost>, spec: BrainSpec, hold: glasscode_core::run
     let mut lane: Option<glasscode_core::runtime::lanes::ChatLane> = None;
     let mut asked = std::collections::HashSet::new();
     while !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_secs(2));
+        // Every two seconds, or at once when a phone asked something (G08).
+        crate::phone_manager::wait_for_question(Duration::from_secs(2));
         let now = glasscode_core::clock::now_ms();
         let conversation = Conversation::load();
         let Some(question) = waiting_question(&conversation, now) else { continue };
@@ -73,7 +74,15 @@ fn chat_thread(host: Arc<DaemonHost>, spec: BrainSpec, hold: glasscode_core::run
         let since = glasscode_core::runtime::chat::since_text(&conversation);
         let before = Ledger::load().unwrap_or_default();
         let mut ledger = before.clone();
-        let result = lane.ask(host.as_ref(), &mut ledger, &question.text, &since, now, &mut |_| {});
+        // A phone's question goes with its glasses block; what is written is kept for the phone,
+        // which may stop it (G08).
+        crate::phone_manager::answering(&question, lane.stop_handle());
+        let composed = crate::phone_manager::composed(&question);
+        let result = lane.ask(host.as_ref(), &mut ledger, &composed, &since, now, &mut |update| {
+            if let glasscode_core::runtime::Update::Text(part) = update {
+                crate::phone_manager::wrote(part);
+            }
+        });
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
             log(format!("manager: the token ledger could not be kept: {err}"));
         }
@@ -90,6 +99,7 @@ fn chat_thread(host: Arc<DaemonHost>, spec: BrainSpec, hold: glasscode_core::run
         if let Err(err) = Conversation::load().post(Draft { author, kind, text, refs: question.refs.clone(), topic: Some(question.topic.clone()) }) {
             log(format!("manager: the chat's answer could not be posted: {err}"));
         }
+        crate::phone_manager::answered(&question);
     }
     if let Some(mut lane) = lane {
         lane.brain.stop();
@@ -114,6 +124,14 @@ fn from_mac_path() -> std::path::PathBuf {
 }
 
 /// What the Mac said last.
+/// Whether the chat lane answers here now, or why not (a phone hears it at once, G08).
+pub fn chat_status() -> Result<(), String> {
+    if RUNNING.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+        return Ok(());
+    }
+    Err(WHY_NOT.lock().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_else(|| "its brain is not running here".to_string()))
+}
+
 pub fn from_mac() -> Option<ManagerFromMac> {
     let text = std::fs::read_to_string(from_mac_path()).ok()?;
     serde_json::from_str(&text).ok()

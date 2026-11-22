@@ -28,6 +28,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>glasscodeglasses</string>
+				<string>glasscode</string>
 			</array>
 		</dict>
 	</array>
@@ -44,18 +45,27 @@
 		<key>TeamID</key>
 		<string></string>
 	</dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Needed to connect to your Meta glasses.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_bonjour._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Glasscode scans the pairing code your Mac shows.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Lets Glasscode reach your Mac over the local network.</string>
+	<string>Lets Glasscode reach your Mac and your server over Tailscale.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Glasscode listens and talks with you through your glasses.</string>
+	<string>Glasscode hears what you ask your manager, and turns it into text on this phone.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Glasscode listens on-device for “Hey Glasscode” to wake up, so you never touch the phone.</string>
+	<string>Glasscode turns what you say into text on this phone, to ask your manager.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

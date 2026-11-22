@@ -96,7 +96,9 @@ impl Workspace {
             self.home.status = HomeStatus::Off;
             return;
         }
-        if self.window_active {
+        // The person is present at the window, or using their glasses through this Mac's door (O9):
+        // then an awake Mac takes home back, and its sessions can be driven from the glasses.
+        if self.window_active || self.door.used_recently() {
             self.home.present_since.get_or_insert_with(Instant::now);
         } else {
             self.home.present_since = None;

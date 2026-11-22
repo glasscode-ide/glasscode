@@ -142,18 +142,17 @@ fn right_tab_key(tab: RightTab) -> &'static str {
         RightTab::Checks => "checks",
         RightTab::Changes => "changes",
         RightTab::Files => "files",
-        RightTab::Glasscode => "glasscode",
     }
 }
 
-/// The saved right tab; the Glasscode tab only where it exists.
+/// The saved right tab. The Glasscode tab went with the glasses plan (G10): a saved "glasscode"
+/// is the default.
 pub fn right_tab_from(key: &str) -> Option<RightTab> {
     match key {
         "pull-request" => Some(RightTab::PullRequest),
         "checks" => Some(RightTab::Checks),
         "changes" => Some(RightTab::Changes),
         "files" => Some(RightTab::Files),
-        "glasscode" if crate::glasscode_ui::VOICE => Some(RightTab::Glasscode),
         _ => None,
     }
 }
@@ -931,6 +930,7 @@ impl Workspace {
                     .flex_shrink(1.)
                     .min_w_0()
                     .overflow_hidden()
+                    .when_some(self.render_glasses_icon(cx), |d, icon| d.child(crate::window_controls::clickable(icon)))
                     .when_some(switch, |d, buttons| d.child(crate::window_controls::clickable(buttons)))
                     .when_some(update, |d, pill| d.child(crate::window_controls::clickable(pill)))
                     .child(div().flex().flex_shrink(1.).min_w_0().overflow_hidden().child(crate::window_controls::clickable(self.server_pill(cx)))),
@@ -1518,7 +1518,7 @@ mod tests {
         assert!(right_tab_from("pull-request") == Some(RightTab::PullRequest));
         assert!(right_tab_from("changes") == Some(RightTab::Changes));
         assert!(right_tab_from("files") == Some(RightTab::Files));
-        assert!(right_tab_from("glasscode") == crate::glasscode_ui::VOICE.then_some(RightTab::Glasscode));
+        assert!(right_tab_from("glasscode").is_none(), "the Glasscode tab is gone: the default");
         assert!(right_tab_from("ci").is_none(), "an unknown tab is the default");
     }
 

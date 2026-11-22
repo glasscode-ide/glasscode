@@ -626,16 +626,23 @@ fn hard_limit(op: &Op, targets: &Targets, policy: &PolicySet) -> Option<String> 
     keys.into_iter().find(|key| policy.policy.of(key).local_only).map(|key| format!("{key} stays on this Mac: nothing of it goes to the server"))
 }
 
-/// A phone's decision: only a phone this Mac paired itself; ordinary ops as the person, and an
-/// op that needs the person present asks in the app unless the phone may confirm it itself.
+/// A phone's decision (G06, `docs/mobile-glasses-plan.md` section 6): narrower than the person.
+/// Only a phone this Mac paired itself. It may look (reads, and moving a view), and confirm an
+/// approval it signed; an op only the person may do asks in the app. Anything else it asks the
+/// manager for (`manager.ask`, tier-2 words), which acts within the project's level, or a card
+/// the phone approves. Its own input to a session goes as signed input (`remote::check_relayed`),
+/// never through the registry. So a lost phone, or a misheard sentence, never acts as the person.
 fn phone(device: &str, op: &Op, policy: &PolicySet) -> Decision {
     if !policy.devices.contains(device) {
         return Decision::never("this phone is not paired with this Mac");
     }
-    if op.spec.human_only && !PHONE_CONFIRMS.contains(&op.name()) {
+    if PHONE_CONFIRMS.contains(&op.name()) || reads(op) {
+        return Decision::Allow;
+    }
+    if op.spec.human_only {
         return Decision::ask(format!("only you, in the app, can {}: confirm it there", op.spec.summary));
     }
-    Decision::Allow
+    Decision::never(format!("from your phone or glasses, ask the manager to {}: it acts within the project's level, or asks you with a card", only_you(op.spec.summary)))
 }
 
 /// How far a permission mode lets an agent go without asking: plan and read-only 0, the default

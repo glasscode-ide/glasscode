@@ -42,6 +42,8 @@ pub const FILE: &[u8] = include_bytes!("../assets/icons/file.svg");
 pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
 pub const CLOSE: &[u8] = include_bytes!("../assets/icons/close.svg");
 pub const SEARCH: &[u8] = include_bytes!("../assets/icons/search.svg");
+/// The title bar's glasses icon (G10): the glasses app is connected, and whether you talk from it.
+pub const GLASSES: &[u8] = include_bytes!("../assets/icons/glasses.svg");
 pub const BELL: &[u8] = include_bytes!("../assets/icons/bell.svg");
 pub const CALENDAR: &[u8] = include_bytes!("../assets/icons/calendar.svg");
 pub const GAUGE: &[u8] = include_bytes!("../assets/icons/gauge.svg");

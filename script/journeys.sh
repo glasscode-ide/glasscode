@@ -23,6 +23,10 @@
 #      from code and from its brain
 #   7  quiet hours hold a notification; when they end (the app's debug clock starts at 06:58, so
 #      22-7 ends a couple of minutes in), the digest follows
+#   9  the glasses: a paired phone stand-in (the iPhone app's own link code, built for macOS by
+#      script/glasses-e2e/build.sh) reaches the device door on loopback, with a door key of the
+#      journey's own (never the Keychain): the handshake, home, state, Today, presence, a question
+#      the manager answers from code, and a refused method
 #
 # Needs: macOS or Linux with a display (the app opens a window), python3, git, lsof.
 set -uo pipefail
@@ -35,8 +39,8 @@ for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
     --keep) KEEP=1 ;;
-    [1-8]) ONLY+=("$arg") ;;
-    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-8]…" >&2; exit 2 ;;
+    [1-9]) ONLY+=("$arg") ;;
+    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-9]…" >&2; exit 2 ;;
   esac
 done
 wanted() { [ ${#ONLY[@]} -eq 0 ] && return 0; local j; for j in "${ONLY[@]}"; do [ "$j" = "$1" ] && return 0; done; return 1; }
@@ -44,7 +48,9 @@ wanted() { [ ${#ONLY[@]} -eq 0 ] && return 0; local j; for j in "${ONLY[@]}"; do
 if [ "$BUILD" = 1 ]; then
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
   (cd "$ROOT" && cargo build --locked -p glasscode && cargo build --locked -p glasscode_core --features testkit --bin make-test-home) || exit 1
+  if wanted 9 && command -v swiftc > /dev/null; then "$ROOT/script/glasses-e2e/build.sh" > /dev/null || exit 1; fi
 fi
+DOOR_E2E=$ROOT/script/glasses-e2e/.build/door-e2e
 APPBIN=$ROOT/target/debug/glasscode
 MAKE_HOME=$ROOT/target/debug/make-test-home
 STAND_IN=$ROOT/script/test-agents/claude
@@ -389,6 +395,46 @@ journey8() {
   check "the chat answers from its brain" wait_for 60 chat_said "Start with the release notes"
 }
 
+# The journey's own keys: the door's (the cross-language vector's) and the stand-in phone's.
+DOOR_HEX=$(printf '07%.0s' $(seq 32))
+DOOR_PUBLIC="ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBB4YUy/UdUwC8wQdnHXOszuD/9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt/khuztdcepDGoYiBwKM="
+PHONE_HEX=$(printf '09%.0s' $(seq 32))
+j9_line() { python3 -c "
+import json, sys
+for line in open(sys.argv[1]):
+    try: v = json.loads(line)
+    except ValueError: continue
+    if sys.argv[2] in v:
+        print(json.dumps(v[sys.argv[2]])); break" "$T/j9.json" "$1"; }
+j9_has() { j9_line "$1" | grep -q "$2"; }
+journey9() {
+  say "9. The glasses: a paired phone reaches the device door"
+  if [ ! -x "$DOOR_E2E" ]; then fail "the phone stand-in is built (script/glasses-e2e/build.sh)"; return; fi
+  make_home
+  # Pin the stand-in phone, as pairing would.
+  MODE=whoami DOOR_ADDR=x DOOR_KEY=x PHONE_RAW="$PHONE_HEX" "$DOOR_E2E" > "$T/j9-whoami.json"
+  python3 -c 'import json, os, sys, time
+me = json.load(open(sys.argv[2]))
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+doc = {"store": "authority/devices", "version": 1, "data": {"phones": {me["device"]: {"key": me["key"], "name": "Journey phone", "paired_ms": int(time.time() * 1000)}}}}
+json.dump(doc, open(sys.argv[1], "w"))
+' "$T/home/glasscode/authority/devices.json" "$T/j9-whoami.json"
+  local port=$((45100 + RANDOM % 800))
+  export GLASSCODE_DOOR_LOOPBACK=1 GLASSCODE_DOOR_PORT=$port GLASSCODE_DEBUG_DOOR_KEY=$DOOR_HEX
+  start_app allow
+  unset GLASSCODE_DOOR_LOOPBACK GLASSCODE_DOOR_PORT GLASSCODE_DEBUG_DOOR_KEY
+  check "the door listens on loopback" wait_for 30 grep -q "device door: listening" "$T/app.log"
+  MODE=live DOOR_ADDR="127.0.0.1:$port" DOOR_KEY="$DOOR_PUBLIC" PHONE_RAW="$PHONE_HEX" "$DOOR_E2E" > "$T/j9.json" 2>&1
+  check "the phone gets in (both signatures)" j9_has connected true
+  check "manager.home says the Mac is home" j9_has home '"home": "mac"'
+  check "state lists this Mac's sessions" j9_has state '"sessions"'
+  check "today.get gives Today" j9_has today '"summary"'
+  check "device.presence is taken" j9_has presence '"ok": true'
+  check "the manager answers the glasses from code" j9_has ask '"say"'
+  check "a method outside the list is refused" j9_has refused true
+  check "the app says the phone connected" grep -q "device door: Journey phone" "$T/app.log"
+}
+
 say "Journeys in $T"
 wanted 1 && journey1
 if wanted 2 || wanted 4 || wanted 5 || wanted 6; then
@@ -404,6 +450,7 @@ fi
 wanted 3 && journey3
 wanted 7 && journey7
 wanted 8 && journey8
+wanted 9 && journey9
 say ""
 say "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

@@ -95,6 +95,9 @@ pub struct ChatUi {
     pub today_asked: bool,
     /// The start box's placeholder as last set.
     pub placeholder: Option<String>,
+    /// Where the person is when they ask from their glasses (G07): the block that goes before the
+    /// question in place of the window's snapshot, set by the device door for its question.
+    pub device_focus: Option<String>,
     /// The topics with something in them, newest first: (id, title). Made when the conversation
     /// arrives, not each frame.
     topics: Vec<(glasscode_core::conversation::TopicId, String)>,
@@ -123,6 +126,13 @@ pub struct Turn {
     /// The agent that answers it, and the question (held when the limit is used up).
     agent: AgentKind,
     question: Asked,
+}
+
+impl Turn {
+    /// How long it has been working, in seconds.
+    pub fn running_secs(&self) -> u64 {
+        self.sent.elapsed().as_secs()
+    }
 }
 
 /// A question as the person asked it, and the turn's text as it went to the brain (where they were
@@ -341,7 +351,12 @@ impl Workspace {
                 let memory = glasscode_core::memstore::Memory::open();
                 match memory_ask {
                     Asked::Recall(topic) => q::recall(&memory, topic.as_deref()),
-                    Asked::Forget(what) => q::forget(&memory, &what),
+                    // Forgetting lets go of what the person said: never from a device's words (G06,
+                    // tier 2), which a misheard sentence can make.
+                    Asked::Forget(what) => match words.as_ref().and_then(glasscode_core::words::find) {
+                        Some(record) if matches!(record.origin, glasscode_core::words::Origin::Device(_)) => "Forgetting needs your own typed words: write it in the Manager chat on your Mac.".to_string(),
+                        _ => q::forget(&memory, &what),
+                    },
                     Asked::Remember(fact) => match words.as_ref().and_then(glasscode_core::words::find) {
                         Some(record) => q::remember(&memory, &record, &fact),
                         None => "Your words were not recorded, so I kept nothing; say it again in the chat.".to_string(),
@@ -410,6 +425,11 @@ impl Workspace {
     /// question (found in the journey run: a program's "go to …" sent within 30 s of the person's
     /// own message moved the window).
     pub(crate) fn chat_person_asked_ms(&self) -> Option<u64> {
+        // A question from the glasses moves the Mac's window only while the person was at the Mac
+        // a moment ago, or asked to see it there (O8); otherwise a move is a "Show me" chip.
+        if self.door.asking().is_some_and(|(_, window_moves)| !window_moves) {
+            return None;
+        }
         self.mchat.turn.as_ref().filter(|turn| turn.for_person).and(self.mchat.last_person_ms)
     }
 
@@ -453,7 +473,11 @@ impl Workspace {
             None => {
                 // Where the person is as they send it goes with it (ux-5): names and ids from
                 // `ui.state`, never text from the screen. A command's question comes from away.
-                let mut text = match self.chat_focus(asker.is_some(), now, cx) {
+                let focus = match self.mchat.device_focus.take() {
+                    Some(block) => Some(block),
+                    None => self.chat_focus(asker.is_some(), now, cx),
+                };
+                let mut text = match focus {
                     Some(block) => format!("{block}\n\n{}", message.text),
                     None => message.text.clone(),
                 };
@@ -512,7 +536,7 @@ impl Workspace {
 
     /// The snapshot of where the person is, as a block for the brain's turn (none when they took
     /// the chip off). From away (a command), "here" is the last session they had open.
-    fn chat_focus(&self, away: bool, now: u64, cx: &Context<Self>) -> Option<String> {
+    pub(crate) fn chat_focus(&self, away: bool, now: u64, cx: &Context<Self>) -> Option<String> {
         if self.mchat.focus_off {
             return None;
         }

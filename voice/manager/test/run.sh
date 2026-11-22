@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Tests the worker and the Mac helper end to end on this Mac, with stand-in speech services
-# (no keys, nothing is heard or played, no window). It starts its own LiveKit server in
-# Docker on 127.0.0.1:17880 and removes it again.
+# and a stand-in talker (no keys, nothing is heard or played, no window). It starts its own
+# LiveKit server on 127.0.0.1:17880 and removes it again: the livekit-server program when
+# LIVEKIT_BIN names one (as Glasscode runs it), else in Docker.
 #
 #   voice/manager/test/run.sh
+#   LIVEKIT_BIN=/path/to/livekit-server voice/manager/test/run.sh
 #
-# Needs: Docker, python3.10+ (a virtualenv is made in the work folder), and for the helper
-# test a built helper (cd voice/helper && swift build -c release --product manager-voice).
+# Needs: Docker or LIVEKIT_BIN, python3.10+ (a virtualenv is made in the work folder), and for
+# the helper test a built helper (cd voice/helper && swift build -c release --product
+# manager-voice), or MV_HELPER pointing at one.
 # The work folder is $MV_WORK (default: a new folder under $TMPDIR).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,7 +28,12 @@ cleanup() {
     # The worker and the processes it started for its jobs.
     pkill -9 -f "$HERE/harness_worker.py" 2>/dev/null || true
   fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [[ -n "${LK_PID:-}" ]]; then
+    kill "$LK_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$LK_PID" 2>/dev/null || break; sleep 0.5; done
+    kill -9 "$LK_PID" 2>/dev/null || true
+  fi
+  [[ -z "${LIVEKIT_BIN:-}" ]] && docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -41,12 +49,22 @@ say -o "$MV_WORK/u2.aiff" "And what about the reviews from yesterday?"
 say -o "$MV_WORK/u3.aiff" "Mira, please stop talking now."
 for clip in u1 u2 u3; do afconvert -f WAVE -d LEI16@48000 -c 1 "$MV_WORK/$clip.aiff" "$MV_WORK/$clip.wav"; done
 
-# The room server. TCP only: Docker Desktop on a Mac can stall when a UDP port is published.
-docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --rm --name "$NAME" -p 127.0.0.1:17880:17880 -p 127.0.0.1:17881:17881 \
-  -e LIVEKIT_KEYS="$KEY: $SECRET" \
-  -e LIVEKIT_CONFIG="$(printf 'port: 17880\nrtc:\n  tcp_port: 17881\n  udp_port: 17882\n  use_external_ip: false\n  node_ip: 127.0.0.1\nroom:\n  empty_timeout: 30\n  departure_timeout: 5\n')" \
-  livekit/livekit-server:v1.13.11 >/dev/null
+# The room server. MV_NODE_IP (LIVEKIT_BIN only): the address the media goes to, and one more it
+# listens on; this Mac's tailnet address tests the phone's way in (with MV_URL=ws://<it>:17880).
+NODE_IP="${MV_NODE_IP:-127.0.0.1}"
+LK_CONFIG="$(printf 'port: 17880\nrtc:\n  tcp_port: 17881\n  udp_port: 17882\n  use_external_ip: false\n  node_ip: %s\nroom:\n  empty_timeout: 30\n  departure_timeout: 5\n' "$NODE_IP")"
+if [[ -n "${LIVEKIT_BIN:-}" ]]; then
+  BINDS="127.0.0.1"
+  [[ "$NODE_IP" != "127.0.0.1" ]] && BINDS="127.0.0.1, $NODE_IP"
+  printf '%s\nbind_addresses: [%s]\nkeys:\n  %s: %s\n' "$LK_CONFIG" "$BINDS" "$KEY" "$SECRET" > "$MV_WORK/livekit.yaml"
+  "$LIVEKIT_BIN" --config "$MV_WORK/livekit.yaml" > "$MV_WORK/livekit.log" 2>&1 &
+  LK_PID=$!
+else
+  # TCP only: Docker Desktop on a Mac can stall when a UDP port is published.
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --rm --name "$NAME" -p 127.0.0.1:17880:17880 -p 127.0.0.1:17881:17881 \
+    -e LIVEKIT_KEYS="$KEY: $SECRET" -e LIVEKIT_CONFIG="$LK_CONFIG" livekit/livekit-server:v1.13.11 >/dev/null
+fi
 for _ in $(seq 1 30); do [[ "$(curl -s -m 2 http://127.0.0.1:17880/ || true)" == "OK" ]] && break; sleep 1; done
 
 # Tokens for the two test devices (the app makes its own with glasscode_core::manager::voice).
@@ -59,13 +77,13 @@ for identity in ("mac-test1", "mac-helper"):
 PYEOF
 
 MV_TRANSCRIPT="$MV_WORK/transcript.txt" LIVEKIT_URL=ws://127.0.0.1:17880 LIVEKIT_API_KEY="$KEY" LIVEKIT_API_SECRET="$SECRET" \
-  MANAGER_STT=fake MANAGER_TTS=fake "$PY" -B "$HERE/harness_worker.py" start > "$MV_WORK/worker.log" 2>&1 &
+  MANAGER_STT=fake MANAGER_TTS=fake MANAGER_TALKER="${MANAGER_TALKER-fake}" "$PY" -B "$HERE/harness_worker.py" start > "$MV_WORK/worker.log" 2>&1 &
 WORKER_PID=$!
 for _ in $(seq 1 40); do grep -q "registered worker" "$MV_WORK/worker.log" && break; sleep 1; done
 sleep 5
 
 echo "== the room and the worker =="
-"$PY" -B "$HERE/room_test.py"
+MANAGER_TALKER="${MANAGER_TALKER-fake}" "$PY" -B "$HERE/room_test.py"
 
 HELPER="${MV_HELPER:-$HERE/../../helper/.build/release/manager-voice}"
 if [[ -x "$HELPER" ]]; then

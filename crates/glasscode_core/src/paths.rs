@@ -367,6 +367,10 @@ const LAYOUT: &[LayoutRow] = &[
     row(G, "glasscoded.log", Ledger),
     row(G, "manager", Ledger),
     row(G, "manager/work", BrainWork),
+    // The manager's voice on this Mac (`voice_server.rs`): its Python with the worker's packages,
+    // LiveKit's config, logs and pids; on a server `server.env`, LiveKit's key for phones. A
+    // session that changed it would run code next to the voice's keys: the app's only.
+    row(G, "voice", Authority),
     row(G, "memory", TrustedMemory),
     row(G, "memory-server", TrustedMemory),
     // The voice copilot's own memory (voice/memory.mjs); M20.3 reads its facts once.

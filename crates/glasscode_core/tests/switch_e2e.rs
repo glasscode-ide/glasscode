@@ -757,7 +757,7 @@ fn the_manager_wakes_on_the_server_while_it_is_home() {
     let account_id = account["id"].as_str().map(str::to_string).or_else(|| account["account"]["id"].as_str().map(str::to_string)).expect("the new account's id");
     let key = glasscode_core::paths::ProjectKey::parse("e2e-3f9a1c").unwrap();
     let project = glasscode_core::runtime::situation::Project { id: key.to_string(), name: "e2e".into(), careful: false, visible: true };
-    let manager = glasscode_core::remote::ManagerFromMac { enabled: true, agent: Some(AgentKind::Claude), model: None, account: Some(account_id), projects: vec![project], follow_ups: None };
+    let manager = glasscode_core::remote::ManagerFromMac { enabled: true, name: None, agent: Some(AgentKind::Claude), model: None, account: Some(account_id), projects: vec![project], follow_ups: None };
     let authority = glasscode_core::gate::FromMac::of(&glasscode_core::gate::Authority::default(), None);
     let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: Some(authority.clone()), journal_sent: None, manager: Some(manager.clone()) };
     let mut syncer = glasscode_core::mirror::Syncer::default();

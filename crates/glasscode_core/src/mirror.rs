@@ -63,6 +63,8 @@ pub struct Outcome {
     pub journal_sent: Option<crate::journal::Cursor>,
     /// The server's manager's notices, to show.
     pub notices: Vec<crate::remote::ServerNotice>,
+    /// What the phones that reach the server said their glasses do (G08).
+    pub presence: HashMap<String, serde_json::Value>,
     /// The window ops the server's manager asked for, new to this Mac: the app runs each once.
     pub window_ops: Vec<crate::remote::QueuedWindowOp>,
     /// This Mac's clock went back (crit-9): its changes wait until this time (ms), held here.
@@ -615,6 +617,7 @@ impl Syncer {
             outcome.work = reply.work;
             outcome.follow_ups = reply.follow_ups;
             outcome.notices = reply.notices;
+            outcome.presence = reply.presence;
             // Told against the server's clock as well as this one.
             self.server_ms = reply.server_stamp.as_ref().map(|stamp| stamp.wall_ms);
             outcome.clock_back = crate::identity::clock_went_back(self.server_ms);

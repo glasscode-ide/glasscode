@@ -6,8 +6,7 @@ when you only type to the manager.
 
 Two programs run here:
 
-- **LiveKit server**: a "room" that your Mac, your phone or your glasses join with the
-  microphone.
+- **LiveKit server**: a "room" that your Mac joins with its microphone.
 - **The worker**: it sits in that room, turns what you say into text and turns the manager's
   answers into speech. That is all it does.
 
@@ -26,6 +25,51 @@ speaker    ◄── Mac helper ◄── room ◄── worker ◄── text t
 
 Read [What was tested, and what was not](#what-was-tested-and-what-was-not) before you rely on
 it: no real speech service has been tried yet.
+
+## On this Mac (the simplest)
+
+Glasscode can run both programs itself, without Docker: **Settings › Manager › Voice › On this
+Mac**. On: it starts `livekit-server` (shipped in the app) and the worker (its own Python, made
+with [`uv`](https://docs.astral.sh/uv/) the first time, in `~/.glasscode/voice/venv`). Off, or
+the manager off, or the app quits: both end. Nothing to enter but the keys:
+
+- **Soniox key**: one key for listening and speaking. Soniox also hears when you finished a
+  sentence, which makes the turns quick.
+- **Talker** (optional) and its key: a fast model (Claude Haiku by default) that talks with you
+  while the manager works. It answers at once ("I'll check"), hands the work to the manager,
+  and can list your sessions and show one on the lens or the screen by itself. The manager's
+  answer is spoken as the manager wrote it. Without a talker every sentence goes to the
+  manager, as before.
+
+The room listens on this Mac (`ws://127.0.0.1:7890`) and on its Tailscale address, which is
+how the glasses app reaches it: a pinch on the lens joins the room, and the talk stays open
+until you swipe it away (or after two quiet minutes). Port 7890–7892, so a LiveKit of your own
+on 7880 is left alone. Logs: `~/.glasscode/voice/livekit.log`, `worker.log`, `setup.log`.
+
+The rest of this page is for running the voice on a server of your own instead.
+
+## The talker
+
+With `MANAGER_TALKER` set (`.env.example`), the worker holds the conversation itself for a
+device that runs the talker's tools (Glasscode and the glasses app do; they say `"talker": true`
+in `manager.config`). Its tools run on that device, which reaches the manager with what its
+screen or lens shows: `ask_manager`, `manager_progress`, `stop_manager`, `list_sessions`,
+`open_place`. See `worker/talker.py` and the messages in `worker/worker.py`.
+
+## The glasses through the server
+
+So that the glasses get a pass to this room from the server (while the Mac is off), put the
+room's address as the phone reaches it and LiveKit's key and secret in
+`~/.glasscode/voice/server.env` on the server, readable by you only:
+
+```
+VOICE_URL=wss://<your name>          # or ws://<the server's tailnet address>:7880
+LIVEKIT_API_KEY=<the key in .env>
+LIVEKIT_API_SECRET=<the secret in .env>
+```
+
+`glasscoded` hands a paired phone a pass (`manager.voice`) from it. Not tried on a real server
+yet.
 
 ## What you need
 
@@ -109,8 +153,10 @@ stores the same Keychain item. It asks for the value: the key, a colon, the secr
 Then open the manager's page and tap the orb. Say its name, then what you want:
 "AI Mira, what needs me?". After it answered you have 20 seconds to reply without the name.
 
-The glasses app (`glasses/GlasscodeGlasses`) joins the same room when you pick the manager or
-Talk on the lens. It needs nothing set up here: it asks the Mac for a pass to the room.
+The glasses app (`glasses/GlasscodeGlasses`) does not join the room: it turns what you say into
+text on the iPhone, asks the manager over the device link, and speaks the answer with the phone's
+voices ([`docs/architecture.md`](../../docs/architecture.md#the-glasses-app)). It needs nothing set
+up here.
 
 ## Test it from the command line
 
@@ -183,6 +229,11 @@ own pages.
 
 So a working day (eight hours) with the orb on all the time and the manager talking for ten
 minutes is about $2.70 with the defaults.
+
+With Soniox for both (November 2026, soniox.com): listening $0.12 per hour of streamed audio,
+speaking about $0.70 per hour of generated speech. An hour of talking in which the manager
+speaks for twenty minutes is about $0.35, plus the talker's tokens (Claude Haiku 5.5: $0.10 per
+million in, $0.50 per million out: a few cents an hour).
 
 **Know this:** with a streaming service (Deepgram), the microphone goes to that service the
 whole time the orb is on, also while you say nothing and before you say the manager's name.

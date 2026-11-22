@@ -243,7 +243,7 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         cli_acks: std::mem::take(&mut sync.cli_acks),
         skill_off: sync.skill_off,
     });
-    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, observer: !primary, ..Default::default() };
+    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, observer: !primary, presence: crate::phone_manager::presence(), ..Default::default() };
     // The v2 stores, before the daemon's lock: they read and write the disk. Only a Glasscode
     // machine's own connection exchanges them, as the machine it declared (never the one the sync
     // names): they carry the person's answers to this server's cards and the Mac's words.

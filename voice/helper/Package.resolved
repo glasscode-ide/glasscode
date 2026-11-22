@@ -10,15 +10,6 @@
       }
     },
     {
-      "identity" : "elevenlabs-swift-sdk",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/elevenlabs/elevenlabs-swift-sdk.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "24e2c3c9ab80f4571d4d77ce71c1781094115dbb"
-      }
-    },
-    {
       "identity" : "livekit-ffi-xcframework",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/livekit/livekit-ffi-xcframework.git",

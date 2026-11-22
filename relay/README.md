@@ -1,8 +1,9 @@
 # Glasscode Relay
 
-A small, self-hosted WebSocket switchboard that joins your Glasscode devices — your
-Mac, your phone, an optional build server — so they reach each other **from any
-network**, without a VPN and without opening a port on your Mac.
+A small, self-hosted WebSocket switchboard that joins your Mac and your Glasscode server so they
+reach each other over SSH **from any network**, without a VPN and without opening a port. The
+glasses app does not use it: it reaches the Mac's device door and the server over Tailscale
+([`docs/CONNECTIVITY.md`](../docs/CONNECTIVITY.md)).
 
 It is **optional**. Most people should use [Tailscale](../docs/CONNECTIVITY.md)
 instead: it needs no server you operate. Run the relay only when you can't use
@@ -15,20 +16,20 @@ it is licensed Apache-2.0 like the rest of Glasscode.
 
 ## How it works
 
-Every device dials **out** to the relay over one WebSocket, so a phone on cellular
-reaches a Mac behind NAT with no inbound ports.
+Every device dials **out** to the relay over one WebSocket, so the Mac reaches a server behind
+NAT with no inbound ports.
 
 ```
-  phone  ──connect──▶  relay  ◀──listen──  Mac (voice server :4517)
+  Mac  ──connect──▶  relay  ◀──listen──  server (sshd :22)
                          │
                joins the two sockets and
              passes bytes through, blind to
                    what's inside them
 ```
 
-- The **Mac** keeps a `listen` socket open and waits.
-- The **phone** opens `connect?to=<mac>`; the relay tells the Mac, the Mac opens an
-  `accept` socket, and the relay splices the two into one byte pipe.
+- The **server** keeps a `listen` socket open and waits.
+- The **Mac** opens `connect?to=<server>&channel=ssh`; the relay tells the server, the server opens
+  an `accept` socket, and the relay splices the two into one byte pipe.
 - The relay sees *who* talks to *whom* and *how much*, never *what*.
 
 Authorisation is a **single shared secret** you set. Every device that presents it
@@ -96,22 +97,18 @@ past a minute (the relay pings every 20 s to help).
 
 ### 4. Point your devices at it
 
-- **The Mac** (`glasscoded`): point the daemon at the relay —
+- **The server** (`glasscoded`): point the daemon at the relay —
 
   ```sh
   glasscoded relay wss://relay.example.com '<the secret>'
   ```
 
-  It prints the Mac's **device id** and keeps a `listen` socket open.
+  It prints the server's **device id** and keeps a `listen` socket open. The Mac reaches it
+  through the relay from Glasscode's Server dialog.
   `glasscoded relay status` reports the connection; `glasscoded relay off` stops.
 
-- **The glasses app**: in `glasses/GlasscodeGlasses/Sources/GlasscodeConfig.swift`,
-  set `useRelay = true`, `relayURL`, `relaySecret`, and `macDeviceID` (the id the
-  command above printed), then build. It reaches the Mac through the relay instead
-  of a LAN/Tailscale address.
-
-Each device picks its own **device id** (any unique label); the Mac's is set for you
-by `glasscoded relay …`, and the phone's is `phoneDeviceID` in `GlasscodeConfig.swift`.
+Each device picks its own **device id** (any unique label); the server's is set for you by
+`glasscoded relay …`.
 
 ---
 
@@ -128,8 +125,9 @@ All endpoints require two things: `Authorization: Bearer <RELAY_SECRET>` and an
 | `GET /v1/online`                 | any    | `{"online":[{device,kind,name}]}` — the hosts listening now.  |
 | `GET /healthz`                   | —      | `ok` (no auth).                                                |
 
-The host chooses what each `channel` maps to locally — Glasscode uses `control` for
-the voice server (`:4517`) and `ssh` for a build server (`:22`). Frames are binary
+The host chooses what each `channel` maps to locally. Glasscode uses `ssh` (`:22`) only: the
+`control` channel to the old voice server (`:4517`) was closed (the glasses plan's G02), because a
+relayed connection reached it from loopback, where it asked for no token. Frames are binary
 and passed through unchanged (up to 1 MiB each).
 
 Limits: up to 256 open sockets per relay; connections that no host answers within

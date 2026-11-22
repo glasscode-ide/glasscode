@@ -192,7 +192,13 @@ pub fn rule(caller: &Caller, kind: Kind, settings: &AgentSettings) -> Rule {
     match caller {
         Caller::Ui | Caller::ShellTab { .. } => Rule::Allow,
         Caller::Session { .. } | Caller::Manager { .. } => settings.rule(kind),
-        Caller::Phone { .. } | Caller::Machine { .. } | Caller::Terminal { .. } => outside_rule(kind, settings),
+        // A paired phone reads as Settings allows and does nothing else itself (G06): it asks the
+        // manager, or approves a card with its signature (the gate's `phone`).
+        Caller::Phone { .. } => match kind {
+            Kind::Read => settings.rule(kind),
+            _ => Rule::Never,
+        },
+        Caller::Machine { .. } | Caller::Terminal { .. } => outside_rule(kind, settings),
     }
 }
 
@@ -285,7 +291,30 @@ fn kind_name(caller: &Caller) -> String {
 /// watch an agent's terminal, view only (`gate attach`); Today and its board, with the Mac's approvals
 /// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
 /// notifications go. No new session, no shell, no move, no sync, no other phone's key.
-pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
+///
+/// The glasses (G03): ask the manager and read its conversation (`manager.ask`, a tier-2 question;
+/// `manager.conversation`; `manager.stop`, its own answer only), where it is home
+/// (`manager.home`), and what the glasses are doing (`device.presence`). The Mac's device door
+/// keeps the same list (`device_link::allowed`), so a phone has one set of rights at both ends.
+pub const PHONE_ALLOWED: &[&str] = &[
+    "hello",
+    "state",
+    "sessions.transcript",
+    "sessions.peek",
+    "sessions.send",
+    "sessions.keys",
+    "sessions.answer",
+    "sessions.attach",
+    "today.get",
+    "today.op",
+    "phones.push_token",
+    "manager.home",
+    "manager.ask",
+    "manager.conversation",
+    "manager.stop",
+    "manager.voice",
+    "device.presence",
+];
 
 /// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
 /// [`PHONE_ALLOWED`]; the machine-only methods need a `Machine`; a `Machine`, the app and an

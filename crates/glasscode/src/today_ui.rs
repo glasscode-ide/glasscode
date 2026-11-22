@@ -918,7 +918,15 @@ impl Workspace {
                 .control
                 .approvals
                 .iter()
-                .map(|a| glasscode_core::remote::TodayApproval { id: a.id, who: a.caller.who.clone(), what: a.what.clone(), command: a.command.clone(), session_title: a.caller.session_title.clone() })
+                .map(|a| glasscode_core::remote::TodayApproval {
+                    id: a.id,
+                    who: a.caller.who.clone(),
+                    what: a.what.clone(),
+                    command: a.command.clone(),
+                    session_title: a.caller.session_title.clone(),
+                    payload: glasscode_core::remote::card_payload(&a.command, a.pending.as_ref().and_then(|p| p.op()).as_ref()),
+                    review: !a.allow_here,
+                })
                 .collect(),
             activity: self
                 .control
@@ -931,8 +939,17 @@ impl Workspace {
         }
     }
 
-    /// What the person did on Today on their iPhone.
+    /// What the person did on Today on their iPhone, relayed by the server: what is refused is
+    /// said in a toast.
     pub fn today_apply(&mut self, op: glasscode_core::remote::TodayOp, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = self.today_apply_checked(op, window, cx) {
+            self.show_toast(format!("From your iPhone: {e}"), cx);
+        }
+    }
+
+    /// What the person did on Today on their iPhone: done, or why not (the device door answers
+    /// the phone with it).
+    pub fn today_apply_checked(&mut self, op: glasscode_core::remote::TodayOp, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         use glasscode_core::remote::TodayOp;
         let today = day::today();
         let result = match op {
@@ -947,9 +964,14 @@ impl Workspace {
             // Only the person may allow an agent's request. The phone signs the answer with its
             // device key (which this Mac knows from pairing), and names this run of the app, so a
             // number from an earlier run, or from anyone but the phone, does nothing.
-            TodayOp::Decide { approval, allow, launch, key, sig } => {
+            TodayOp::Decide { approval, allow, launch, key, sig, shown } => {
+                let card = self.control.approvals.iter().find(|a| a.id == approval).map(|a| (glasscode_core::remote::card_payload(&a.command, a.pending.as_ref().and_then(|p| p.op()).as_ref()).chars().count(), a.allow_here));
                 if launch != self.control.launch {
-                    Ok(())
+                    Err("That card was asked before Glasscode on your Mac started again.".to_string())
+                } else if card.is_none() {
+                    Err("That card is not waiting any more.".to_string())
+                } else if allow && !phone_may_allow(shown.as_deref(), card.unwrap_or_default()) {
+                    Err(if shown.as_deref() == Some("lens") { "That card is too long for the lens: allow it on the phone, where it shows whole." } else { "Review that card where it shows whole, then allow it." }.to_string())
                 } else if !self.phone_signed(&key, &sig, &glasscode_core::remote::decide_message(&launch, approval, allow)) {
                     Err("That answer did not come from your paired iPhone.".to_string())
                 } else {
@@ -958,10 +980,8 @@ impl Workspace {
                 }
             }
         };
-        if let Err(e) = result {
-            self.show_toast(format!("From your iPhone: {e}"), cx);
-        }
         self.today_save(cx);
+        result
     }
 
     /// Whether `sig` is one of this account's paired iPhones' signatures of `message`.
@@ -2743,4 +2763,35 @@ fn history_home_of(made_up: Option<String>, scratch: bool, home: PathBuf) -> Opt
 /// The start box's label for screen readers: what typing there does.
 fn placeholder_label(asking: bool, name: &str) -> String {
     if asking { format!("Ask {name}") } else { "Describe a task to start a session on it".into() }
+}
+
+/// Whether a phone may allow a card (G09): one allowed on the glasses' lens must fit there whole;
+/// one that leaves the Mac or removes something (not `allow_here`) only where its whole payload
+/// showed, the phone's card or the lens, never from a phone that does not say where.
+fn phone_may_allow(shown: Option<&str>, (payload_chars, allow_here): (usize, bool)) -> bool {
+    match shown {
+        Some("lens") => payload_chars <= glasscode_core::remote::LENS_FITS,
+        Some("phone") => true,
+        _ => allow_here,
+    }
+}
+
+#[cfg(test)]
+mod lens_tests {
+    #[test]
+    fn lens_allow_refused_for_a_long_payload() {
+        assert!(super::phone_may_allow(Some("lens"), (120, false)));
+        assert!(!super::phone_may_allow(Some("lens"), (400, true)));
+        assert!(super::phone_may_allow(Some("phone"), (400, false)), "the phone shows it whole");
+        assert!(super::phone_may_allow(None, (400, true)), "a local card from an older phone");
+        assert!(!super::phone_may_allow(None, (40, false)), "an outward card needs its payload shown");
+    }
+
+    #[test]
+    fn a_card_payload_is_all_of_it() {
+        assert_eq!(glasscode_core::remote::card_payload(" glasscode session send x 'hi' ", None), "glasscode session send x 'hi'");
+        let op = glasscode_core::ops::typed("session.send", serde_json::json!({ "session": "s1", "message": "Run the tests" })).unwrap();
+        let payload = glasscode_core::remote::card_payload("", Some(&op));
+        assert!(payload.starts_with("session.send\n") && payload.contains("message: Run the tests") && payload.contains("session: s1"), "{payload}");
+    }
 }

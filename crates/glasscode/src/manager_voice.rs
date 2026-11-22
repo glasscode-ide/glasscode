@@ -7,6 +7,12 @@
 //! and `{"config":{"name","listen"}}` to its stdin, and reads
 //! `{"ready":true}`, `{"heard":"…"}`, `{"state":"…"}` and `{"error":"…"}` from its stdout.
 //! The helper ends by itself when its stdin closes, so it never outlives the app.
+//!
+//! With a talker in the worker (`voice/manager/worker/talker.py`) the worker holds the
+//! conversation: a sentence comes as `{"heard":"…","handled":true}` (shown, not asked), what the
+//! talker says as `{"said":"…"}`, and the talker's tools as `{"tool":{"call","name","arguments"}}`,
+//! answered with `{"result":{"call","text"}}`. `ask_manager` asks the manager as a spoken
+//! question does, and its answer is spoken as before (`manager_voice_speak`).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write as _};
@@ -30,9 +36,14 @@ const EXIT_WORKER_FAILED: i32 = 5;
 /// A line the helper wrote.
 enum Line {
     Ready,
-    Heard(String),
+    /// What was heard; `true`: the talker answers it, so it is only shown.
+    Heard(String, bool),
     State(String),
     Error(String),
+    /// What the talker itself said.
+    Said(String),
+    /// One of the talker's tools, to run here: its call id, name and arguments.
+    Tool(String, String, serde_json::Value),
 }
 
 /// The helper process and what it last reported.
@@ -45,6 +56,9 @@ pub struct VoiceState {
     /// Whether the Keychain holds the LiveKit key and secret (None: not looked up yet).
     /// Settings › Manager looks when it opens and after Save or Remove, never while drawing.
     pub keys_kept: Option<bool>,
+    /// The same for the Soniox key and the talker's key (the voice on this Mac).
+    pub soniox_kept: Option<bool>,
+    pub talker_kept: Option<bool>,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     /// What the helper wrote, read by a thread; closed once the helper is gone.
@@ -104,9 +118,12 @@ impl VoiceState {
 /// name), "always" (everything counts) or "never" (the microphone is off). The room knows
 /// no "hold": while the key is held it is "always", otherwise "never". `Listen::Never` only
 /// gets here when the person tapped the orb, which means "listen now": everything counts
-/// until it is tapped again.
+/// until it is tapped again. With the voice on this Mac the helper only runs while the person
+/// tapped the orb to talk, so there too everything counts (a talk, as on the glasses): the name
+/// is not needed in front of every sentence.
 fn listen_mode(settings: &Settings, held: bool) -> &'static str {
     match settings.listen {
+        Listen::Wake if settings.voice.local => "always",
         Listen::Wake => "wake",
         Listen::Hold if held => "always",
         Listen::Hold => "never",
@@ -119,6 +136,10 @@ fn missing(settings: &Settings) -> Option<String> {
     let url = settings.voice.livekit_url.trim();
     if !settings.enabled {
         return Some("The manager is switched off. Switch it on in Settings › Manager.".into());
+    }
+    if settings.voice.local {
+        // The address is this Mac's own (`voice_server.rs`).
+        return None;
     }
     if url.is_empty() {
         return Some("No voice server yet. Enter its address in Settings › Manager › Voice.".into());
@@ -161,7 +182,17 @@ fn parse(line: &str) -> Option<Line> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if let Some(text) = value.get("heard").and_then(|v| v.as_str()) {
         let text = text.trim();
-        return (!text.is_empty()).then(|| Line::Heard(text.to_string()));
+        let handled = value.get("handled").and_then(|v| v.as_bool()) == Some(true);
+        return (!text.is_empty()).then(|| Line::Heard(text.to_string(), handled));
+    }
+    if let Some(text) = value.get("said").and_then(|v| v.as_str()) {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| Line::Said(text.to_string()));
+    }
+    if let Some(tool) = value.get("tool") {
+        let call = tool.get("call").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        return (!call.is_empty() && !name.is_empty()).then(|| Line::Tool(call, name, tool.get("arguments").cloned().unwrap_or_default()));
     }
     if let Some(state) = value.get("state").and_then(|v| v.as_str()) {
         return matches!(state, "idle" | "listening" | "thinking" | "speaking").then(|| Line::State(state.to_string()));
@@ -172,8 +203,8 @@ fn parse(line: &str) -> Option<Line> {
     (value.get("ready").and_then(|v| v.as_bool()) == Some(true)).then_some(Line::Ready)
 }
 
-/// Start the helper in the room. Err: why not, in words for the person.
-fn spawn(settings: &Settings) -> Result<(Child, ChildStdin, async_channel::Receiver<Line>), String> {
+/// Start the helper in the room at `url`. Err: why not, in words for the person.
+fn spawn(settings: &Settings, url: &str) -> Result<(Child, ChildStdin, async_channel::Receiver<Line>), String> {
     if let Some(problem) = missing(settings) {
         return Err(problem);
     }
@@ -188,7 +219,7 @@ fn spawn(settings: &Settings) -> Result<(Child, ChildStdin, async_channel::Recei
 
     let mut cmd = Command::new(&path);
     // The token goes in the environment, not on the command line, where `ps` would show it.
-    cmd.env("MANAGER_VOICE_URL", settings.voice.livekit_url.trim())
+    cmd.env("MANAGER_VOICE_URL", url)
         .env("MANAGER_VOICE_TOKEN", token)
         .env("MANAGER_VOICE_NAME", &settings.name)
         .env("MANAGER_VOICE_LISTEN", listen_mode(settings, false))
@@ -249,7 +280,30 @@ impl Workspace {
     fn manager_voice_start(&mut self, cx: &mut Context<Self>) {
         self.manager_voice_end();
         let settings = self.state.manager.clone();
-        match spawn(&settings) {
+        // The voice on this Mac: its address once it runs; until then, why not yet.
+        let url = if settings.voice.local {
+            match &self.vserver.status {
+                crate::voice_server::Status::Running => self.vserver.url(),
+                crate::voice_server::Status::Failed(why) => {
+                    self.manager.voice.problem = Some(why.clone());
+                    return;
+                }
+                crate::voice_server::Status::Preparing(what) => {
+                    self.manager.voice.problem = Some(what.clone());
+                    // Joined as soon as it runs.
+                    self.manager.voice.retry_at = Some(Instant::now() + Duration::from_secs(2));
+                    return;
+                }
+                crate::voice_server::Status::Off => {
+                    self.manager.voice.problem = Some("The voice on this Mac is starting…".into());
+                    self.manager.voice.retry_at = Some(Instant::now() + Duration::from_secs(2));
+                    return;
+                }
+            }
+        } else {
+            settings.voice.livekit_url.trim().to_string()
+        };
+        match spawn(&settings, &url) {
             Ok((child, stdin, lines)) => {
                 let voice = &mut self.manager.voice;
                 voice.child = Some(child);
@@ -289,7 +343,8 @@ impl Workspace {
             return;
         }
         let voice = &mut self.manager.voice;
-        voice.write(serde_json::json!({ "config": { "name": want.0, "listen": want.1 } }));
+        // This app runs the talker's tools (when the worker has a talker).
+        voice.write(serde_json::json!({ "config": { "name": want.0, "listen": want.1, "talker": true, "place": "mac" } }));
         voice.sent = Some(want);
     }
 
@@ -309,7 +364,8 @@ impl Workspace {
             if self.manager.voice.retry_at.is_some_and(|at| at <= Instant::now()) {
                 self.manager.voice.retry_at = None;
                 self.manager_voice_start(cx);
-                if self.manager.voice.child.is_none() {
+                // Not when it waits for the voice on this Mac to start (it set its own time).
+                if self.manager.voice.child.is_none() && self.manager.voice.retry_at.is_none() {
                     self.manager_voice_lost();
                 }
                 cx.notify();
@@ -319,6 +375,8 @@ impl Workspace {
         self.manager_voice_configure();
 
         let mut heard = Vec::new();
+        let mut tools = Vec::new();
+        let mut said = Vec::new();
         let mut changed = false;
         let mut all_read = false;
         if let Some(lines) = self.manager.voice.lines.clone() {
@@ -331,7 +389,11 @@ impl Workspace {
                         voice.problem = None;
                         changed = true;
                     }
-                    Ok(Line::Heard(text)) => heard.push(text),
+                    Ok(Line::Heard(text, false)) => heard.push(text),
+                    // The talker answers it; what it hands on comes as `ask_manager`.
+                    Ok(Line::Heard(_, true)) => {}
+                    Ok(Line::Said(text)) => said.push(text),
+                    Ok(Line::Tool(call, name, arguments)) => tools.push((call, name, arguments)),
                     Ok(Line::State(state)) => {
                         let voice = &mut self.manager.voice;
                         // A state comes from the worker: whatever was wrong, it works again.
@@ -341,8 +403,17 @@ impl Workspace {
                     }
                     Ok(Line::Error(problem)) => {
                         log::warn!("manager voice: {problem}");
+                        // The room was made before the voice worker on this Mac signed in, so
+                        // LiveKit never sent it in: leave, and join again a moment later (an
+                        // empty room closes at once there, and the new one gets the worker).
+                        let empty_room = self.state.manager.voice.local && problem.contains("did not join");
                         self.manager.voice.problem = Some(problem);
                         changed = true;
+                        if empty_room {
+                            self.manager_voice_end();
+                            self.manager.voice.retry_at = Some(Instant::now() + Duration::from_secs(3));
+                            break;
+                        }
                     }
                     Err(async_channel::TryRecvError::Empty) => break,
                     Err(async_channel::TryRecvError::Closed) => {
@@ -371,10 +442,98 @@ impl Workspace {
         }
 
         for text in heard {
-            self.manager_ask(text, true, cx);
+            self.manager_voice_ask(text, cx);
+        }
+        for text in said {
+            // Shown in the bubble; it was spoken already.
+            self.manager_caption(&text, false, cx);
+        }
+        for (call, name, arguments) in tools {
+            let text = self.manager_voice_tool(&name, &arguments, cx);
+            self.manager.voice.write(serde_json::json!({ "result": { "call": call, "text": text } }));
         }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// Ask the manager something said by voice here: its answer is spoken, so it is asked for a
+    /// short, plain one (`mac_voice_block`), with where the person is in the window as usual.
+    fn manager_voice_ask(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.mchat.turn.is_none() && self.mchat.device_focus.is_none() {
+            let window = self.chat_focus(false, glasscode_core::clock::now_ms(), cx);
+            self.mchat.device_focus = Some(glasscode_core::runtime::chat::mac_voice_block(window.as_deref()));
+        }
+        self.manager_ask(text, true, cx);
+    }
+
+    /// One of the talker's tools, run here; what it found, in words for the talker.
+    fn manager_voice_tool(&mut self, name: &str, arguments: &serde_json::Value, cx: &mut Context<Self>) -> String {
+        let text = |key: &str| arguments.get(key).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+        match name {
+            "ask_manager" => {
+                let request = text("request");
+                if request.is_empty() {
+                    return "There was nothing to ask.".into();
+                }
+                let busy = self.mchat.turn.is_some();
+                self.manager_voice_ask(request, cx);
+                if busy { "started: it is answered right after the question the manager is on now".into() } else { "started".into() }
+            }
+            "manager_progress" => match &self.mchat.turn {
+                Some(turn) => {
+                    let doing = turn.activity.as_deref().map(|a| format!(", now: {a}")).unwrap_or_default();
+                    format!("The manager has been working on it for {} seconds{doing}.", turn.running_secs())
+                }
+                None => "The manager is not working on anything now.".into(),
+            },
+            "stop_manager" => {
+                if self.mchat.turn.is_none() {
+                    return "Nothing was running.".into();
+                }
+                self.chat_stop(cx);
+                "Stopped.".into()
+            }
+            "list_sessions" => {
+                let needs = arguments.get("needs_you").and_then(|v| v.as_bool()) == Some(true);
+                let mut lines = Vec::new();
+                for s in &self.state.sessions {
+                    if self.state.session_hidden(s) {
+                        continue;
+                    }
+                    let state = self.session_state(s);
+                    if needs && state != "needs you" {
+                        continue;
+                    }
+                    let pr = self.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|p| format!(", pull request #{}", p.number)).unwrap_or_default();
+                    let project = self.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                    lines.push((state != "not running", format!("id {}: \"{}\" in {project}, {state}{pr}", s.id, self.session_title(s))));
+                }
+                // The ones that run first; a spoken answer needs no more than these.
+                lines.sort_by_key(|(running, _)| !*running);
+                let lines: Vec<String> = lines.into_iter().take(15).map(|(_, l)| l).collect();
+                if lines.is_empty() { if needs { "No session waits for the person.".into() } else { "No sessions.".into() } } else { lines.join("\n") }
+            }
+            "open_place" => {
+                let (kind, id) = (text("kind"), text("id"));
+                let place = match kind.as_str() {
+                    "session" if self.state.session(&id).is_some() => id.clone(),
+                    "session" => return format!("There is no session with the id {id}."),
+                    "pr" => {
+                        let number: Option<u64> = id.trim_start_matches('#').parse().ok();
+                        let session = self.prs.map.iter().find(|(_, p)| p.pr.as_ref().is_some_and(|pr| Some(pr.number as u64) == number)).map(|(s, _)| s.clone());
+                        match session {
+                            Some(session) => session,
+                            None => "pull-requests".into(),
+                        }
+                    }
+                    _ => "today".into(),
+                };
+                let shown = place.clone();
+                self.with_main_window(cx, move |ws, window, cx| ws.run_op_named("ui.open", serde_json::json!({ "place": place }), window, cx));
+                format!("Shown on the Mac's screen ({shown}).")
+            }
+            _ => format!("This Mac does not know the tool {name}."),
         }
     }
 
@@ -434,12 +593,20 @@ mod tests {
         assert!(missing(&settings("voice.example.test")).is_some_and(|p| p.contains("wss://")));
         assert_eq!(missing(&settings(" wss://voice.example.test ")), None);
         assert_eq!(missing(&settings("ws://10.0.0.5:7880")), None);
+        // On this Mac: no address to enter.
+        let mut local = settings("");
+        local.voice.local = true;
+        assert_eq!(missing(&local), None);
     }
 
     #[test]
     fn reads_the_helpers_lines() {
         assert!(matches!(parse(r#"{"ready":true}"#), Some(Line::Ready)));
-        assert!(matches!(parse(r#"{"heard":" what is running? "}"#), Some(Line::Heard(text)) if text == "what is running?"));
+        assert!(matches!(parse(r#"{"heard":" what is running? "}"#), Some(Line::Heard(text, false)) if text == "what is running?"));
+        assert!(matches!(parse(r#"{"heard":"hi","handled":true}"#), Some(Line::Heard(text, true)) if text == "hi"));
+        assert!(matches!(parse(r#"{"said":"I'll check."}"#), Some(Line::Said(text)) if text == "I'll check."));
+        assert!(matches!(parse(r#"{"tool":{"call":"t1","name":"ask_manager","arguments":{"request":"what needs me"}}}"#), Some(Line::Tool(call, name, args)) if call == "t1" && name == "ask_manager" && args["request"] == "what needs me"));
+        assert!(parse(r#"{"tool":{"name":"ask_manager"}}"#).is_none());
         assert!(matches!(parse(r#"{"state":"speaking"}"#), Some(Line::State(state)) if state == "speaking"));
         assert!(matches!(parse(r#"{"error":"The voice server could not be reached."}"#), Some(Line::Error(_))));
         assert!(parse(r#"{"heard":"  "}"#).is_none());
@@ -459,6 +626,10 @@ mod tests {
         assert_eq!(listen_mode(&s, true), "always");
         // Tapped although it never listens by itself: the microphone is open until tapped again.
         s.listen = Listen::Never;
+        assert_eq!(listen_mode(&s, false), "always");
+        // The voice on this Mac: a tap on the orb is a talk, no name needed.
+        s.listen = Listen::Wake;
+        s.voice.local = true;
         assert_eq!(listen_mode(&s, false), "always");
     }
 

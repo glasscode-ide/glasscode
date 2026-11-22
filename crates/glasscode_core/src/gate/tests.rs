@@ -182,14 +182,58 @@ fn unpaired_phone_key_refused() {
     let decision = decide(&phone, &add, &Targets::default(), &set, None);
     assert_eq!(decision.rule(), Rule::Never);
     assert!(decision.why().contains("not paired"));
-    // A phone this Mac paired acts as the person for ordinary ops; it confirms an approval
-    // itself, and anything else only the person may do asks in the app.
+    // A phone this Mac paired reads and confirms an approval itself; anything else only the person
+    // may do asks in the app, and the rest it asks the manager for (G06).
     set.devices.insert("phone-1".into());
-    assert_eq!(decide(&phone, &add, &Targets::default(), &set, None), Decision::Allow);
+    assert_eq!(decide(&phone, &op(&SESSION_LIST, json!({})), &Targets::default(), &set, None), Decision::Allow);
     assert_eq!(decide(&phone, &op(&APPROVALS_DECIDE, json!({})), &Targets::default(), &set, None), Decision::Allow);
     assert_eq!(rule(&phone, &op(&RELEASE, json!({})), &Targets::default(), &set), Rule::Ask);
+    assert_eq!(rule(&phone, &add, &Targets::default(), &set), Rule::Never);
     // Another phone is still not paired.
     assert_eq!(rule(&Caller::Phone { device: "phone-2".into() }, &add, &Targets::default(), &set), Rule::Never);
+}
+
+/// G06: a paired phone is narrower than the person. It does not start, drive, move or close a
+/// session, write settings or act on the forge by itself; the manager does, within the level.
+#[test]
+fn a_paired_phone_never_acts_as_the_person() {
+    let mut set = set();
+    set.devices.insert("phone-1".into());
+    let phone = Caller::Phone { device: "phone-1".into() };
+    for (spec, args) in [
+        (&SESSION_NEW, json!({ "mode": "bypassPermissions" })),
+        (&SESSION_NEW, json!({})),
+        (&SESSION_SEND, json!({ "text": "rebase on main" })),
+        (&SESSION_CLOSE, json!({})),
+        (&SESSION_MODE, json!({ "mode": "acceptEdits" })),
+        (&SESSION_MOVE, json!({})),
+        (&PR_COMMENT, json!({ "body": "LGTM" })),
+        (&SETTINGS_SET, json!({})),
+        (&BOARD_ADD, json!({ "title": "x" })),
+    ] {
+        let decision = decide(&phone, &op(spec, args), &Targets::default(), &set, None);
+        assert_eq!(decision.rule(), Rule::Never, "{}", spec.name);
+        assert!(decision.why().contains("ask the manager"), "{}: {}", spec.name, decision.why());
+    }
+}
+
+#[test]
+fn phone_cannot_start_a_bypass_session() {
+    let mut set = set();
+    set.devices.insert("phone-1".into());
+    let decision = decide(&Caller::Phone { device: "phone-1".into() }, &op(&SESSION_NEW, json!({ "mode": "bypassPermissions" })), &Targets::default(), &set, None);
+    assert_eq!(decision.rule(), Rule::Never);
+}
+
+/// The rules `glasscode whoami` lists agree with the gate: a phone reads, and nothing more.
+#[test]
+fn the_rules_list_agrees_for_a_phone() {
+    let settings = crate::control::AgentSettings::default();
+    let phone = Caller::Phone { device: "phone-1".into() };
+    assert_eq!(crate::caller::rule(&phone, Kind::Read, &settings), settings.rule(Kind::Read));
+    for kind in [Kind::Send, Kind::Start, Kind::Close, Kind::Board, Kind::Github, Kind::Settings] {
+        assert_eq!(crate::caller::rule(&phone, kind, &settings), Rule::Never, "{kind:?}");
+    }
 }
 
 #[test]

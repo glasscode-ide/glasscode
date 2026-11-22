@@ -23,36 +23,52 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/glasscode "$APP/Contents/MacOS/Glasscode"
 cp crates/glasscode/resources/Glasscode.icns "$APP/Contents/Resources/Glasscode.icns"
 
-# Glasscode's headless voice helper (Swift + ElevenLabs/LiveKit) — spawned when the moon goes
-# live. Bundle the binary into Resources and its two LiveKit frameworks into Frameworks,
-# then point the helper's rpath at them.
-echo "building glasscode-voice helper…"
-( cd voice/helper && swift build -c release )
-HELPER_BIN="voice/helper/.build/release/glasscode-voice"
+# The manager's voice helper (Swift + LiveKit): its binary into Resources, its two LiveKit
+# frameworks into Frameworks, and the helper's rpath pointed at them.
+echo "building manager-voice helper…"
+( cd voice/helper && swift build -c release --product manager-voice )
+MANAGER_VOICE_BIN="voice/helper/.build/release/manager-voice"
 HELPER_PRODUCTS="voice/helper/.build/out/Products/Release"
-if [[ -f "$HELPER_BIN" ]]; then
+if [[ -f "$MANAGER_VOICE_BIN" ]]; then
   mkdir -p "$APP/Contents/Frameworks"
   for fw in LiveKitWebRTC RustLiveKitFFI; do
     if [[ -d "$HELPER_PRODUCTS/$fw.framework" ]]; then
       cp -R "$HELPER_PRODUCTS/$fw.framework" "$APP/Contents/Frameworks/"
     else
-      echo "warning: $fw.framework missing in $HELPER_PRODUCTS; Glasscode's voice won't run" >&2
+      echo "warning: $fw.framework missing in $HELPER_PRODUCTS; the manager's voice won't run" >&2
     fi
   done
-  cp "$HELPER_BIN" "$APP/Contents/Resources/glasscode-voice"
-  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/Resources/glasscode-voice" 2>/dev/null || true
-else
-  echo "warning: glasscode-voice helper not built ($HELPER_BIN); Glasscode's voice won't run" >&2
-fi
-# The manager's voice helper (Swift + LiveKit): built by the same `swift build` above, and it
-# loads the same two frameworks.
-MANAGER_VOICE_BIN="voice/helper/.build/release/manager-voice"
-if [[ -f "$MANAGER_VOICE_BIN" && -d "$APP/Contents/Frameworks" ]]; then
   cp "$MANAGER_VOICE_BIN" "$APP/Contents/Resources/manager-voice"
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/Resources/manager-voice" 2>/dev/null || true
 else
   echo "warning: manager-voice helper not built ($MANAGER_VOICE_BIN); the manager's voice won't run" >&2
 fi
+# The voice on this Mac (Settings › Manager › Voice › On this Mac): LiveKit's server and the
+# voice worker's Python files. livekit-server: $LIVEKIT_SERVER_BIN, else one on the PATH, else
+# Homebrew's build of the version the worker is written against (fetched, not installed).
+LIVEKIT_VERSION="1.13.11"
+LIVEKIT_BIN="${LIVEKIT_SERVER_BIN:-$(command -v livekit-server || true)}"
+if [[ -z "$LIVEKIT_BIN" ]] && command -v brew >/dev/null 2>&1; then
+  if HOMEBREW_NO_AUTO_UPDATE=1 brew fetch -q livekit >/dev/null 2>&1; then
+    LIVEKIT_STAGE="target/livekit"
+    rm -rf "$LIVEKIT_STAGE" && mkdir -p "$LIVEKIT_STAGE"
+    tar -xzf "$(brew --cache livekit)" -C "$LIVEKIT_STAGE"
+    LIVEKIT_BIN="$(find "$LIVEKIT_STAGE" -type f -name livekit-server | head -1)"
+  fi
+fi
+if [[ -n "$LIVEKIT_BIN" && -x "$LIVEKIT_BIN" ]]; then
+  cp "$LIVEKIT_BIN" "$APP/Contents/Resources/livekit-server"
+  chmod 755 "$APP/Contents/Resources/livekit-server"
+  LIVEKIT_LICENSE="$(dirname "$LIVEKIT_BIN")/../LICENSE"
+  mkdir -p "$APP/Contents/Resources/licenses"
+  if [[ -f "$LIVEKIT_LICENSE" ]]; then cp "$LIVEKIT_LICENSE" "$APP/Contents/Resources/licenses/LIVEKIT-LICENSE.txt"; fi
+  echo "livekit-server: $("$LIVEKIT_BIN" --version 2>/dev/null) (written against $LIVEKIT_VERSION)"
+else
+  echo "warning: no livekit-server (brew install livekit, or LIVEKIT_SERVER_BIN=…); the voice on this Mac won't run" >&2
+fi
+mkdir -p "$APP/Contents/Resources/voice-worker"
+cp voice/manager/worker/*.py voice/manager/worker/requirements.txt "$APP/Contents/Resources/voice-worker/"
+rm -f "$APP/Contents/Resources/voice-worker/test_"*.py
 # Linux builds of the server daemon, installed on a developer's server from the Server dialog.
 # Built with Docker by script/build-glasscoded.sh; skipped (with a warning) when missing.
 if ls target/glasscoded/glasscoded-linux-* >/dev/null 2>&1; then
@@ -112,7 +128,10 @@ if [[ -d "$APP/Contents/Frameworks" ]]; then
     [[ -e "$fw" ]] && codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --sign "$SIGN_ID" "$fw"
   done
 fi
-for helper in glasscode-voice manager-voice; do
+if [[ -f "$APP/Contents/Resources/livekit-server" ]]; then
+  codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --sign "$SIGN_ID" "$APP/Contents/Resources/livekit-server"
+fi
+for helper in manager-voice; do
   if [[ -f "$APP/Contents/Resources/$helper" ]]; then
     codesign --force ${RUNTIME_FLAGS[@]+"${RUNTIME_FLAGS[@]}"} --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP/Contents/Resources/$helper"
   fi

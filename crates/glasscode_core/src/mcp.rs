@@ -52,14 +52,14 @@ impl Profile {
         }
         match self {
             Profile::Manager => true,
-            Profile::Session => !op.name.starts_with("ui.") && !matches!(op.name, "settings.set" | "session.answer" | "session.keys" | "session.mode" | "session.interrupt" | "manager.say" | "manager.tour" | "manager.show" | "manager.scene"),
+            Profile::Session => !op.name.starts_with("ui.") && !matches!(op.name, "settings.set" | "session.answer" | "session.keys" | "session.mode" | "session.interrupt" | "manager.say" | "manager.tour" | "manager.show" | "manager.scene" | "device.open"),
         }
     }
 }
 
 /// The ops Claude loads at the start of each wake (`anthropic/alwaysLoad`): what the manager
 /// needs on almost every turn. Its tool search finds the others.
-pub const ALWAYS_LOADED: &[&str] = &["ui.state", "ui.open", "session.list", "session.show", "session.read", "session.send", "board.list", "board.add", "pr.status", "pr.checks", "app.approvals", "manager.status"];
+pub const ALWAYS_LOADED: &[&str] = &["ui.state", "ui.open", "session.list", "session.show", "session.read", "session.send", "board.list", "board.add", "pr.status", "pr.checks", "app.approvals", "manager.status", "device.open"];
 
 /// The ops that can take minutes (a clone, a fetch and a worktree, a push, a question to the
 /// manager): a tool call starts them and answers with their id at once (`Request.detach`).

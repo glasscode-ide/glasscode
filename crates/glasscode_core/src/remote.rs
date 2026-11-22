@@ -379,6 +379,34 @@ pub struct TodayApproval {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_title: Option<String>,
+    /// All of what it does, as the person reads it before allowing it: the command line, or the
+    /// op's arguments (G09). The glasses allow it only when this fits on the lens.
+    #[serde(default)]
+    pub payload: String,
+    /// It leaves the Mac or removes something: allowed only where its whole payload shows (the
+    /// phone's card, or the lens when it fits), never from a popup.
+    #[serde(default)]
+    pub review: bool,
+}
+
+/// What a card does, in full, for the person to read before they allow it: the command line it came
+/// as, or else the op and its arguments, one per line (G09).
+pub fn card_payload(command: &str, op: Option<&crate::ops::Op>) -> String {
+    if !command.trim().is_empty() {
+        return command.trim().to_string();
+    }
+    let Some(op) = op else { return String::new() };
+    let mut lines = vec![op.name().to_string()];
+    if let Some(args) = op.args.as_object() {
+        for (key, value) in args {
+            let text = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            lines.push(format!("{key}: {text}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// What a phone did on Today, for the Mac to carry out (`today.op`).
@@ -404,8 +432,16 @@ pub enum TodayOp {
         key: String,
         #[serde(default)]
         sig: String,
+        /// Where the person saw it: "lens" when they allowed it on their glasses (G09), where the
+        /// Mac allows it only when the whole payload fits there ([`LENS_FITS`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shown: Option<String>,
     },
 }
+
+/// The most characters of a card's payload the glasses' lens shows whole (G09): a card allowed
+/// on the lens must fit there, so the person saw all of what they allowed.
+pub const LENS_FITS: usize = 280;
 
 /// What a phone signs to answer an approval.
 pub fn decide_message(launch: &str, approval: u64, allow: bool) -> String {
@@ -628,6 +664,10 @@ pub struct MirrorSyncReply {
     /// too, and "use the server's copy" goes on from it (crit-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_stamp: Option<crate::identity::Hlc>,
+    /// What the paired phones said their glasses do, by device (G08): the Mac's title bar shows
+    /// it while a phone talks to the server.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub presence: HashMap<String, Value>,
 }
 
 /// A window op of the server's manager, kept for the Mac (it runs in the window only).
@@ -652,6 +692,9 @@ pub struct QueuedWindowOp {
 #[serde(default)]
 pub struct ManagerFromMac {
     pub enabled: bool,
+    /// Its name, for the glasses while this server is home (G08); none from an older Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The brain's agent; none: Claude's (the only wake lane in release 1).
     pub agent: Option<crate::model::AgentKind>,
     pub model: Option<String>,
