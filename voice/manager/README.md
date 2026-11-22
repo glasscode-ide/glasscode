@@ -45,6 +45,8 @@ The room listens on this Mac (`ws://127.0.0.1:7890`) and on its Tailscale addres
 how the glasses app reaches it: a pinch on the lens joins the room, and the talk stays open
 until you swipe it away (or after two quiet minutes). Port 7890–7892, so a LiveKit of your own
 on 7880 is left alone. Logs: `~/.glasscode/voice/livekit.log`, `worker.log`, `setup.log`.
+`worker.log` has what the voice itself said and its tool calls; what you said only when the file
+`~/.glasscode/voice/log-heard` exists (make it to find out what went wrong, delete it after).
 
 The rest of this page is for running the voice on a server of your own instead.
 

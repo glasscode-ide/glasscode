@@ -420,6 +420,11 @@ fn start(plan: Plan, secrets: Secrets) -> Result<Started, String> {
     if let Some(soniox) = &soniox {
         cmd.env("SONIOX_API_KEY", soniox);
     }
+    // `~/.glasscode/voice/log-heard` (made by hand): the worker's log keeps what the person said
+    // too, to find out what went wrong. Off by default: words said near a microphone stay out of logs.
+    if dir().join("log-heard").exists() {
+        cmd.env("MANAGER_LOG_HEARD", "1");
+    }
     if let Some((stt_url, tts_url)) = soniox_urls(&v.soniox_region) {
         cmd.env("SONIOX_STT_URL", stt_url).env("SONIOX_TTS_URL", tts_url);
     }

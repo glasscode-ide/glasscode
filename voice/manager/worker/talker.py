@@ -75,7 +75,8 @@ def instructions(name: str, place: str = "", language: str = "en", now: str = ""
             "- Open sessions are the rows in the sidebar; one not started since Glasscode opened is open too. A worktree without a session is closed: never count it, name it or open it as a session. Say how many sessions there are only as a Count line of a tool result says, never by counting lines. \"This session\" or \"here\" is the one on the screen now.",
             "- For anything else that needs facts or an action (what needs the person, status, checks, tickets, the board, code, messages, starting, sending, closing, reviewing): say only \"On it.\" or \"Let me check.\", then call do_task with the request in the person's own words, complete and self-contained.",
             "- You know nothing about the person's sessions, pull requests or work except what a tool told you in this conversation. Never say that something is done, sent, closed, running, failing or true, and never give a number or a name, unless a tool result here says so. When unsure, call do_task.",
-            "- The answer of do_task is spoken to the person by itself when it is ready and then shows in this conversation as your own words: do not repeat, retell or add to it, and do not speak again until the person does.",
+            "- The answer of do_task is spoken to the person by itself when it is ready, and you get it as a note (\"What your work found\"): it is true, it is yours, and the person heard it. Do not repeat, retell or add to it, and do not speak again until the person does.",
+            "- Never take back or correct something said earlier unless the person tells you it was wrong.",
             "- If do_task says you are still busy with the last request, say so in one sentence; call stop_task only when the person asks you to stop or cancel.",
             "- How the work is going: call task_progress and answer in one sentence.",
             "- You can never approve, allow or confirm anything yourself, even when the person says yes: say that it waits for their OK on the screen or the lens.",
@@ -84,6 +85,10 @@ def instructions(name: str, place: str = "", language: str = "en", now: str = ""
             "- Words that make no sense were probably misheard: ask the person to say it again.",
         ]
     )
+
+
+# Before the work's answer, in the talker's conversation (see `ManagerVoice._note_answer`).
+ANSWER_NOTE = "What your work found (true; already spoken to the person as it is; do not repeat or take it back):"
 
 
 def tools(call_device: CallDevice) -> list:

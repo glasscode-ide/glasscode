@@ -336,15 +336,30 @@ class ManagerVoice:
             log.debug("thinking ahead cannot be switched in this version")
 
     async def _seed(self, turns: list[tuple[str, str]]) -> None:
-        """Put the conversation's last turns into the talker's history."""
+        """Put the conversation's last turns into the talker's history. The manager's answers go
+        in as notes of what the work found (as `_note_answer`), not as the talker's own words."""
         try:
             ctx = self.agent.chat_ctx.copy()
             for role, text in turns:
-                ctx.add_message(role=role, content=text)
+                if role == "assistant":
+                    ctx.add_message(role="system", content=f"{talker.ANSWER_NOTE} {text}")
+                else:
+                    ctx.add_message(role=role, content=text)
             await self.agent.update_chat_ctx(ctx)
             log.info("the talk carries on from %d turns of the conversation", len(turns))
         except Exception:
             log.exception("could not give the talker the conversation so far")
+
+    async def _note_answer(self, text: str) -> None:
+        """Tell the talker what its work found, as a fact and not as its own words."""
+        if self.agent is None:
+            return
+        try:
+            context = self.agent.chat_ctx.copy()
+            context.add_message(role="system", content=f"{talker.ANSWER_NOTE} {text}")
+            await self.agent.update_chat_ctx(context)
+        except Exception:
+            log.exception("could not tell the talker what the work found")
 
     async def call_device(self, name: str, arguments: dict) -> str:
         """Run one of the talker's tools on the client that is listened to, and wait for it."""
@@ -558,18 +573,20 @@ class ManagerVoice:
         talking = self._talker_on()
         if talking:
             # Spoken as the manager wrote it (it writes for the ear when asked by voice): a
-            # retelling by the talker added guesses of its own. It goes into the talker's
-            # conversation, so "and the second one?" makes sense, but not into the captions again.
+            # retelling by the talker added guesses of its own. The talker learns it as a note
+            # of what its work found (`_note_answer`), not as words of its own: as its own words,
+            # with no tool result behind them, it took them for made up and "corrected" them.
             self.said_texts = (self.said_texts + [text])[-20:]
+            self._spawn(self._note_answer(text))
         try:
-            handle = self.session.say(text, add_to_chat_ctx=talking)
+            handle = self.session.say(text, add_to_chat_ctx=False)
         except RuntimeError as error:
             log.warning("cannot speak: %s", error)
             self._publish_state()
             return
         self.speeches.append((handle, say_id, text))
         handle.add_done_callback(self._on_spoken)
-        log.info("speaking %s (%d characters)", say_id or "an answer", len(text))
+        log.info("speaking %s (%d characters): %s", say_id or "an answer", len(text), text[:400].replace("\n", " / "))
         self._publish_state()
 
     def _on_spoken(self, handle) -> None:
