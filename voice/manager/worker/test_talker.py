@@ -4,7 +4,7 @@
 import asyncio
 import unittest
 
-from talker import instructions, tools
+from talker import instructions, recent_turns, tools
 
 
 def tool(found, name):
@@ -46,6 +46,21 @@ class Rules(unittest.TestCase):
         self.assertIn("call list_sessions with search set to the person's own words", text)
         self.assertIn("A worktree without a session is closed", text)
         self.assertIn("only as a Count line of a tool result says", text)
+
+
+class WhereAndWhatWasSaid(unittest.TestCase):
+    def test_the_place_on_the_screen_is_in_the_instructions(self):
+        text = instructions("glasscode", "mac", now="On the Mac's screen now: Session · glasscode: \"Voice\" (working), id s1.")
+        self.assertIn("Where the person is: On the Mac's screen now: Session · glasscode", text)
+        self.assertNotIn("Where the person is", instructions("glasscode", "mac"))
+
+    def test_a_talk_carries_on_from_the_last_turns(self):
+        recent = [{"who": "person", "text": "open the voice session"}, {"who": "manager", "text": "It is open.\nIt works."}, {"who": "robot", "text": "x"}, "junk", {"who": "person", "text": "  "}]
+        self.assertEqual(recent_turns(recent), [("user", "open the voice session"), ("assistant", "It is open. It works.")])
+        many = [{"who": "person", "text": f"turn {i}"} for i in range(20)]
+        self.assertEqual(len(recent_turns(many)), 8)
+        self.assertEqual(recent_turns(many)[-1], ("user", "turn 19"))
+        self.assertEqual(recent_turns(None), [])
 
 
 if __name__ == "__main__":

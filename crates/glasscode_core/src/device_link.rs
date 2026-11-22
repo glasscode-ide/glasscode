@@ -303,6 +303,9 @@ pub mod events {
     pub const TODAY: &str = "today";
     /// Where the manager is home changed: `manager.home`'s answer.
     pub const HOME: &str = "manager.home";
+    /// The place the Mac's window shows, or what it shows there, changed: its lens page
+    /// (`lens::Page`). The lens shows the same place as the Mac (`docs/lens-everywhere.md`).
+    pub const PLACE: &str = "place";
 }
 
 /// An event as one line.

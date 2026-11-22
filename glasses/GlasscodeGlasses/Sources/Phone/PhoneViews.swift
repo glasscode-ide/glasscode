@@ -2,8 +2,20 @@ import AVFoundation
 import MWDATCore
 import SwiftUI
 
-/// The phone's own screen (G14): the place for long text, the conversation in full, sessions,
-/// cards and settings. The glasses are the place for everything else.
+/// The look the lens and the phone share (`LensPalette`, `docs/lens-everywhere.md`).
+private enum Look {
+    static let ground = Color(uiColor: LensPalette.ground)
+    static let panel = Color(uiColor: LensPalette.panel)
+    static let text = Color(uiColor: LensPalette.text)
+    static let soft = Color(uiColor: LensPalette.soft)
+    static let mint = Color(uiColor: LensPalette.color(.ok))
+    static func tone(_ tone: LensModel.Tone) -> Color { Color(uiColor: LensPalette.color(tone)) }
+}
+
+/// The phone's screen (G14, `docs/lens-everywhere.md`): one view, edge to edge. On top who is
+/// connected; in the middle the place the Mac's window shows, as the lens shows it but with the
+/// room a phone has (a row opens on the Mac and the lens together); the places to go to; and a
+/// big talk button. Pairing and settings are sheets.
 struct HomeView: View {
     @ObservedObject var app: AppModel
     @ObservedObject var link: ManagerLink
@@ -11,166 +23,141 @@ struct HomeView: View {
     @StateObject private var registration = Registration()
     @State private var pairing = false
     @State private var settings = false
-    @State private var openSession: String?
+    @State private var talk = false
+    @State private var terminal: String?
     @Environment(\.scenePhase) private var scenePhase
 
-    private let gold = Color(red: 0.95, green: 0.85, blue: 0.54)
-
     var body: some View {
-        NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                if link.status == .unpaired {
-                    welcome
-                } else {
-                    content
-                }
-            }
-            .navigationTitle(link.home?.name ?? "Glasscode")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { settings = true } label: { Image(systemName: "gearshape") }
-                }
-            }
-            .sheet(isPresented: $pairing) { PairView(link: link, done: { pairing = false; app.start() }) }
-            .sheet(isPresented: $settings) { SettingsView(app: app, link: link, glasses: glasses, registration: registration) }
-            .navigationDestination(item: $openSession) { id in SessionView(app: app, link: link, id: id) }
+        ZStack {
+            backdrop
+            if link.status == .unpaired { welcome } else { content }
         }
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $pairing) { PairView(link: link, done: { pairing = false; app.start() }) }
+        .sheet(isPresented: $settings) { SettingsView(app: app, link: link, glasses: glasses, registration: registration) }
+        .sheet(isPresented: $talk) { ConversationView(app: app) }
+        .sheet(item: $terminal) { id in NavigationStack { SessionView(app: app, link: link, id: id) } }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { link.nudge(); glasses.resume() }
         }
     }
 
+    /// Near black, with the place's colour glowing in from the top.
+    private var backdrop: some View {
+        ZStack {
+            Look.ground
+            RadialGradient(colors: [Look.tone(app.place?.tone ?? .ok).opacity(0.22), .clear], center: .top, startRadius: 10, endRadius: 520)
+        }
+        .ignoresSafeArea()
+        .animation(.easeInOut(duration: 0.6), value: app.place?.tone)
+    }
+
     private var welcome: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "eyeglasses").font(.system(size: 56)).foregroundStyle(gold)
-            Text("Talk to your manager from your glasses").font(.title2.weight(.semibold)).multilineTextAlignment(.center)
-            Text("On your Mac, open Glasscode › Settings › Glasses and choose Pair glasses. Then scan the code here. Your phone and your Mac need Tailscale.")
-                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Button("Pair with my Mac") { pairing = true }.buttonStyle(.borderedProminent).tint(gold).foregroundStyle(.black)
+        VStack(spacing: 22) {
+            Orb(tone: .ok, active: true).frame(width: 120, height: 120)
+            Text("Your manager, on your glasses").font(.system(.title, design: .rounded).weight(.semibold)).foregroundStyle(Look.text).multilineTextAlignment(.center)
+            Text("On your Mac: Glasscode › Settings › Glasses › Pair glasses, then scan its code here. The phone and the Mac need Tailscale.")
+                .font(.callout).foregroundStyle(Look.soft).multilineTextAlignment(.center)
+            Button { pairing = true } label: { Text("Pair with my Mac").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 14) }
+                .background(Look.mint, in: Capsule()).foregroundStyle(.black)
         }
         .padding(28)
     }
 
     private var content: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                status
-                lensMirror
-                talkButton
-                if !app.writing.isEmpty {
-                    Text(app.writing).font(.body).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        VStack(spacing: 0) {
+            topBar.padding(.horizontal, 16).padding(.top, 4)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    live
+                    approvals
+                    if let page = app.place { PageView(page: page, open: { place in Task { await app.openPlace(place) } }, terminal: page.kind == "session" ? { terminal = page.place } : nil) }
+                    else { PageView(page: LensPage(kind: "today", place: "today", eyebrow: link.paired?.mac.name ?? "Mac", title: link.status == .connected ? "Looking at your Mac…" : "Not connected", body: link.status == .connected ? "" : "The phone reaches your Mac over Tailscale."), open: { _ in }, terminal: nil) }
                 }
-                cards
-                sessionsList
-                conversationList
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 24)
             }
-            .padding(16)
+            .refreshable { await app.refresh() }
+            places
+            talkBar
         }
-        .refreshable { await app.refresh() }
     }
 
-    private var status: some View {
+    // MARK: parts
+
+    private var topBar: some View {
         HStack(spacing: 10) {
-            dot(link.macConnected ? .green : .gray)
-            Text(link.paired?.mac.name ?? "Mac").font(.footnote)
-            if link.paired?.server != nil {
-                dot(link.serverConnected ? .green : .gray)
-                Text(link.paired?.server?.name ?? "Server").font(.footnote)
+            Orb(tone: app.place?.tone ?? .plain, active: link.status == .connected).frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(link.home?.name ?? "Glasscode").font(.system(.headline, design: .rounded)).foregroundStyle(Look.text)
+                Text(statusLine).font(.caption2).foregroundStyle(Look.soft)
             }
             Spacer()
-            dot(glasses.isConnected ? .green : .orange)
-            Text(glasses.isConnected ? "Glasses on" : "Glasses off").font(.footnote)
+            chip(link.macConnected ? "Mac" : "Mac off", on: link.macConnected)
+            chip(glasses.isConnected ? "Glasses" : "No glasses", on: glasses.isConnected)
+            Button { settings = true } label: { Image(systemName: "slider.horizontal.3").font(.body.weight(.semibold)).foregroundStyle(Look.soft).frame(width: 34, height: 34) }
         }
-        .foregroundStyle(.secondary)
     }
 
-    private func dot(_ color: Color) -> some View {
-        Circle().fill(color).frame(width: 8, height: 8)
+    private var statusLine: String {
+        switch link.status {
+        case .connected: return link.home?.place == .server ? "On the server" : "On \(link.paired?.mac.name ?? "your Mac")"
+        case .connecting: return "Connecting…"
+        case .unpaired: return "Not paired"
+        case .unreachable: return "Can't reach your Mac"
+        }
     }
 
-    /// What the lens shows, as words, with the band's moves for when there is no band.
-    private var lensMirror: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(lensTitle).font(.headline).foregroundStyle(gold)
-            Text(lensBody).font(.callout).foregroundStyle(.secondary).lineLimit(6)
-            HStack(spacing: 10) {
-                pad("chevron.up") { app.band(.up) }
-                pad("chevron.down") { app.band(.down) }
-                pad("chevron.left") { app.band(.left) }
-                pad("chevron.right") { app.band(.right) }
-                Spacer()
-                pad("hand.pinch") { app.band(.select) }
+    private func chip(_ label: String, on: Bool) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(on ? Look.mint : Look.soft.opacity(0.5)).frame(width: 6, height: 6).shadow(color: on ? Look.mint : .clear, radius: 3)
+            Text(label).font(.caption2.weight(.medium)).foregroundStyle(on ? Look.text : Look.soft)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(Look.panel.opacity(0.8), in: Capsule())
+        .overlay(Capsule().stroke(Look.soft.opacity(0.18), lineWidth: 1))
+    }
+
+    /// What the lens says over the page right now: listening, thinking, the answer.
+    @ViewBuilder private var live: some View {
+        let words: (String, String)? = {
+            switch app.lens.card {
+            case .listening(let heard): return ("Listening", heard.isEmpty ? "Say what you want…" : heard)
+            case .working(let lines): return ("Thinking", lines.last ?? "")
+            case .answer(let text, _): return ("Answer", text)
+            case .note(let title, let body, _, _): return (title, body)
+            case .message(let title, let body): return (title, body)
+            default: return nil
             }
-        }
-        .padding(14)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private func pad(_ symbol: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).frame(width: 36, height: 30) }.buttonStyle(.bordered)
-    }
-
-    private var lensTitle: String {
-        switch app.lens.card {
-        case .glance: return "\(app.lens.glance.name) · \(app.lens.glance.place)"
-        case .listening: return "Listening"
-        case .working: return "Thinking"
-        case .answer: return "Answer"
-        case .session(let s): return s.title
-        case .pr(let pr): return "Pull request #\(pr.number)"
-        case .points(let title, _, _): return title
-        case .approval(let a): return a.what
-        case .question(let q): return "\(q.title) asks"
-        case .note(let title, _, _, _): return title
-        case .message(let title, _): return title
+        }()
+        if !app.writing.isEmpty || words != nil {
+            VStack(alignment: .leading, spacing: 6) {
+                Text((words?.0 ?? "Answer").uppercased()).font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(Look.tone(.busy))
+                Text(app.writing.isEmpty ? (words?.1 ?? "") : app.writing).font(.body).foregroundStyle(Look.text)
+            }
+            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Look.panel.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Look.tone(.busy).opacity(0.35), lineWidth: 1))
         }
     }
 
-    private var lensBody: String {
-        switch app.lens.card {
-        case .glance: return app.lens.glance.line
-        case .listening(let heard): return heard.isEmpty ? "Say what you want…" : heard
-        case .working(let lines): return lines.joined(separator: "\n")
-        case .answer(let text, _): return text
-        case .session(let s): return s.question.map { "Asks: \($0)" } ?? s.lastReply
-        case .pr(let pr): return pr.state
-        case .points(_, let points, let at): return points.indices.contains(at) ? points[at] : ""
-        case .approval(let a): return a.payload
-        case .question(let q): return q.question
-        case .note(_, let body, _, _): return body
-        case .message(_, let body): return body
-        }
-    }
-
-    private var talkButton: some View {
-        Button {
-            if app.turn.isListening { app.band(.select) } else { app.talk() }
-        } label: {
-            Label(app.turn.isListening ? "Send" : "Talk to \(link.home?.name ?? "the manager")", systemImage: app.turn.isListening ? "paperplane.fill" : "mic.fill")
-                .frame(maxWidth: .infinity).padding(.vertical, 6)
-        }
-        .buttonStyle(.borderedProminent).tint(gold).foregroundStyle(.black)
-        .disabled(link.status != .connected)
-    }
-
-    @ViewBuilder private var cards: some View {
-        let approvals = app.today?.array("approvals") ?? []
-        if !approvals.isEmpty {
-            section("Needs your OK")
-            ForEach(Array(approvals.enumerated()), id: \.offset) { _, a in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(a.string("what") ?? "").font(.subheadline.weight(.semibold))
-                    Text(a.string("payload").flatMap { $0.isEmpty ? nil : $0 } ?? a.string("command") ?? "").font(.footnote.monospaced()).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Allow") { decide(a, true) }.buttonStyle(.borderedProminent).tint(.green)
-                        Button("Deny") { decide(a, false) }.buttonStyle(.bordered)
-                    }
+    @ViewBuilder private var approvals: some View {
+        ForEach(Array((app.today?.array("approvals") ?? []).enumerated()), id: \.offset) { _, a in
+            VStack(alignment: .leading, spacing: 10) {
+                Text("NEEDS YOUR OK").font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(Look.tone(.warn))
+                Text(a.string("what") ?? "").font(.headline).foregroundStyle(Look.text)
+                Text(a.string("payload").flatMap { $0.isEmpty ? nil : $0 } ?? a.string("command") ?? "").font(.footnote.monospaced()).foregroundStyle(Look.soft)
+                HStack(spacing: 10) {
+                    Button { decide(a, true) } label: { Text("Allow").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 10) }
+                        .background(Look.mint, in: Capsule()).foregroundStyle(.black)
+                    Button { decide(a, false) } label: { Text("Deny").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 10) }
+                        .overlay(Capsule().stroke(Look.soft.opacity(0.5), lineWidth: 1)).foregroundStyle(Look.text)
                 }
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Look.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Look.tone(.warn).opacity(0.45), lineWidth: 1))
         }
     }
 
@@ -180,50 +167,183 @@ struct HomeView: View {
         Task { try? await link.decide(approval: id, allow: allow, launch: launch, shown: "phone"); await app.refresh() }
     }
 
-    @ViewBuilder private var sessionsList: some View {
-        if !app.sessions.isEmpty {
-            section("Sessions")
-            ForEach(Array(app.sessions.prefix(12).enumerated()), id: \.offset) { _, entry in
-                if let session = entry.object("session"), let id = session.string("id") {
-                    Button { openSession = id } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(session.string("title") ?? "Session").font(.subheadline)
-                                Text(session.string("branch") ?? "").font(.caption.monospaced()).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if entry.object("prompt") != nil { Text("Asks").font(.caption).foregroundStyle(.orange) }
-                            else if entry.string("activity") == "working" { Text("Working").font(.caption).foregroundStyle(.secondary) }
-                        }
+    /// The places to go to: each opens on the Mac and the lens together.
+    private var places: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach([("Today", "today", "sun.max"), ("Sessions", "sessions", "rectangle.stack"), ("Tickets", "tickets", "checklist"), ("Pull requests", "pull-requests", "arrow.triangle.pull"), ("Usage", "usage", "gauge.with.dots.needle.33percent")], id: \.1) { label, place, symbol in
+                    let here = app.place?.place == place
+                    Button { Task { await app.openPlace(place) } } label: {
+                        Label(label, systemImage: symbol).font(.footnote.weight(.semibold)).padding(.horizontal, 12).padding(.vertical, 8)
+                            .foregroundStyle(here ? .black : Look.text)
+                            .background(here ? AnyShapeStyle(Look.mint) : AnyShapeStyle(Look.panel), in: Capsule())
+                            .overlay(Capsule().stroke(Look.soft.opacity(here ? 0 : 0.2), lineWidth: 1))
                     }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 4)
+                    .disabled(!link.macConnected)
                 }
             }
+            .padding(.horizontal, 16)
         }
+        .padding(.vertical, 8)
     }
 
-    @ViewBuilder private var conversationList: some View {
-        if !app.conversation.isEmpty {
-            section("Conversation")
-            ForEach(Array(app.conversation.suffix(20).enumerated()), id: \.offset) { _, item in
-                let mine = (item["author"] as? String) == "person"
-                Text(item.string("text") ?? "")
-                    .font(.callout)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
-                    .background((mine ? gold.opacity(0.18) : Color.white.opacity(0.06)), in: RoundedRectangle(cornerRadius: 10))
+    /// The talk button, and the band's moves for when there is no band.
+    private var talkBar: some View {
+        HStack(spacing: 14) {
+            pad("chevron.left") { app.band(.left) }
+            pad("chevron.up") { app.band(.up) }
+            Button {
+                if app.turn.isListening { app.band(.select) } else { app.talk() }
+            } label: {
+                ZStack {
+                    Orb(tone: app.turn.isListening ? .busy : .ok, active: app.turn.isListening).frame(width: 74, height: 74)
+                    Image(systemName: app.turn.isListening ? "waveform" : "mic.fill").font(.title2.weight(.semibold)).foregroundStyle(.black)
+                }
             }
+            .disabled(link.status != .connected)
+            pad("chevron.down") { app.band(.down) }
+            pad("chevron.right") { app.band(.right) }
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .topTrailing) {
+            Button { talk = true } label: { Image(systemName: "text.bubble").font(.body.weight(.semibold)).foregroundStyle(Look.soft).frame(width: 40, height: 40) }
+                .padding(.trailing, 12)
         }
     }
 
-    private func section(_ title: String) -> some View {
-        Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
+    private func pad(_ symbol: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.body.weight(.semibold)).foregroundStyle(Look.text).frame(width: 44, height: 44)
+                .background(Look.panel, in: Circle()).overlay(Circle().stroke(Look.soft.opacity(0.2), lineWidth: 1))
+        }
     }
 }
 
-/// One session: its last reply, its question with the options a phone may pick, and its
-/// terminal, view only.
+/// A place's page, with the room a phone has: what the lens shows, larger, every row at once.
+struct PageView: View {
+    let page: LensPage
+    let open: (String) -> Void
+    /// A session's terminal, view only.
+    let terminal: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text(page.eyebrow.isEmpty ? page.kind.capitalized : page.eyebrow).font(.caption.weight(.semibold)).tracking(0.8).foregroundStyle(Look.soft)
+                Spacer()
+                if !page.status.isEmpty {
+                    Text(page.status).font(.caption.weight(.bold)).foregroundStyle(Look.tone(page.tone))
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Look.tone(page.tone).opacity(0.14), in: Capsule())
+                        .overlay(Capsule().stroke(Look.tone(page.tone).opacity(0.5), lineWidth: 1))
+                }
+            }
+            Text(page.title).font(.system(.title2, design: .rounded).weight(.bold)).foregroundStyle(Look.text)
+            if let meter = page.meter {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Look.soft.opacity(0.2))
+                        Capsule().fill(Look.tone(page.tone)).frame(width: max(8, geo.size.width * meter.value)).shadow(color: Look.tone(page.tone).opacity(0.8), radius: 6)
+                    }
+                }
+                .frame(height: 8)
+                Text(meter.label).font(.footnote).foregroundStyle(Look.soft)
+            } else {
+                LinearGradient(colors: [Look.tone(page.tone), Look.tone(page.tone).opacity(0)], startPoint: .leading, endPoint: .trailing).frame(height: 2)
+            }
+            if !page.body.isEmpty {
+                Text(page.body).font(.callout).foregroundStyle(Look.text.opacity(0.85)).textSelection(.enabled)
+            }
+            if let terminal {
+                Button(action: terminal) { Label("Terminal and message", systemImage: "terminal").font(.footnote.weight(.semibold)).foregroundStyle(Look.tone(.busy)) }
+            }
+            VStack(spacing: 8) {
+                ForEach(Array(page.items.enumerated()), id: \.offset) { _, item in
+                    Button { if let place = item.open { open(place) } } label: { row(item) }
+                        .buttonStyle(.plain)
+                        .allowsHitTesting(item.open != nil)
+                }
+            }
+            if page.total > page.items.count {
+                Text("\(page.total - page.items.count) more on the Mac").font(.footnote).foregroundStyle(Look.soft)
+            }
+            HStack {
+                if let prev = page.prev { Button { open(prev) } label: { Label("Previous", systemImage: "chevron.up") } }
+                Spacer()
+                if let next = page.next { Button { open(next) } label: { Label("Next", systemImage: "chevron.down") } }
+            }
+            .font(.footnote.weight(.semibold)).foregroundStyle(Look.mint)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Look.panel.opacity(0.92), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(LinearGradient(colors: [Look.tone(page.tone).opacity(0.6), Look.soft.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
+    }
+
+    private func row(_ item: LensPage.Item) -> some View {
+        HStack(spacing: 12) {
+            Circle().fill(Look.tone(item.tone)).frame(width: 9, height: 9).shadow(color: Look.tone(item.tone).opacity(item.tone == .plain ? 0 : 0.9), radius: 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.subheadline.weight(.semibold)).foregroundStyle(Look.text).lineLimit(2)
+                if !item.detail.isEmpty { Text(item.detail).font(.caption).foregroundStyle(Look.soft).lineLimit(2) }
+            }
+            Spacer(minLength: 0)
+            if item.open != nil { Image(systemName: "chevron.right").font(.caption.weight(.bold)).foregroundStyle(Look.soft) }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Look.ground.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+/// The status orb, as on the lens: a bright core in a halo, breathing while it is active.
+struct Orb: View {
+    let tone: LensModel.Tone
+    let active: Bool
+    @State private var breathe = false
+
+    var body: some View {
+        let color = Look.tone(tone)
+        ZStack {
+            Circle().fill(RadialGradient(colors: [color.opacity(0.55), color.opacity(0)], center: .center, startRadius: 2, endRadius: 60)).scaleEffect(breathe ? 1.12 : 0.92)
+            Circle().stroke(color, lineWidth: 2).padding(6)
+            Circle().fill(color).padding(14).shadow(color: color, radius: 8)
+        }
+        .onAppear { if active { withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { breathe = true } } }
+        .onChange(of: active) { _, on in withAnimation(on ? .easeInOut(duration: 1.6).repeatForever(autoreverses: true) : .default) { breathe = on } }
+    }
+}
+
+/// The conversation with the manager, in full.
+struct ConversationView: View {
+    @ObservedObject var app: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 10) {
+                ForEach(Array(app.conversation.suffix(60).enumerated()), id: \.offset) { _, item in
+                    let mine = (item["author"] as? String) == "person"
+                    Text(item.string("text") ?? "")
+                        .font(.callout).foregroundStyle(Look.text)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
+                        .background((mine ? Look.mint.opacity(0.16) : Look.panel), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+            .padding(16)
+        }
+        .background(Look.ground.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .presentationDragIndicator(.visible)
+    }
+}
+
+extension String: @retroactive Identifiable {
+    public var id: String { self }
+}
+
+/// One session: its last reply, its question, a message to it, and its terminal, view only.
 struct SessionView: View {
     @ObservedObject var app: AppModel
     @ObservedObject var link: ManagerLink
@@ -236,11 +356,9 @@ struct SessionView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let card {
-                    Text(card.state).font(.footnote).foregroundStyle(.secondary)
-                    if let question = card.question {
-                        Text("Asks: \(question)").font(.headline)
-                    }
-                    if !card.lastReply.isEmpty { Text(card.lastReply).font(.callout) }
+                    Text(card.state.uppercased()).font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(Look.tone(card.tone))
+                    if let question = card.question { Text("Asks: \(question)").font(.headline).foregroundStyle(Look.text) }
+                    if !card.lastReply.isEmpty { Text(card.lastReply).font(.callout).foregroundStyle(Look.text.opacity(0.85)) }
                 }
                 HStack {
                     TextField("Say something to this session", text: $message).textFieldStyle(.roundedBorder)
@@ -248,15 +366,18 @@ struct SessionView: View {
                         let text = message
                         message = ""
                         Task { try? await link.send(session: id, text: text) }
-                    }.disabled(message.isEmpty)
+                    }
+                    .disabled(message.isEmpty)
                 }
-                Text("TERMINAL · VIEW ONLY").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(screen.isEmpty ? "…" : screen).font(.caption2.monospaced()).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                Text("TERMINAL · VIEW ONLY").font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(Look.soft)
+                Text(screen.isEmpty ? "…" : screen).font(.caption2.monospaced()).foregroundStyle(Look.text).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10).background(Look.panel, in: RoundedRectangle(cornerRadius: 10))
             }
             .padding(16)
         }
+        .background(Look.ground.ignoresSafeArea())
         .navigationTitle(card?.title ?? "Session")
+        .preferredColorScheme(.dark)
         .task {
             while !Task.isCancelled {
                 screen = await link.peek(id)

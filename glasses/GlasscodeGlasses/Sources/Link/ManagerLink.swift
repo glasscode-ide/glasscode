@@ -273,6 +273,27 @@ final class ManagerLink: ObservableObject {
         return json.array("items")
     }
 
+    // MARK: - one place everywhere (docs/lens-everywhere.md)
+
+    /// Open a place on the Mac (its window goes there, and every lens follows): its page.
+    func openPlace(_ place: String) async throws -> JSON {
+        guard let mac else { throw LinkError(text: "The Mac is not connected, so nothing opens on it now.") }
+        guard let json = try await mac.call("place.open", ["place": place], timeout: 15) as? JSON else { throw LinkError(text: "The Mac did not answer with the place.") }
+        return json
+    }
+
+    /// The page of a place (the Mac's window's when `place` is empty), without moving the window.
+    func placePage(_ place: String = "") async -> JSON? {
+        try? await mac?.call("place.get", ["place": place], timeout: 10) as? JSON
+    }
+
+    /// One of the voice's tools, answered by the Mac as its own voice answers it (`voice.tool`).
+    /// Nil: the Mac is not connected, or does not know it (then the phone answers itself).
+    func voiceTool(_ name: String, _ arguments: JSON) async -> String? {
+        guard let mac, let json = try? await mac.call("voice.tool", ["name": name, "arguments": arguments], timeout: 15) as? JSON else { return nil }
+        return json.string("text")
+    }
+
     // MARK: - sessions, Today, approvals
 
     /// Sessions: the Mac's own when it answers, else the server's (with the Mac's it mirrors).
