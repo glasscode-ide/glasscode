@@ -31,6 +31,8 @@ pub struct Platform {
     pub serif_font: &'static str,
     /// See `chat_status_fixes`.
     pub chat_status_fixes: bool,
+    /// See `codex_turns`.
+    pub codex_turns: bool,
     /// See `removal_needs_free_folder`.
     pub removal_needs_free_folder: bool,
 }
@@ -57,6 +59,7 @@ pub const MAC: Platform = Platform {
     // Off by the owner's rule: macOS behaves as before the Windows port until the owner turns
     // these on here.
     chat_status_fixes: false,
+    codex_turns: true,
     // macOS deletes a folder that a program works in, and behaves as before the Windows port.
     removal_needs_free_folder: false,
 };
@@ -89,6 +92,7 @@ pub const WINDOWS: Platform = Platform {
     ],
     serif_font: "Georgia",
     chat_status_fixes: true,
+    codex_turns: true,
     removal_needs_free_folder: true,
 };
 
@@ -105,6 +109,14 @@ const _: () = assert!(!MAC.chat_status_fixes, "the chat status fixes stay off on
 /// for Windows (`cfg!(windows)`); off on macOS, by the owner's rule, until the owner turns it on.
 pub fn chat_status_fixes() -> bool {
     THIS.chat_status_fixes
+}
+
+/// Whether a Codex session's activity comes from the turns in its rollout (working while a turn
+/// runs, idle once it ended), as Claude's comes from its hooks: its finishes are reported as
+/// Claude's are (`finish_ui`). One of the Windows port's chat status fixes, which the owner turned
+/// on for macOS too (2026-11-22); the other two stay behind `chat_status_fixes`.
+pub fn codex_turns() -> bool {
+    THIS.codex_turns
 }
 
 /// Whether `glasscode worktree remove` refuses a worktree in which a program from outside

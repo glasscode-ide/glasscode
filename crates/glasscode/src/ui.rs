@@ -315,7 +315,8 @@ fn meter_fill(fraction: f32) -> f32 {
     if fraction.is_nan() { 0. } else { fraction.clamp(0., 1.) }
 }
 
-/// A session's state as a dot: orange when it needs you, green while it works, grey when idle.
+/// A session's state as a dot: orange when it needs you, green while it works, blue when it
+/// finished and you have not looked yet, grey when idle.
 /// `done` draws an empty ring instead.
 ///
 /// The green dot stands still (the owner, 2026-11-17): a pulse is a GPUI animation, which draws
@@ -328,6 +329,7 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
     match state {
         RowState::NeedsYou => dot.bg(theme::attention()).into_any_element(),
         RowState::Working => dot.bg(theme::added()).into_any_element(),
+        RowState::Finished => dot.bg(theme::link()).into_any_element(),
         RowState::Idle => dot.bg(theme::border_strong()).into_any_element(),
     }
 }

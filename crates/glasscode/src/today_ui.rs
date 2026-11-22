@@ -783,7 +783,13 @@ impl Workspace {
             if self.row_state(s) == crate::sidebar::RowState::NeedsYou && self.control.pending_for(&s.id).is_empty() {
                 out.push(NeedRow {
                     title: self.session_title(s),
-                    what: format!("{} is waiting for your answer", s.agent.name()),
+                    // Its question, when its last turn ended on one (`finish_ui`).
+                    what: self
+                        .finishes
+                        .report(&s.id)
+                        .filter(|r| r.finish.outcome == glasscode_core::finish::Outcome::NeedsYou && !r.finish.question.is_empty())
+                        .map(|r| r.finish.question.clone())
+                        .unwrap_or_else(|| format!("{} is waiting for your answer", s.agent.name())),
                     color: crate::sidebar::attention(),
                     agent: Some(s.agent),
                     failing: false,

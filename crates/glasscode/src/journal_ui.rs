@@ -845,7 +845,8 @@ impl Workspace {
         }
         // The lines are the turns' too (`journal_turn_hooks`), read as they come in the tick.
         let key = self.journal_key(id);
-        let events = self.journal.intakes.entry(id.to_string()).or_default().events(id, key.as_ref(), lines);
+        // The app's intake: it reports finishes itself, so Claude's idle reminder is no wait.
+        let events = self.journal.intakes.entry(id.to_string()).or_insert_with(HookIntake::reporting_finishes).events(id, key.as_ref(), lines);
         for event in events {
             self.journal_note(event);
         }

@@ -24,6 +24,7 @@ pub mod device_link;
 pub mod discover;
 pub mod effects;
 pub mod env;
+pub mod finish;
 pub mod gate;
 pub mod git;
 pub mod git_info;

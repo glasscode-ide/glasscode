@@ -288,6 +288,7 @@ impl Workspace {
                     let dot = match self.row_state(s) {
                         sidebar::RowState::NeedsYou => ui::dot(theme::attention()),
                         sidebar::RowState::Working => ui::dot(theme::added()),
+                        sidebar::RowState::Finished => ui::dot(theme::link()),
                         sidebar::RowState::Idle => ui::dot(theme::border_strong()),
                     };
                     (sidebar::agent_icon(s.agent, 14., self.terminals.contains_key(id)).into_any_element(), self.session_title(s), dot.into_any_element(), Some(close), TAB_MIN)

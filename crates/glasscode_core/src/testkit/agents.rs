@@ -1534,6 +1534,10 @@ mod scripts {
         // The second turn ended on a question, and Claude said it waits (Glasscode's settings have
         // no SessionEnd hook).
         assert_eq!(update.activity, Some(crate::agents::AgentActivity::NeedsInput));
+        // The app's reading of the same lines: the idle reminder a minute after the turn is no
+        // wait (the app tells the finish itself, `finish_ui`), and the turn's end is what is left.
+        let app = crate::agents::EventsTail::resume(&session.id, Some(0)).reporting_finishes().poll().expect("the same lines");
+        assert_eq!(app.activity, Some(crate::agents::AgentActivity::Idle));
         let transcript = update.transcript_path.unwrap();
         assert_eq!(crate::agents::find_claude_transcript(&home.claude_config_dir(), "00000000-0000-4000-8000-0000000000e1"), Some(transcript.clone()));
         let page = crate::transcript::read(AgentKind::Claude, &transcript, None, 100).unwrap();

@@ -839,6 +839,12 @@ const HOOK_FIELDS: [&str; 15] = ["hook_event_name", "session_id", "source", "not
 /// A session's hook lines as events: each line itself (`session.hook`), and what it says about
 /// the session (started, needs input, ended). Turns are M30's.
 pub fn hook_events(session: &str, project: Option<&ProjectKey>, payload: &Value) -> Vec<Event> {
+    hook_events_as(session, project, payload, true)
+}
+
+/// [`hook_events`], with Claude Code's idle reminder (`idle_prompt`) a "needs input" event only
+/// where `idle_waits`: the app reports each finished turn itself (`session.finished`), at once.
+pub fn hook_events_as(session: &str, project: Option<&ProjectKey>, payload: &Value, idle_waits: bool) -> Vec<Event> {
     let name = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or("unknown");
     let mut kept = serde_json::Map::new();
     for field in HOOK_FIELDS {
@@ -856,8 +862,9 @@ pub fn hook_events(session: &str, project: Option<&ProjectKey>, payload: &Value)
         "SessionStart" => out.push(Event::new(kinds::SESSION_STARTED, Source::Hook, format!("session started ({})", text("source"))).data(json!({ "source": text("source") }))),
         "Notification" => {
             let kind = text("notification_type");
-            // Kinds that are news, not a wait: a sign-in that worked, an agent that finished.
-            if !matches!(kind.as_str(), "auth_success" | "agent_completed") {
+            // Kinds that are news, not a wait: a sign-in that worked, an agent that finished (and,
+            // where the app reports finishes, the idle reminder).
+            if crate::agents::notification_waits(Some(kind.as_str()), idle_waits) {
                 let message = text("message");
                 let summary = if message.is_empty() { "needs you".to_string() } else { message.clone() };
                 out.push(Event::new(kinds::SESSION_NEEDS_INPUT, Source::Hook, summary).data(json!({ "notification_type": kind, "message": message })));
@@ -885,9 +892,16 @@ pub fn hook_events(session: &str, project: Option<&ProjectKey>, payload: &Value)
 #[derive(Clone, Debug, Default)]
 pub struct HookIntake {
     last_seq: Option<u64>,
+    /// The app's reading: it reports finishes itself, so the idle reminder is no "needs input".
+    reports_finishes: bool,
 }
 
 impl HookIntake {
+    /// The app's intake ([`hook_events_as`] without the idle reminder).
+    pub fn reporting_finishes() -> Self {
+        HookIntake { reports_finishes: true, ..HookIntake::default() }
+    }
+
     pub fn events(&mut self, session: &str, project: Option<&ProjectKey>, lines: &[String]) -> Vec<Event> {
         let mut out = Vec::new();
         let (mut unreadable, mut lost) = (0u64, 0u64);
@@ -904,7 +918,7 @@ impl HookIntake {
                 }
                 self.last_seq = Some(seq);
             }
-            out.extend(hook_events(session, project, &payload));
+            out.extend(hook_events_as(session, project, &payload, !self.reports_finishes));
         }
         if unreadable > 0 || lost > 0 {
             let why = match (unreadable, lost) {
@@ -937,6 +951,24 @@ pub fn activity(session: &str, project: Option<&ProjectKey>, previous: Option<Ag
         AgentActivity::NeedsInput => "needs_input",
     };
     Event::new(kinds::SESSION_ACTIVITY, Source::App, name(now)).session(Some(session)).project(project).data(json!({ "activity": name(now), "previous": previous.map(name) }))
+}
+
+/// A session's turn ended and what it left (`finish`): done, a question for the person, or work
+/// that goes on by itself, with its question and a line of what it did. The manager's view of the
+/// session, its wake for a question, and the work ledger read it.
+pub fn session_finished(session: &str, project: Option<&ProjectKey>, agent: crate::model::AgentKind, finish: &crate::finish::Finish, by_prompt: bool) -> Event {
+    let summary = match finish.outcome {
+        crate::finish::Outcome::NeedsYou if !finish.question.is_empty() => format!("asks: {}", finish.question),
+        crate::finish::Outcome::NeedsYou => "asks you something".to_string(),
+        crate::finish::Outcome::StillGoing => "goes on by itself".to_string(),
+        crate::finish::Outcome::Done => "finished".to_string(),
+    };
+    let severity = if finish.outcome == crate::finish::Outcome::NeedsYou { Severity::Notice } else { Severity::Info };
+    Event::new(kinds::SESSION_FINISHED, Source::App, summary)
+        .session(Some(session))
+        .project(project)
+        .data(json!({ "agent": agent.name().to_lowercase(), "outcome": finish.outcome.word(), "question": finish.question, "summary": finish.summary, "checked": finish.checked, "by_prompt": by_prompt }))
+        .severity(severity)
 }
 
 /// A source stopped working (a poller failing, a hook spool losing lines).
@@ -1556,5 +1588,32 @@ mod scrub_keeps_ids {
         for text in ["head 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "session 8765f51a-8ad5-4e73-9df0-27adaa817aa9", "prompt_id=4f3c2b1a-0000-4000-8000-123456789abc"] {
             assert_eq!(crate::words::scrub(text), text, "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+
+    #[test]
+    fn the_apps_intake_hears_no_wait_in_the_idle_reminder() {
+        let idle = json!({ "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Claude is waiting for your input" }).to_string();
+        let asks = json!({ "hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission" }).to_string();
+        let needs = |intake: &mut HookIntake, line: &str| intake.events("s1", None, &[line.to_string()]).iter().any(|e| e.kind == kinds::SESSION_NEEDS_INPUT);
+        assert!(!needs(&mut HookIntake::reporting_finishes(), &idle));
+        assert!(needs(&mut HookIntake::reporting_finishes(), &asks));
+        assert!(needs(&mut HookIntake::default(), &idle), "the server's intake, as before");
+    }
+
+    #[test]
+    fn a_finish_report_says_what_the_turn_left() {
+        let finish = crate::finish::Finish { outcome: crate::finish::Outcome::NeedsYou, question: "Push it?".into(), summary: "Tests pass.".into(), checked: true };
+        let event = session_finished("s1", None, crate::model::AgentKind::Claude, &finish, true);
+        assert_eq!(event.kind, kinds::SESSION_FINISHED);
+        assert_eq!(event.summary, "asks: Push it?");
+        assert_eq!(event.severity, Severity::Notice);
+        assert_eq!((event.data["outcome"].as_str(), event.data["checked"].as_bool(), event.data["by_prompt"].as_bool()), (Some("needs_you"), Some(true), Some(true)));
+        let done = session_finished("s1", None, crate::model::AgentKind::Codex, &crate::finish::Finish::done("Pushed.".into()), false);
+        assert_eq!((done.summary.as_str(), done.severity, done.data["agent"].as_str()), ("finished", Severity::Info, Some("codex")));
     }
 }

@@ -127,7 +127,8 @@ impl Workspace {
         match self.row_state(s) {
             crate::sidebar::RowState::NeedsYou => "needs you",
             crate::sidebar::RowState::Working => "working",
-            _ => "idle",
+            // Its last turn's report, seen or not: "finished", "goes on by itself".
+            _ => self.finish_state_word(&s.id).unwrap_or("idle"),
         }
     }
 
@@ -142,6 +143,8 @@ impl Workspace {
             "worktree": s.worktree,
             "branch": s.branch,
             "state": self.session_state(s),
+            // What its last finished turn left: done, a question for the person, or work that goes on.
+            "finish": self.finish_json(&s.id),
             "pull_request": pr,
             "ticket": self.state.ticket_of.get(&s.id),
             "review": s.review.as_ref().map(|r| json!({ "repo": r.repo, "number": r.number })),
