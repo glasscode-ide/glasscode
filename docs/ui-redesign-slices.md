@@ -9,8 +9,9 @@
 | Repository | glasscode-ide/glasscode, remote `origin` |
 | Progress | 25 of 25 slices merged. The redesign is complete on `ui-redesign`. The owner does the acceptance list (`docs/ui-redesign-acceptance.md`) and decides when `ui-redesign` goes into `windows-port` and `main`. Since 2026-11-17 the macOS job is not a gate (see section 4). |
 
-> **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
-> and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
+> **Design record.** This is the plan the work was built from, kept as it was written while
+> building (one agent per slice, one pull request each). The code and the guides in
+> [`docs/README.md`](README.md) describe Glasscode as it is now.
 
 ## Contents
 
@@ -126,7 +127,7 @@ nothing. The mock shows some items only as ideas.
 14. **Verify before the report, and tell the truth in the report.** Put the real output of each
     Verify command in the pull request.
 15. **A scratch home never uses a real login.** With no account in its `state.json`, Glasscode takes the system login (`~/.claude`, `~/.codex`) as "My login", and a Claude or Codex session then starts the real program with the real login. Each scratch home for a screen check has a `state.json` with its own accounts in the scratch folder, and uses Shell sessions unless the check needs an agent. If `claude.exe` or `codex.exe` starts from a check, end it and write that in the report.
-16. **One agent at a time uses the screen.** Before it starts a Glasscode window, an agent makes the file `W:\personal-code\glasscode\wt\gcui\screen.lock` with its slice number, and removes it when its window is closed. If the file exists, wait and look again.
+16. **One agent at a time uses the screen.** Before it starts a Glasscode window, an agent makes the file `<work>\wt\gcui\screen.lock` with its slice number, and removes it when its window is closed. If the file exists, wait and look again.
 17. Obey `CONTRIBUTING.md`. Comments tell the reason. Do `cargo fmt` only on lines that you changed.
     Do not merge `Cargo.lock` by hand.
 
@@ -145,10 +146,10 @@ The roles and the procedure are sections 2, 3, 5 and 6 of GC-WIN-002, with these
 |---|---|
 | Integration branch | `ui-redesign`, made from the branch of decision P1 |
 | Slice branch | `ui/uNN-<name>`, made from the newest `origin/ui-redesign` |
-| Worktree folder | `W:\personal-code\glasscode\wt\uNN-<name>` |
+| Worktree folder | `<work>\wt\uNN-<name>` |
 | Pull request | Base `ui-redesign`. Title `UNN: <slice name>`. Squash merge. |
 | At the same time | A maximum of three slices |
-| Screen checks | One agent at a time, through `W:\personal-code\glasscode\wt\gcui\gc-ui.ps1` |
+| Screen checks | One agent at a time, through `<work>\wt\gcui\gc-ui.ps1` |
 
 ### Brief for a subagent
 

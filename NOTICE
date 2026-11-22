@@ -42,11 +42,15 @@ The glasses companion app and the voice helper additionally build on:
   Meta Wearables Device Access Toolkit (DAT) for iOS
     https://github.com/facebook/meta-wearables-dat-ios — under its own license.
 
-  ElevenLabs Swift SDK — https://github.com/elevenlabs/elevenlabs-swift-sdk
-  LiveKit Swift SDK and WebRTC — https://github.com/livekit/client-sdk-swift
+  LiveKit Swift SDK — https://github.com/livekit/client-sdk-swift
+    Licensed under Apache-2.0; its WebRTC build under WebRTC's BSD-style licence.
 
-Other dependencies are declared in Cargo.toml / Cargo.lock (Rust) and in the
-Swift package manifests, each under its own licence.
+  Swift NIO, Swift NIO SSH, Swift Crypto and their supporting packages —
+    https://github.com/apple — Licensed under Apache-2.0.
+
+Other dependencies are declared in Cargo.toml / Cargo.lock (Rust), in the
+Swift package manifests, and in voice/manager/worker/requirements.txt (the
+voice worker, Python), each under its own licence.
 
 ================================================================================
 

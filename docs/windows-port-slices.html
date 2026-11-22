@@ -134,7 +134,7 @@
   <tr><th>Item</th><th>Rule</th><th>Example</th></tr>
   <tr><td>Integration branch</td><td>One branch from <code>main</code>. All slice pull requests go into it.</td><td><code>windows-port</code></td></tr>
   <tr><td>Slice branch</td><td><code>win/sNN-&lt;name&gt;</code>, made from the newest <code>origin/windows-port</code>.</td><td><code>win/s03-process</code></td></tr>
-  <tr><td>Worktree folder</td><td>Adjacent to the repository, not in it.</td><td><code>W:\personal-code\glasscode\wt\s03-process</code></td></tr>
+  <tr><td>Worktree folder</td><td>Adjacent to the repository, not in it.</td><td><code>&lt;work&gt;\wt\s03-process</code></td></tr>
   <tr><td>Pull request</td><td>Base <code>windows-port</code>. One for each slice. Squash merge.</td><td><code>S03: process layer for Windows</code></td></tr>
   <tr><td>Commits</td><td>Conventional commits. Small and atomic.</td><td><code>feat(core): find programs with PATHEXT on Windows</code></td></tr>
 </table>
@@ -191,7 +191,7 @@ git fetch origin --prune</code></pre>
   <li>Get the answers of the owner to the questions in <a href="#open">section 12</a>.</li>
   <li>Make the branch: <code>git switch -c windows-port main</code>, then <code>git push -u origin windows-port</code>. Get the approval of the owner before the push.</li>
   <li>Commit the two plan documents in <code>docs/</code> to <code>windows-port</code>. Subagents read them from their worktree.</li>
-  <li>Make the folder <code>W:\personal-code\glasscode\wt</code>.</li>
+  <li>Make the folder <code>&lt;work&gt;\wt</code>.</li>
 </ol>
 <h3>5.2 For each slice</h3>
 <ol>

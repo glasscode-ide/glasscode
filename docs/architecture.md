@@ -1,7 +1,7 @@
 # Glasscode architecture
 
-Checked against the code of `ui-redesign` at `15eb78a`, after the UI redesign (the 25 slices of
-[`ui-redesign-slices.md`](ui-redesign-slices.md), with the code sweep of U23).
+How Glasscode is built, part by part. Numbers such as M11, U08 or G06 in the titles and the text
+name the slice of a design record that built that part ([`README.md`](README.md#design-records)).
 
 ## Decisions
 
@@ -13,7 +13,7 @@ Checked against the code of `ui-redesign` at `15eb78a`, after the UI redesign (t
 | Agents | Official `claude` / `codex` binaries in a PTY | The only subscription use both vendors clearly allow; no token handling |
 | Accounts | One config folder per account | Documented by both CLIs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) |
 | CLI updates | Team-approved versions, self-update off | CLIs change daily; session formats are internal |
-| Platform | macOS and Windows (client; Windows on the `windows-port` branch, release 1 without the server features); Linux for the server daemon | Built for the Mac first; Windows through one source tree and `glasscode_core::sys` |
+| Platform | macOS and Windows (client; Windows without the server features yet); Linux for the server daemon | Built for the Mac first; Windows through one source tree and `glasscode_core::sys` |
 | Backdrop and glass | Our own frames, made as pixels on a background thread; a glass card paints a blurred crop of the same frame | The vendored GPUI has no backdrop blur and no custom shaders; nothing but our backdrop is behind a card (U02, U04) |
 | Global scale | `theme::sz` for sizes and the window's rem size for GPUI's short forms; no vendor change | Decision P5 (U02, U05) |
 | Dither finish | A full-size image; no vendor change | GPUI scales images bilinearly; decision P6 (U02, U04) |

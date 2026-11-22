@@ -43,7 +43,7 @@
 
 | | Glasscode for iPhone | The glasses app |
 |---|---|---|
-| Source | `ios/`, **in neither this repository nor the organisation on GitHub, nor on this Mac** ([`architecture.md`](architecture.md#iphone) describes it) | `glasses/GlasscodeGlasses` (Swift, iOS 18, about 3,400 lines) |
+| Source | `ios/`, **in neither this repository nor the organisation on GitHub, nor on this Mac** ([`architecture.md`](architecture.md#the-glasses-app) says it is retired) | `glasses/GlasscodeGlasses` (Swift, iOS 18, about 3,400 lines) |
 | Reaches | the server only: SSH with a Secure Enclave key to `glasscoded gate --device <id>` | the Mac only: `voice/server.mjs` on port 4517, with one shared bearer token, or the self-hosted relay |
 | Identity | its own P-256 key, pinned on the Mac (`authority/devices.json`) and on the server (`authorized_keys`, forced command) | none: whoever holds the token |
 | Does | sessions, view-only terminal (SwiftTerm), answers, Today, approvals, push, widgets, Live Activity | lens UI (DAT 1.0.1: Core, Display, Inputs, Speech), Neural Band browsing, the manager's LiveKit voice room, the old ElevenLabs copilot, wake word |

@@ -26,18 +26,20 @@ cargo test -p glasscode_cli                         # the console program
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and installed by rustup automatically.
 Please run `cargo fmt` and `cargo clippy` before sending changes — both components are pinned
-with the toolchain. On the `windows-port` branch, `cargo clippy -p glasscode` stops on an old
-error in `server_ui.rs`; clippy is not a CI gate there, nor on `ui-redesign`.
+with the toolchain. Neither is a CI gate yet, so a warning that was there before your change is
+not yours to fix in the same pull request.
+
+To try a change without real agents or accounts, `script/test-agents/` has stand-ins for
+`claude`, `codex` and `gh`, and `script/journeys.sh` drives a debug build through whole journeys
+on a scratch home.
 
 ## Making changes
 
-1. Branch off `main`. Work for the Windows port branches off `windows-port` and goes back into
-   it (see the README).
+1. Branch off `main`.
 2. Keep each change focused; a pull request should do one thing.
 3. Add or update tests for behaviour you change — most logic lives in `glasscode_core`, which
    is UI-free and fast to test.
-4. Make sure `cargo test` passes, and run `cargo clippy` (see above for the branches where it
-   stops on old errors).
+4. Make sure `cargo test` passes, and run `cargo clippy`.
 5. Add a line under "Unreleased" in [`CHANGELOG.md`](CHANGELOG.md) when a person sees the
    change.
 6. Open a pull request describing what changed and why.
@@ -71,10 +73,8 @@ Glasscode builds for macOS and Windows from one source tree.
 - A change for Windows keeps the macOS behavior the same. CI has a macOS job (it checks the app,
   the daemon and the console program, and runs the core tests) and two Windows jobs: "Windows"
   checks the app and runs the core, console program and app tests (`cargo test --locked -p
-  glasscode`), and "Windows installer" builds the installer. From Windows, the macOS job is the
-  only macOS test. On `ui-redesign` the macOS job is not a gate since 2026-11-17, and it can be
-  cancelled before it runs: a change merges when the Windows jobs pass, so a `#[cfg(unix)]` test
-  may not have run.
+  glasscode`), and "Windows installer" builds the installer. A Linux job tests the core and the
+  server daemon. From Windows, the macOS job is the only macOS test.
 
 ## House style
 
@@ -99,4 +99,4 @@ If you spot any of the above already in the tree, please open an issue or a fix.
 
 ## Questions
 
-Open an issue in this repository, or reach out to the maintainers.
+Open an issue in this repository.
