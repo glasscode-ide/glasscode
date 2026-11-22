@@ -46,6 +46,11 @@ becomes the text of the GitHub release.
 - The phone's and the glasses' voice finds sessions with the Mac's search again: the Mac refused
   it, so the phone answered with its first 15 sessions, not searched and of every project. A place
   opened from the phone or its voice opens on the Mac again too.
+- On the phone and the glasses you can ask the manager several things in a row: each is answered
+  right after the one before, as on the Mac. The phone no longer answers "ask again in a moment",
+  the Mac holds a phone's question while the manager answers another one instead of refusing it,
+  and the voice passes each request on at once instead of keeping it for later. "Stop" also drops
+  the requests that wait.
 
 - Glasscode is licensed under the Apache License 2.0.
 - The interface is new: one shell with Today, Sessions, Board, Pull requests and Settings, the

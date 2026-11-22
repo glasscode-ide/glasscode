@@ -25,6 +25,11 @@ and use the whole screen.
   which is not searched. `place.open`, `place.get` and `voice.tool` are on the list of what a
   phone may call (`caller::PHONE_ALLOWED`); left off it, the door refused them and the phone's
   voice never searched.
+- **Several requests in a row.** The phone asks the manager one question at a time and keeps the
+  ones asked meanwhile, in order, for right after (`AppModel.waitingAsks`); its voice passes each
+  request on at once. The Mac's door holds a phone's question while the manager answers another
+  (its own chat, its voice, a command's), up to five a device and five minutes, and asks it once
+  the manager is free (`device_door::WaitingAsk`); a phone's stop drops what it has waiting.
 - **The voice knows where the person is.** The voice's config carries `now` (the place on
   screen, in a sentence) and `recent` (the last turns of the manager's conversation). The worker
   puts `now` into the talker's instructions as it changes, and starts each talk with `recent`

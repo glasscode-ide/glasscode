@@ -30,6 +30,9 @@ final class AppModel: ObservableObject {
     private var asking = false
     private var askedAt = Date()
     private var askActivity = ""
+    /// What the person asked while an answer was on its way: each is asked right after the one
+    /// before, in order, as the Mac's own voice does. Nothing is refused or held back.
+    private var waitingAsks: [String] = []
     /// The room's sentences go out one after another.
     private var sayChain: Task<Void, Never>?
     /// When joining the room last failed: the phone's own speech for a minute.
@@ -274,17 +277,21 @@ final class AppModel: ObservableObject {
         case "ask_manager":
             let request = (arguments.string("request") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !request.isEmpty else { return "There was nothing to ask." }
-            if asking { return "The manager is still on the last request; ask again in a moment." }
+            // While it answers, the request waits its turn here and goes right after.
+            let waits = asking
             ask(request)
-            return "started"
+            return waits ? "started: it is answered right after the request the manager is on now" : "started"
         case "manager_progress":
             guard asking else { return "The manager is not working on anything now." }
             let doing = askActivity.isEmpty ? "" : ", now: \(askActivity)"
-            return "The manager has been working on it for \(Int(Date().timeIntervalSince(askedAt))) seconds\(doing)."
+            let more = waitingAsks.isEmpty ? "" : " \(waitingAsks.count) more \(waitingAsks.count == 1 ? "request waits" : "requests wait") to go after it."
+            return "The manager has been working on it for \(Int(Date().timeIntervalSince(askedAt))) seconds\(doing).\(more)"
         case "stop_manager":
-            guard asking else { return "Nothing was running." }
-            await link.stop()
-            return "Stopped."
+            guard asking || !waitingAsks.isEmpty else { return "Nothing was running." }
+            let dropped = waitingAsks.count
+            waitingAsks.removeAll()
+            if asking { await link.stop() }
+            return dropped > 0 ? "Stopped, and the \(dropped) waiting \(dropped == 1 ? "request is" : "requests are") dropped." : "Stopped."
         case "list_sessions" where link.macConnected, "open_place" where link.macConnected:
             // The Mac answers as its own voice does (search, counts, what is open): the same
             // answer from every device. It opens a place on the Mac, and the lens follows it.
@@ -355,8 +362,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Ask the manager: the answer streams to the lens and the voice.
+    /// Ask the manager: the answer streams to the lens and the voice. Asked while an answer is on
+    /// its way, it waits and is asked right after (one answer streams at a time).
     func ask(_ question: String) {
+        if asking {
+            waitingAsks.append(question)
+            return
+        }
         if !turn.isListening, case .idle = turn.state { turn.talk(now: Date()); turn.heard(question, now: .distantPast); _ = turn.tick(now: Date()) }
         BackgroundKeepAlive.shared.yield()
         // In the room the audio is the room's already.
@@ -386,6 +398,8 @@ final class AppModel: ObservableObject {
                 if room.live { roomSay("I could not get an answer: \(error.localizedDescription)") }
                 resumeKeepAlive()
             }
+            // The next request the person made meanwhile.
+            if !waitingAsks.isEmpty { ask(waitingAsks.removeFirst()) }
             await refresh()
         }
     }

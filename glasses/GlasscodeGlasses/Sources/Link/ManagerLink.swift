@@ -212,7 +212,9 @@ final class ManagerLink: ObservableObject {
         for _ in 0..<2 {
             let poll = carrier === server ? pollWriting(on: carrier, onUpdate) : nil
             defer { poll?.cancel() }
-            let result = try await carrier.call("manager.ask", ["text": text, "voice": true, "focus": focus, "client_id": clientID], timeout: 180)
+            // The Mac may hold it while the manager answers another question first (up to 5
+            // minutes), then answers it (up to 200 s).
+            let result = try await carrier.call("manager.ask", ["text": text, "voice": true, "focus": focus, "client_id": clientID], timeout: 540)
             let json = result as? JSON ?? [:]
             if let elsewhere = json.string("elsewhere") {
                 // The other end is home now: ask there.
