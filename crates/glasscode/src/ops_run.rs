@@ -902,7 +902,10 @@ fn session_send(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 }
 
 /// v2 (M31): `session send` is a queued delivery, from every caller: the session's queue types it
-/// when the session is idle, with a marker, and its hook event with the marker is the receipt. One
+/// with a marker, and its hook event with the marker is the receipt. The person's and the
+/// manager's go in while Claude works, as a message typed in its chat does (Claude reads it at
+/// its next step; its transcript's queue is the receipt), so several can be sent in a row; another
+/// session's waits for the turn to end (what it drives is stamped from the prompt, events-13). One
 /// an agent or the manager sends is claimed in the effect ledger first, with a subject of its own
 /// (a command is never a replay of an earlier one: the ledger records it and dedupes nothing).
 fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String, title: String, from: String, message: String) -> Planned {
@@ -916,6 +919,9 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
     let (project, session, launch) = (caller_key(ws, caller), caller.session.clone(), ws.control.launch.clone());
     // The manager waits to hear back: the session's next finish is said (`finish_ui`).
     let by_manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
+    // The person's words, and the manager's (it speaks for the person): typed in while the agent
+    // works, as in a chat.
+    let while_working = person || by_manager;
     // What the target's events will descend from (events-13): a playbook's firing; a session's
     // own drive, passed on (a session the manager drives that asks another to go on is the same
     // chain); the manager itself, one step. The person's own sends drive nothing.
@@ -938,6 +944,7 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
             note: Some(format!("(Sent by Glasscode because {from} asked it to.)")),
             depth,
             causes,
+            while_working,
             ..glasscode_core::delivery_session::Delivery::new(&id, &message, glasscode_core::words::InjectKind::SessionSend, glasscode_core::clock::now_ms())
         };
         let intent = (!person).then(|| glasscode_core::effects::Intent {
@@ -956,11 +963,14 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
         if by_manager {
             ws.finish_await(&id);
         }
-        // Said as it is: typed in now when the session can take it, else what it waits for.
+        // Said as it is: typed in now when the session can take it (by the queue's own rule), else
+        // what it waits for. The message before it goes in within a second or two.
         let ahead = ws.ci_fix.deliveries.waiting(&id) > 1 || ws.ci_fix.deliveries.in_flight(&id).is_some();
-        let wait = if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { glasscode_core::delivery_session::ready(&ws.delivery_inputs(&id, cx)) };
+        let inputs = ws.delivery_inputs(&id, cx);
+        let wait = glasscode_core::delivery_session::ready(&inputs, while_working).and(if ahead { Err(glasscode_core::delivery_session::Wait::InFlight) } else { Ok(()) });
         let (text, waits) = match wait {
             _ if starting => (format!("Queued for “{title}”: the session is starting, and it is typed in once it is ready."), Some("the session has started")),
+            Ok(()) if inputs.busy => (format!("Sent to “{title}”: it is typed in now, while it works; it reads it at its next step. Its answer comes when its turn ends."), None),
             Ok(()) => (format!("Sent to “{title}”: it is typed in now. Its answer comes when its turn ends."), None),
             Err(why) => (format!("Queued for “{title}”: it is typed in once {}, and nothing is typed over a question or your own text.", why.words()), Some(why.words())),
         };

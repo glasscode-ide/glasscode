@@ -213,19 +213,19 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 
 - **The effect ledger** (`glasscode_core::effects`, `effects/<yyyy-mm>.jsonl`) is how an effect happens once. An agent, a rule or the manager claims the effect's key before it acts; the claim is synced to disk. The result is written after. The same key again gives the stored record. Claims of an earlier run with no result are settled at the first tick by the op's probe, with no model. An at-most-once effect with no probe is left uncertain for the person. `ops_run::claimed` wraps every effect op of a non-person caller. Each request has a subject of its own, so the ledger records it and repeats nothing.
 - **Delivery to a session** (`glasscode_core::delivery_session`, run from `ci_fix.rs`) gives each session one queue that is the only writer of its terminal. It is used by `session send` from any caller, the CI fix and the manager's messages. A message waits until:
-  - the session is idle;
-  - nothing is asking on its screen;
+  - the session is idle, except for a `session send` by the person or the manager to Claude (`Delivery::while_working`): that one goes in while Claude works, as a message typed in its chat does, and Claude reads it at its next step, so several can be sent in a row. A message from another session, the CI fix, the manager's own nudges and Codex sessions still wait for the turn to end;
+  - nothing is asking on its screen, and its hooks say it waits for nobody (a permission, a question);
   - nothing is typed in its box;
-  - nobody has typed in it for 10 s.
+  - nobody has typed in it for 10 s (the queue's own paste does not count).
 
-  The message is typed with a marker such as `[gc:1a2b3c4d]`. Its Enter is held back when a prompt came up after the paste. It is delivered when the session's `UserPromptSubmit` hook event carries the marker. Other rules:
+  The message is typed with a marker such as `[gc:1a2b3c4d]`. Its Enter is held back when a prompt came up after the paste, or the box does not hold the message after a head start that grows with its length. It is delivered when the session's `UserPromptSubmit` hook event carries the marker. Typed while Claude works, it fires no hook: Claude's transcript queues it at once (`queue-operation` enqueue), and that line with the marker is the receipt (`delivery_session::queued`). Other rules:
   - a newer head of the same PR drops a CI ask that is still waiting;
   - the same ask twice is one delivery;
   - every message expires after a day;
   - while a message is being typed, `session answer` and `session keys` answer `busy` (ops-m2), so no key lands inside it;
   - the session's header says how many messages wait and until when (`Queues::header`, from `Wait::words`).
 - **Probes after a restart** (`ci_fix::reconcile`):
-  - a `session send` is settled by its events file;
+  - a `session send` is settled by its events file, or by Claude's transcript queue;
   - a board move by the board;
   - `pr open-draft` by GitHub: an open pull request with the session's branch as its head means it happened, none means it did not, and no answer is not known. Its claim keeps the repository and the branch (`effects::probe_open_draft`).
 - **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.

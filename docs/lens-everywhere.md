@@ -21,7 +21,10 @@ and use the whole screen.
   place in the Mac's window, and its `ui.open` reaches the lens through the same event.
 - **The voice's tools run on the Mac.** The phone's talker tools `list_sessions` and
   `open_place` ask the door `voice.tool`, so the phone answers exactly as the Mac does
-  (`voice_sessions`). Without the Mac (the server only) the phone answers from its own list.
+  (`voice_sessions`). Without the Mac (the server only) the phone answers from its own list,
+  which is not searched. `place.open`, `place.get` and `voice.tool` are on the list of what a
+  phone may call (`caller::PHONE_ALLOWED`); left off it, the door refused them and the phone's
+  voice never searched.
 - **The voice knows where the person is.** The voice's config carries `now` (the place on
   screen, in a sentence) and `recent` (the last turns of the manager's conversation). The worker
   puts `now` into the talker's instructions as it changes, and starts each talk with `recent`

@@ -37,6 +37,13 @@ becomes the text of the GitHub release.
   turn a Stop hook keeps going, a very short turn, and work going on after you answered a prompt
   (here, on the phone or the glasses). It stays green for 2 s after a turn ends, so it does not
   blink, and while a turn's work goes on by itself (up to 30 minutes).
+- A message you send to a Claude session through the manager, its voice or `session send` goes in
+  while the session works, as one typed in its chat does: Claude reads it at its next step, and
+  several can be sent in a row. They no longer wait for the turn to end, nor 10 s after the one
+  before. A long message is no longer left unsent in the session's box. Messages from another
+  session, the CI fix and Codex sessions still wait for the turn to end.
+- The phone's and the glasses' voice finds sessions with the Mac's search again (it searched
+  nothing: the Mac refused it), and a place opened from the phone opens on the Mac.
 
 - Glasscode is licensed under the Apache License 2.0.
 - The interface is new: one shell with Today, Sessions, Board, Pull requests and Settings, the
