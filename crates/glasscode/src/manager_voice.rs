@@ -360,7 +360,7 @@ impl Workspace {
             return;
         }
         self.manager.voice.now_at = Some(Instant::now());
-        let now = self.lens_now(cx);
+        let now = format!("{} {}", self.lens_now(cx), self.projects_line());
         if now != self.manager.voice.now {
             self.manager.voice.now = now;
             self.manager_voice_configure();
@@ -484,7 +484,9 @@ impl Workspace {
     fn manager_voice_ask(&mut self, text: String, cx: &mut Context<Self>) {
         if self.mchat.turn.is_none() && self.mchat.device_focus.is_none() {
             let window = self.chat_focus(false, glasscode_core::clock::now_ms(), cx);
-            self.mchat.device_focus = Some(glasscode_core::runtime::chat::mac_voice_block(window.as_deref()));
+            // A project named by voice is often misheard ("class code"): the projects there are.
+            let block = glasscode_core::runtime::chat::mac_voice_block(window.as_deref());
+            self.mchat.device_focus = Some(format!("{block}\n[{}]", self.projects_line()));
         }
         self.manager_ask(text, true, cx);
     }

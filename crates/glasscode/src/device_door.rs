@@ -874,7 +874,8 @@ impl Workspace {
         let now = glasscode_core::clock::now_ms();
         self.door.ask = Some(DeviceAsk { conn, device: device.clone(), request: id, client_id: client_id.clone(), since: Instant::now(), sent: 0, activity: None, window_moves });
         self.door.last_ask = Some((device.clone(), conn, now));
-        self.mchat.device_focus = Some(glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves));
+        let block = glasscode_core::runtime::chat::glasses_block(&focus, session_title.as_deref(), window_moves);
+        self.mchat.device_focus = Some(format!("{block}\n[{}]", self.projects_line()));
         let words = glasscode_core::words::record(glasscode_core::words::Origin::Device(device), &text, focus.session.as_deref(), None);
         let on_answer: crate::manager_chat::OnAnswer = Box::new(move |ws, said, _cx| ws.door_answered(conn, id, said));
         self.manager_ask_as(text, false, Some(words), None, Some(on_answer), cx);

@@ -122,7 +122,9 @@ impl World {
 }
 
 /// A project's id by its id, name, folder or folder name; for the person, also by the start of
-/// its name. Hidden projects are never named.
+/// its name, or its name as it was said or heard ("class code" is glasscode, `session_find`).
+/// Any other caller is told which project such a word could mean, so that it names it. Hidden
+/// projects are never named.
 pub fn find_project(world: &World, word: &str) -> Result<String, OpError> {
     let w = word.trim();
     let path = world.expand(w, None);
@@ -133,7 +135,8 @@ pub fn find_project(world: &World, word: &str) -> Result<String, OpError> {
     let starts: Vec<&ProjectView> = world.visible().filter(|p| p.name.to_lowercase().starts_with(&w.to_lowercase())).collect();
     match (starts.as_slice(), world.person) {
         ([one], true) => Ok(one.id.clone()),
-        ([], _) | (_, true) => Err(OpError::new(ErrorCode::NotFound, format!("No project “{w}”. Projects: {}.", world.project_names()))),
+        ([], _) => heard_project(world, w),
+        (_, true) => Err(OpError::new(ErrorCode::NotFound, format!("No project “{w}”. Projects: {}.", world.project_names()))),
         (could, false) => Err(OpError::new(
             ErrorCode::Ambiguous { candidates: could.iter().take(6).map(|p| Candidate { id: p.id.clone(), title: p.name.clone(), project: None }).collect() },
             format!(
@@ -141,6 +144,21 @@ pub fn find_project(world: &World, word: &str) -> Result<String, OpError> {
                 could.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
             ),
         )),
+    }
+}
+
+/// A project's name as it was said or heard (spoken words, a misheard name): the person's goes
+/// to it, any other caller is told it could mean that one (ops-17).
+fn heard_project(world: &World, w: &str) -> Result<String, OpError> {
+    let visible: Vec<&ProjectView> = world.visible().collect();
+    let names: Vec<&str> = visible.iter().map(|p| p.name.as_str()).collect();
+    match crate::session_find::project(w, &names).map(|i| visible[i]) {
+        Some(p) if world.person => Ok(p.id.clone()),
+        Some(p) => Err(OpError::new(
+            ErrorCode::Ambiguous { candidates: vec![Candidate { id: p.id.clone(), title: p.name.clone(), project: None }] },
+            format!("“{w}” is not a project's name; it could mean {} (the name as it was said or heard). Name the project by its whole name: {}.", p.name, p.name),
+        )),
+        None => Err(OpError::new(ErrorCode::NotFound, format!("No project “{w}”. Projects: {}.", world.project_names()))),
     }
 }
 
@@ -438,6 +456,12 @@ mod tests {
         assert_eq!(find_project(&person, "sh").as_deref(), Ok("p-shop"));
         let refused = find_project(&agent, "sh").unwrap_err();
         assert!(matches!(&refused.code, ErrorCode::Ambiguous { candidates } if candidates.len() == 1 && candidates[0].id == "p-shop"), "{refused:?}");
+        // A name as it was said or heard: the person's goes to it, an agent is told what it means.
+        assert_eq!(find_project(&person, "s hop").as_deref(), Ok("p-shop"));
+        let heard = find_project(&agent, "s hop").unwrap_err();
+        assert!(matches!(&heard.code, ErrorCode::Ambiguous { candidates } if candidates.len() == 1 && candidates[0].id == "p-shop"), "{heard:?}");
+        assert!(heard.text.contains("it could mean shop"), "{}", heard.text);
+        assert_eq!(find_project(&person, "nowhere").unwrap_err().code, ErrorCode::NotFound);
         // Hidden projects are never named, and not listed.
         let hidden = find_project(&person, "secret").unwrap_err();
         assert_eq!((hidden.code, hidden.text.as_str()), (ErrorCode::NotFound, "No project “secret”. Projects: app, shop."));
