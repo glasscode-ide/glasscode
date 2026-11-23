@@ -10,12 +10,26 @@
 on one worktree if you like, each on the subscription account you choose. With a manager above
 your sessions, and a companion app for Meta Ray-Ban Display glasses.**
 
+**Website: [glasscode.io](https://glasscode.io)**
+
 [Glass coding](#glass-coding) · [What it is](#what-it-is) · [Screenshots](#screenshots) · [Install](#install) · [Usage](#usage) ·
-[Build](#build-from-source) · [Docs](docs/README.md) · [Contributing](#contributing) · [License](#license)
+[Build](#build-from-source) · [Docs](docs/README.md) · [Contributing](#contributing) · [Contact](#contact) · [License](#license)
 
 <br />
 
 <img src="docs/screenshots/today.png" alt="Today in Glasscode: the projects, worktrees and sessions on the left, what needs you in the middle, and the manager on the right" width="900" />
+
+<br />
+<br />
+
+<sub>SPONSORED BY</sub>
+
+<a href="https://hub.ki/en/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/sponsors/hubki-white.svg" />
+    <img src="docs/sponsors/hubki.svg" alt="HUB.KI" height="56" />
+  </picture>
+</a>
 
 </div>
 
@@ -330,6 +344,25 @@ Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, test
 and what never to commit. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report
 security problems privately as [SECURITY.md](SECURITY.md) describes.
 
+## Sponsor
+
+Glasscode is sponsored by [HUB.KI](https://hub.ki/en/).
+
+<a href="https://hub.ki/en/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/sponsors/hubki-white.svg" />
+    <img src="docs/sponsors/hubki.svg" alt="HUB.KI" height="64" />
+  </picture>
+</a>
+
+## Contact
+
+Interested in Glasscode, want to work with us, or have a question? Write to
+[nasvimukthi23@gmail.com](mailto:nasvimukthi23@gmail.com), or visit
+[glasscode.io](https://glasscode.io). For a bug or an idea, open an
+[issue](https://github.com/glasscode-ide/glasscode/issues). Report a security problem in private,
+as [SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 Glasscode is licensed under the [Apache License 2.0](LICENSE). You may use, change and share it,
@@ -340,3 +373,4 @@ licence text of every Rust package in the programs (`THIRD-PARTY-NOTICES.html`).
 
 The names and marks of Claude, Codex, Meta, GitHub, Linear and other services belong to their
 owners and are used only to name those services.
+The HUB.KI logo belongs to HUB.KI and is shown because they sponsor Glasscode.
