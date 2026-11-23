@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		02BCDF8F2464D565A8700D06 /* NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = BFC4D5042B83C7E8A0ED1E54 /* NOTICE */; };
 		0570BB84C8652A6CD5B22949 /* GlassesSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7030BE5C5E270404A9245D /* GlassesSession.swift */; };
 		0A03A98B7E211163DAA55251 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1D3A4BF8DB346A7E50431CC /* Pairing.swift */; };
 		0C154818CDF8000E483AEEEB /* LineConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B36C472175DFBAC9A4C89148 /* LineConnection.swift */; };
@@ -34,10 +35,13 @@
 		ABDB11272AC8319D9E5D0E72 /* NIOCore in Frameworks */ = {isa = PBXBuildFile; productRef = 981EC6FB3EFCDEF4EFACD079 /* NIOCore */; };
 		B1C5FE0E9D6283A6C10EAD1E /* MWDATInputs in Frameworks */ = {isa = PBXBuildFile; productRef = F5B89F8D78A4B3DBCF5E2FF4 /* MWDATInputs */; };
 		BCE0BC027ABD6C313E70DAAA /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = 2DB5A82AC5377366F47AF18C /* MWDATDisplay */; };
+		C22DB6193F385484F5A77467 /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = B6B71B2B7EE11324A6FB95C1 /* ThirdPartyNotices.txt */; };
+		C8CD61F554CF8FB4137AFF6F /* LicencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6A5C06CF31CA8729AB1E2F0 /* LicencesView.swift */; };
 		D1E76A34140A87E6131FEEF2 /* DeviceKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09131CC2C61A8886BA6D12CD /* DeviceKey.swift */; };
 		DE18D8D10BD18379CAA4A511 /* LensShotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C408E8FF43F1F84DEDC803C /* LensShotsTests.swift */; };
 		E0660AAE4BCA62FED8255F89 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */; };
 		EB674114180A32AB959BD124 /* LensArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1333BEBFB100D790E4DC6A /* LensArt.swift */; };
+		EEA170ED6E9A72D1F7FECFF3 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 87860DB9E6E4B52AF2EB9BBB /* LICENSE */; };
 		F193555A08BEA5ACD73AA601 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = 7857C5E1450492FEAF2C67DB /* MWDATMockDevice */; };
 		F8AD1DC00B197886A69EED18 /* PageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B750968FCECC7B8AA906F8F7 /* PageTests.swift */; };
 /* End PBXBuildFile section */
@@ -65,6 +69,7 @@
 		6ED117763B964885A22E2551 /* AudioRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRoute.swift; sourceTree = "<group>"; };
 		6F17FB3798408A803A799178 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		72F4967BB97526E80AE314EE /* DoorLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoorLink.swift; sourceTree = "<group>"; };
+		87860DB9E6E4B52AF2EB9BBB /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		8A36327F589632F7BF17A000 /* GlasscodeGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = GlasscodeGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8D1333BEBFB100D790E4DC6A /* LensArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensArt.swift; sourceTree = "<group>"; };
 		8EB8114759B3FAA9F6D004D4 /* LensCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensCards.swift; sourceTree = "<group>"; };
@@ -73,8 +78,11 @@
 		A62013A9D0EBE9FDB6773991 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
 		B1D3A4BF8DB346A7E50431CC /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		B36C472175DFBAC9A4C89148 /* LineConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineConnection.swift; sourceTree = "<group>"; };
+		B6B71B2B7EE11324A6FB95C1 /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = "<group>"; };
 		B750968FCECC7B8AA906F8F7 /* PageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageTests.swift; sourceTree = "<group>"; };
 		BCD9442087CCEA0C71750141 /* TurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnTests.swift; sourceTree = "<group>"; };
+		BFC4D5042B83C7E8A0ED1E54 /* NOTICE */ = {isa = PBXFileReference; path = NOTICE; sourceTree = "<group>"; };
+		C6A5C06CF31CA8729AB1E2F0 /* LicencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicencesView.swift; sourceTree = "<group>"; };
 		C8E297534B0D5F4CD6197260 /* StayOnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StayOnTests.swift; sourceTree = "<group>"; };
 		CA7030BE5C5E270404A9245D /* GlassesSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesSession.swift; sourceTree = "<group>"; };
 		D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
@@ -129,6 +137,7 @@
 				22D03E4C7937AF4310FE8262 /* Info.plist */,
 				3DADB2F517A4125069560C4D /* App */,
 				7D6F3967189D2155309B5FFC /* Lens */,
+				894076103E5A19E8E1E31928 /* Licenses */,
 				CF47442326226EF6C6BED28E /* Link */,
 				E04E3A7150728DAB3743E24A /* Phone */,
 				7FAD7EE0520E355CBF18A6B5 /* Speech */,
@@ -154,6 +163,24 @@
 				D5EC28D51A2ACC2F8932B17A /* Speech.swift */,
 			);
 			path = Speech;
+			sourceTree = "<group>";
+		};
+		894076103E5A19E8E1E31928 /* Licenses */ = {
+			isa = PBXGroup;
+			children = (
+				B6B71B2B7EE11324A6FB95C1 /* ThirdPartyNotices.txt */,
+			);
+			path = Licenses;
+			sourceTree = "<group>";
+		};
+		93A295328E976FE3BF74462C /* glasscode-prepare-for-publishing */ = {
+			isa = PBXGroup;
+			children = (
+				87860DB9E6E4B52AF2EB9BBB /* LICENSE */,
+				BFC4D5042B83C7E8A0ED1E54 /* NOTICE */,
+			);
+			name = "glasscode-prepare-for-publishing";
+			path = ../..;
 			sourceTree = "<group>";
 		};
 		CD943259188683F8ED929F1F /* Tests */ = {
@@ -186,6 +213,7 @@
 		D268CB8CC8B6FACA342F73D7 = {
 			isa = PBXGroup;
 			children = (
+				93A295328E976FE3BF74462C /* glasscode-prepare-for-publishing */,
 				4A789C2CC86602BA073AB1D8 /* Sources */,
 				CD943259188683F8ED929F1F /* Tests */,
 				D2D3F30719D82ABC8FEC201E /* Products */,
@@ -204,6 +232,7 @@
 		E04E3A7150728DAB3743E24A /* Phone */ = {
 			isa = PBXGroup;
 			children = (
+				C6A5C06CF31CA8729AB1E2F0 /* LicencesView.swift */,
 				D3CBE96241B3C626C9D47E16 /* PhoneViews.swift */,
 			);
 			path = Phone;
@@ -217,6 +246,7 @@
 			buildConfigurationList = 3B04C9E41661B3ABFD4F0E79 /* Build configuration list for PBXNativeTarget "GlasscodeGlasses" */;
 			buildPhases = (
 				CF960BD192F181F0511F760F /* Sources */,
+				FBBE500E5B052B992255E53B /* Resources */,
 				C2CB2F69CE801F0092950EB8 /* Frameworks */,
 			);
 			buildRules = (
@@ -298,6 +328,19 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		FBBE500E5B052B992255E53B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EEA170ED6E9A72D1F7FECFF3 /* LICENSE in Resources */,
+				02BCDF8F2464D565A8700D06 /* NOTICE in Resources */,
+				C22DB6193F385484F5A77467 /* ThirdPartyNotices.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		1C9E1B6CDB2B62C2E43E97D3 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -327,6 +370,7 @@
 				8690C5EEE3FC6CC9AE9E1185 /* LensCards.swift in Sources */,
 				237CDF6CAC1DBB0CDFAEF9BB /* LensModel.swift in Sources */,
 				798BA774A49F49069E3838C5 /* LensPage.swift in Sources */,
+				C8CD61F554CF8FB4137AFF6F /* LicencesView.swift in Sources */,
 				0C154818CDF8000E483AEEEB /* LineConnection.swift in Sources */,
 				17FDF0FAB703266ECCD95B52 /* LinkProtocol.swift in Sources */,
 				8AB311F4B80F7A259A01141E /* ManagerLink.swift in Sources */,

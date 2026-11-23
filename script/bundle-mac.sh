@@ -15,6 +15,26 @@ VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 # A release build's number (GLASSCODE_BUILD), else the commit count.
 BUILD="${GLASSCODE_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 
+# The licence texts the app must carry (Apache-2.0 section 4, BSD, MIT): the Rust packages'
+# (cargo-about) and the Swift packages' (voice/helper/THIRD-PARTY-NOTICES.txt, from
+# script/swift-notices.py). A signed build, the one people get, stops without them; a local
+# ad-hoc build only warns.
+notices_missing() {
+  if [[ -n "${SIGN_IDENTITY:-}" ]]; then echo "error: $1" >&2; exit 1; fi
+  echo "warning: $1" >&2
+}
+cargo about --version >/dev/null 2>&1 \
+  || notices_missing "cargo-about is not installed, so the app would have no THIRD-PARTY-NOTICES.html (cargo install --locked cargo-about --features cli)"
+python3 -I - voice/helper/Package.resolved voice/helper/THIRD-PARTY-NOTICES.txt "$(grep -m1 '^LIVEKIT_VERSION=' "$0" | cut -d'"' -f2)" <<'PY' \
+  || notices_missing "voice/helper/THIRD-PARTY-NOTICES.txt does not match the packages built; run script/swift-notices.py mac"
+import json, sys
+notices = open(sys.argv[2]).read()
+wanted = [f"{p['identity']} {p['state'].get('version')}:" for p in json.load(open(sys.argv[1]))["pins"]]
+wanted.append(f"livekit-server v{sys.argv[3]}:")
+missing = [w for w in wanted if w not in notices]
+sys.exit(1 if missing else 0)
+PY
+
 cargo build --release -p glasscode
 
 APP="target/release/Glasscode.app"
@@ -59,9 +79,7 @@ fi
 if [[ -n "$LIVEKIT_BIN" && -x "$LIVEKIT_BIN" ]]; then
   cp "$LIVEKIT_BIN" "$APP/Contents/Resources/livekit-server"
   chmod 755 "$APP/Contents/Resources/livekit-server"
-  LIVEKIT_LICENSE="$(dirname "$LIVEKIT_BIN")/../LICENSE"
-  mkdir -p "$APP/Contents/Resources/licenses"
-  if [[ -f "$LIVEKIT_LICENSE" ]]; then cp "$LIVEKIT_LICENSE" "$APP/Contents/Resources/licenses/LIVEKIT-LICENSE.txt"; fi
+  # Its licence and notice are in voice/helper/THIRD-PARTY-NOTICES.txt (copied below).
   echo "livekit-server: $("$LIVEKIT_BIN" --version 2>/dev/null) (written against $LIVEKIT_VERSION)"
 else
   echo "warning: no livekit-server (brew install livekit, or LIVEKIT_SERVER_BIN=…); the voice on this Mac won't run" >&2
@@ -84,6 +102,8 @@ cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
 cp NOTICE "$APP/Contents/Resources/NOTICE.txt"
 cp crates/glasscode/assets/fonts/*.txt "$APP/Contents/Resources/licenses/fonts/"
 cp vendor/LICENSE-APACHE "$APP/Contents/Resources/licenses/GPUI-LICENSE-APACHE.txt"
+# The voice helper's Swift packages (LiveKit, LiveKit's FFI, WebRTC) and LiveKit's server.
+cp voice/helper/THIRD-PARTY-NOTICES.txt "$APP/Contents/Resources/licenses/VOICE-THIRD-PARTY-NOTICES.txt"
 if cargo about --version >/dev/null 2>&1; then
   # What the app has: the Mac app, and the server daemon for Linux.
   cargo about generate --locked --fail --workspace --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu -o "$APP/Contents/Resources/THIRD-PARTY-NOTICES.html" about.hbs

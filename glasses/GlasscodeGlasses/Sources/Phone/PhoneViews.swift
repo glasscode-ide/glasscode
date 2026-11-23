@@ -485,6 +485,9 @@ struct SettingsView: View {
                     }
                     Button("Forget this pairing", role: .destructive) { link.unpair(); dismiss() }
                 }
+                Section("About") {
+                    NavigationLink("Licences") { LicencesView() }
+                }
             }
             .navigationTitle("Settings")
             .toolbar { Button("Done") { dismiss() } }
