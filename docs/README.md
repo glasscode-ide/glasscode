@@ -37,11 +37,12 @@ the code disagree, the code and the guides above are right.
 | [windows-port-slices.html](windows-port-slices.html) | The Windows port: the 19 slices and their rules |
 | [windows-acceptance.md](windows-acceptance.md) | The Windows port: what was checked for release 1 |
 | [mobile-glasses-plan.md](mobile-glasses-plan.md) | The glasses app: the plan (G00 to G19) |
+| [lens-everywhere.md](lens-everywhere.md) | One place everywhere: the Mac, the phone and the lens show and open the same thing |
 | [server-sync-plan.md](server-sync-plan.md) | Moving sessions between the Mac and the server, and keeping them in sync |
 | [maturity-plan.md](maturity-plan.md) | Releases, updates and the path to a first public release |
 
 ## Screenshots
 
-[screenshots/](screenshots/) is for pictures of the app. Take them from a demo home with made-up
-projects (`script/journeys.sh` makes one); keep every screenshot free of real projects, tickets
-and personal data.
+[screenshots/](screenshots/) holds the README's pictures of the app. Take them from a demo home
+with made-up projects and the stand-in agents of `script/test-agents` (`script/journeys.sh` makes
+such a home); keep every screenshot free of real projects, tickets, accounts and personal data.

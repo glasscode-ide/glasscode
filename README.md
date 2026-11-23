@@ -6,12 +6,16 @@
 
 *Survival of the simplest.*
 
-**A workspace for running Claude Code and Codex agents side by side, each in its own git
-worktree, on the subscription account you choose. With a manager above your sessions, and a
-companion app for Meta Ray-Ban Display glasses.**
+**A workspace for running Claude Code and Codex agents side by side in git worktrees, several
+on one worktree if you like, each on the subscription account you choose. With a manager above
+your sessions, and a companion app for Meta Ray-Ban Display glasses.**
 
-[Glass coding](#glass-coding) · [What it is](#what-it-is) · [Install](#install) · [Usage](#usage) · [Build](#build-from-source) ·
-[Docs](docs/README.md) · [Contributing](#contributing) · [License](#license)
+[Glass coding](#glass-coding) · [What it is](#what-it-is) · [Screenshots](#screenshots) · [Install](#install) · [Usage](#usage) ·
+[Build](#build-from-source) · [Docs](docs/README.md) · [Contributing](#contributing) · [License](#license)
+
+<br />
+
+<img src="docs/screenshots/today.png" alt="Today in Glasscode: the projects, worktrees and sessions on the left, what needs you in the middle, and the manager on the right" width="900" />
 
 </div>
 
@@ -34,18 +38,24 @@ Meta's developer mode ([glasses/README.md](glasses/README.md)). The desktop app 
 ## What it is
 
 Glasscode is a native desktop app, built on [GPUI](https://www.gpui.rs/), for people who run
-several coding agents at once. Every piece of work is a git worktree with its own agent session.
-You can follow a session as a clean **chat**, or drop into its **raw terminal** at any time. The
-agents are the official `claude` and `codex` CLIs running in a real terminal, so nothing is
-simulated or wrapped away, and each uses the account you picked for it.
+several coding agents at once. Every piece of work is a git worktree, and a worktree can hold
+several sessions: Claude writes the fix, Codex reviews it, and a shell runs the tests, all on the
+same files. You can follow a session as a clean **chat**, or drop into its **raw terminal** at
+any time. The agents are the official `claude` and `codex` CLIs running in a real terminal, so
+nothing is simulated or wrapped away, and each uses the account you picked for it.
 
 Around the sessions, Glasscode keeps the rest of your day in one window:
 
 - **Projects → worktrees → sessions** in one tree on the left. Start a session on the latest
   `main` (fetched fresh), on a pull request (found by number, title, branch or author), on a
   Linear ticket, or on an existing worktree.
+- **Several agents on one worktree.** A worktree's sessions are tabs side by side: Claude,
+  Codex and shells, each on its own account, working on the same branch.
 - **Chat view or Terminal view**, per session. Chat shows the agent's questions (permissions,
-  trust prompts, menus) as buttons. The terminal is one click away.
+  trust prompts, menus) as buttons. The terminal is one click away. You can send Claude several
+  messages in a row while it works; it reads them at its next step.
+- **You know at once when a turn ends.** Each session's dot says how it stands: working,
+  done, a question for you, or still going on its own.
 - **Session tabs, file tabs and a small editor.** A file from the Files or Changes tab opens in
   a tab of its own, as text or as its diff, with syntax colours. Edit makes small changes in place.
 - **Today**: the start of your day. A box that starts a session from a few words, cards for what
@@ -55,8 +65,13 @@ Around the sessions, Glasscode keeps the rest of your day in one window:
 - **Review a pull request** in three steps (Explain → Plan → private review). It is checked out
   as `review/<n>` and never pushed from.
 - **Jump** (⌘K): one search for sessions, worktrees, projects, files, commands and tickets.
+- **Usage.** Every Claude and Codex account on the Mac: how close each is to its 5-hour and
+  weekly limits, tokens per day over 7, 14 or 30 days, by project and by session.
+- **Hand off** a session from Claude to Codex (or to another account) when one runs low, with
+  the conversation and a note, in the same worktree.
 - **Status bar** with a usage meter for each account (5 hours and week), and the memory,
   terminals and ports of your sessions' programs, each with a way to end it.
+- **Looks.** Light and dark themes, moving backdrops, and a scale for the whole interface.
 - **Team-approved CLI versions.** Settings › Updates shows each CLI's installed version and the
   newest one, with a one-click update per person.
 - **Project settings in the repository.** `.glasscode/settings.json` can name a setup script
@@ -70,12 +85,15 @@ And, optional:
 - **A manager above your sessions** (off until you switch it on). One agent you name watches
   every session. It tells you what needs you, tells a session when its pull request was reviewed,
   follows up on what you asked of teammates, and drafts messages that wait for your OK. It keeps
-  one memory per project that every agent shares. A level per project (Careful, Standard,
-  Autopilot) decides what it may do without asking. Everything else waits on a card for you.
-  See [docs/manager.md](docs/manager.md).
-- **Voice.** Talk to the manager on the Mac, and hear it answer.
+  one memory per project that every agent shares. It takes you to what it talks about, draws
+  small pictures to explain, and can walk you through your day. A level per project (Careful,
+  Standard, Autopilot) decides what it may do without asking. Everything else waits on a card
+  for you. See [docs/manager.md](docs/manager.md).
+- **Voice.** Tap the manager's orb and talk to it on the Mac. It answers aloud, opens what you
+  ask for, and starts sessions for you. You can mute it at any time.
 - **Glasses.** An iPhone app for Meta Ray-Ban Display glasses with the Neural Band: ask the
-  manager what needs you, and follow your sessions on the lens.
+  manager what needs you, and follow your sessions on the lens. The Mac, the phone and the lens
+  show the same place: what you open on one opens on the others.
 - **Run anywhere.** Hand a session to your own Linux server (`glasscoded`), keep it running while
   the Mac sleeps, and bring it back when you want.
 
@@ -84,17 +102,33 @@ Glasscode depends on no hosted service of its own. Your devices reach each other
 
 ## Screenshots
 
-<p align="center">
-  <img src="docs/screenshots/today.png" alt="Today: what needs you, what comes up, and the manager" width="900" />
-</p>
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/one-worktree.png" alt="One worktree with three sessions as tabs: Claude, Codex and a shell, with the pull request beside them" /><br />
+      <sub><b>One worktree, three sessions.</b> Claude wrote the fix, Codex reviewed it, a shell runs the tests. The pull request is beside them.</sub></td>
+    <td width="50%"><img src="docs/screenshots/terminal.png" alt="A Claude session in terminal view" /><br />
+      <sub><b>Chat or terminal.</b> The same session as the agent's real terminal, one click from its chat.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/manager-draws.png" alt="The manager explains a fix with a small diagram on Today" /><br />
+      <sub><b>The manager explains with a picture.</b> Step by step, next to its answer.</sub></td>
+    <td><img src="docs/screenshots/voice.png" alt="Voice: the manager's orb listening, and the session it started" /><br />
+      <sub><b>Voice.</b> Talk to the manager; it answers and does what you ask.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/board.png" alt="The Board: Linear tickets in columns, and pull requests that ask for your review" /><br />
+      <sub><b>The Board.</b> Linear tickets by status. Start work on one and it gets its own branch and session.</sub></td>
+    <td><img src="docs/screenshots/pull-requests.png" alt="Pull requests: yours and the ones that ask for your review" /><br />
+      <sub><b>Pull requests.</b> Yours with their checks, and the ones waiting for your review.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/usage.png" alt="Usage: each account's limits and tokens per day for Claude and Codex" /><br />
+      <sub><b>Usage.</b> Each account's limits, and where the tokens go.</sub></td>
+  </tr>
+</table>
 
-| A session, its pull request beside it | The same kind of session in its terminal |
-|---|---|
-| ![A session in chat view with its pull request](docs/screenshots/session.png) | ![A session in terminal view](docs/screenshots/terminal.png) |
-
-![Pull requests: yours and the ones that ask for your review](docs/screenshots/pull-requests.png)
-
-The screenshots come from a demo home with made-up projects ([docs/screenshots](docs/screenshots/)).
+Everything in the screenshots is made up: a demo home with the projects of an imaginary company,
+stand-in agents and no real account ([docs/screenshots](docs/screenshots/)).
 
 ## How the parts fit together
 
@@ -102,7 +136,7 @@ The screenshots come from a demo home with made-up projects ([docs/screenshots](
  ┌──────────────── your Mac (or PC) ─────────────────┐
  │  Glasscode app (GPUI)                             │        ┌── your Linux server (optional) ──┐
  │   ├─ one terminal per session: claude / codex /   │  ssh   │  glasscoded                      │
- │   │  a shell, each in its own git worktree        │◀──────▶│   keeps handed-off sessions      │
+ │   │  a shell; several can share a worktree        │◀──────▶│   keeps handed-off sessions      │
  │   ├─ the manager (optional): one agent above them │  sync  │   running; the manager's home    │
  │   ├─ the `glasscode` command (control socket)     │        │   while the Mac sleeps           │
  │   └─ voice helper (macOS)                         │        └──────────────────────────────────┘
@@ -164,6 +198,8 @@ You can add a project later from the sidebar, or with `glasscode project import 
   where to start: a new branch from the latest `main`, a pull request, a ticket, or an existing
   worktree. Glasscode makes the worktree, runs the project's setup script if you approved it, and
   starts the agent there.
+- **Another agent on the same worktree**: the **+** beside a worktree's tabs, or New session on
+  an existing worktree, adds Claude, Codex or a shell next to the sessions already there.
 - **Chat or terminal**: switch per session. Questions the agent asks show up as buttons in chat
   and as a dot on the session in the sidebar.
 - **Right panel**: the session's files, changes, checks and pull request. Open a file or a diff in
