@@ -1,14 +1,14 @@
 # Glasscode on Windows
 
-The Windows port lives on the `windows-port` branch. Release 1 is a test build for local work:
-projects, worktrees, shell, Claude and Codex sessions, the `glasscode` command and the agent
-browser. The server daemon, session sync and move, phone pairing and voice are **not ported**
+Windows builds come from the same source as the Mac app (the port was merged into `main`).
+Release 1 is a test build for local work: projects, worktrees, shell, Claude and Codex sessions,
+the `glasscode` command and the agent browser. The server daemon, session sync and move, phone pairing and voice are **not ported**
 (see [What is not ported](#what-is-not-ported)). What was checked on Windows, and what was not,
 is in [`windows-acceptance.md`](windows-acceptance.md).
 
 The plan and the slices of the port: [`windows-port-plan.html`](windows-port-plan.html) and
-[`windows-port-slices.html`](windows-port-slices.html). The new interface of the branch
-`ui-redesign`, and how to check it on Windows: [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md).
+[`windows-port-slices.html`](windows-port-slices.html). How to check the interface on Windows:
+[`ui-redesign-acceptance.md`](ui-redesign-acceptance.md).
 
 ## Requirements
 
@@ -87,8 +87,8 @@ warns ("Windows protected your PC") before it runs: choose "More info", then "Ru
 script signs the programs and the installer when `SIGN_CERT` is set (see the top of
 `script/bundle-windows.ps1`); that path has not been used.
 
-The CI job "Windows installer" builds the unsigned installer on each push to `windows-port` and
-keeps it as the workflow artifact `glasscode-windows-installer` for 30 days.
+The CI job "Windows installer" builds the unsigned installer on each push to `main` (and to
+`windows-port`) and keeps it as the workflow artifact `glasscode-windows-installer` for 30 days.
 
 The script also makes `Glasscode-<version>-windows-x86_64.zip`, the same folder without an
 installation, and puts the licence texts into the folder (`LICENSE.txt`, `NOTICE.txt`,

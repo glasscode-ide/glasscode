@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, windows-port, ui-redesign, manager-v2]
+    branches: [main, windows-port]
   push:
-    branches: [main, windows-port, ui-redesign, manager-v2]
+    branches: [main, windows-port]
   # By hand (Actions > CI > Run workflow): all jobs, the Windows installer too.
   workflow_dispatch:
 
@@ -220,9 +220,8 @@ jobs:
 
   # The release programs and the installer (script/bundle-windows.ps1). A release build takes much
   # longer than the checks above, so it is a job of its own, with its own cache. It builds on each
-  # push to main, windows-port and ui-redesign, when started by hand, and for a pull request that
-  # changes the release build. For other pull requests, and for pushes to manager-v2 (the Manager
-  # v2 integration branch, which merges into main at checkpoints), it skips its steps.
+  # push to main and windows-port, when started by hand, and for a pull request that changes the
+  # release build. For other pull requests it skips its steps.
   windows-installer:
     name: Windows installer
     runs-on: windows-latest
@@ -242,12 +241,8 @@ jobs:
         id: scope
         env:
           EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
         run: |
-          if [ "$EVENT" = push ] && [ "$REF" = refs/heads/manager-v2 ]; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "A push to manager-v2 does not build the installer: the push to main after a checkpoint merge does."
-          elif [ "$EVENT" != pull_request ]; then
+          if [ "$EVENT" != pull_request ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           elif git diff --name-only HEAD^1 HEAD | grep -E '^(script/bundle-windows\.ps1|script/windows/|crates/glasscode/(build\.rs|Cargo\.toml|resources/|src/main\.rs)|crates/glasscode_cli/Cargo\.toml|vendor/gpui/(build\.rs|resources/)|Cargo\.(toml|lock)|rust-toolchain\.toml|\.cargo/|\.github/workflows/ci\.yml)'; then
             echo "build=true" >> "$GITHUB_OUTPUT"

@@ -10,8 +10,9 @@
 | Repository | glasscode-ide/glasscode, remote `origin` |
 | Progress | 0 of 44 slices (41 in release 1). M00: the owner accepted every proposal of section 11 on 2026-11-19. Next: commit the documents to `manager-v2` and tag `manager-v2-plan-1`. |
 
-> **For the main agent:** you do not write slice code. One subagent does one slice in one worktree and
-> opens one pull request. Use `docs/manager-v2-orchestrator-prompt.md` to start.
+> **Design record.** This is the plan the work was built from, kept as it was written while
+> building (one agent per slice, one pull request each). The code and the guides in
+> [`docs/README.md`](README.md) describe Glasscode as it is now.
 
 ## Contents
 

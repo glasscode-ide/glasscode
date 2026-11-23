@@ -101,6 +101,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[2..].to_vec()));
     }
+    // `Glasscode --version` (or `--help`) answers as the command does: it used to start a second
+    // copy of the app on the same home, beside the one already running.
+    if matches!(args.get(1).map(String::as_str), Some("--version" | "-V" | "--help" | "-h")) {
+        std::process::exit(glasscode_core::cli::main(args[1..].to_vec()));
+    }
     // Debug builds' journeys: the app's clock may start at another time (GLASSCODE_DEBUG_CLOCK).
     if let Some(guard) = glasscode_core::clock::debug_clock_from_env() {
         std::mem::forget(guard);
