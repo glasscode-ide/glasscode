@@ -114,6 +114,12 @@ the installer. No certificate exists yet, and that path was never used.
 ## Before the first release
 
 - The licence: `LICENSE`, `NOTICE`, and the agreement of everybody who wrote code.
+- The licences the programs carry. cargo-about writes the Rust packages' ones
+  (`cargo install --locked cargo-about --features cli`). The Swift packages' ones are committed
+  files, written by `script/swift-notices.py mac` and `script/swift-notices.py glasses`: run them
+  again whenever a `Package.resolved` or `LIVEKIT_VERSION` in `script/bundle-mac.sh` changes. A
+  signed Mac build (`SIGN_IDENTITY`) stops when cargo-about is missing or the Mac file does not
+  match the packages built. The glasses app shows its file in Settings › Licences.
 - The repository is public, or updates do not work (above).
 - The release key (above).
 - Run the workflow by hand once (Actions › Release › Run workflow): it builds everything and

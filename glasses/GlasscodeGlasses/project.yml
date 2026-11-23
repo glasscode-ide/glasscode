@@ -28,6 +28,12 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      # Glasscode's own notice and licence, shown in Settings › Licences with the packages' ones
+      # (Sources/Licenses/ThirdPartyNotices.txt).
+      - path: ../../NOTICE
+        buildPhase: resources
+      - path: ../../LICENSE
+        buildPhase: resources
     dependencies:
       - package: DAT
         product: MWDATCore

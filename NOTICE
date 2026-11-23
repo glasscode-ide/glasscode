@@ -40,13 +40,39 @@ to the Zed team and contributors.
 The glasses companion app and the voice helper additionally build on:
 
   Meta Wearables Device Access Toolkit (DAT) for iOS
-    https://github.com/facebook/meta-wearables-dat-ios — under its own license.
+    https://github.com/facebook/meta-wearables-dat-ios — not open source: used
+    under the Meta Wearables Developer Terms
+    (https://wearables.developer.meta.com/terms). Glasscode's licence does not
+    cover it.
 
   LiveKit Swift SDK — https://github.com/livekit/client-sdk-swift
-    Licensed under Apache-2.0; its WebRTC build under WebRTC's BSD-style licence.
+    Copyright 2023 LiveKit, Inc. Licensed under Apache-2.0.
+
+  LiveKit FFI — https://github.com/livekit/livekit-ffi-xcframework
+    Licensed under Apache-2.0.
+
+  WebRTC, as LiveKit builds it — https://github.com/livekit/webrtc-xcframework
+    Copyright (c) 2011, The WebRTC project authors. BSD 3-Clause licence;
+    LiveKit's packaging of it under the MIT licence.
 
   Swift NIO, Swift NIO SSH, Swift Crypto and their supporting packages —
     https://github.com/apple — Licensed under Apache-2.0.
+
+The Mac app also carries LiveKit's server (livekit-server,
+https://github.com/livekit/livekit), Copyright 2023 LiveKit, Inc., licensed
+under Apache-2.0, for the manager's voice on the Mac.
+
+The full licence texts and notices of these packages, at the versions built,
+are in voice/helper/THIRD-PARTY-NOTICES.txt (the Mac app) and
+glasses/GlasscodeGlasses/Sources/Licenses/ThirdPartyNotices.txt (the glasses
+app, which shows them in Settings › Licences); script/swift-notices.py writes
+both. The Rust packages' licences go with the programs as
+THIRD-PARTY-NOTICES.html (cargo-about).
+
+The voice worker (voice/manager/worker) installs LiveKit Agents and its plugins
+(Apache-2.0) when it runs; they are not part of what Glasscode ships. The
+speech services those plugins reach are used with each person's own account,
+under that service's terms.
 
 Other dependencies are declared in Cargo.toml / Cargo.lock (Rust), in the
 Swift package manifests, and in voice/manager/worker/requirements.txt (the
