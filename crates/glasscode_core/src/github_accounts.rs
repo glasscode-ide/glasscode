@@ -67,6 +67,19 @@ pub fn configure(settings: &GithubSettings, by_repo: HashMap<String, String>, en
     }
 }
 
+/// Set the accounts' part of the routes (the default, the commit emails, where `gh` is) at once
+/// when nothing is set yet. [`configure`] needs git to name each project's repository, so the
+/// app runs it in the background; a session started before it ends (the one restored at launch)
+/// found no routes, got no token and pushed as `gh`'s active account. Routes already set are
+/// kept: the repositories' accounts come with [`configure`].
+pub fn configure_if_unset(settings: &GithubSettings, env: &HashMap<String, String>) {
+    let mut current = ROUTES.write().unwrap();
+    if current.is_none() {
+        *current = Some(Routes { default: settings.default.clone(), by_repo: HashMap::new(), emails: settings.emails.clone(), gh: gh_program(env) });
+        GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A number that changes whenever the accounts' routes change (see [`configure`]).
 pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::SeqCst)
@@ -185,4 +198,28 @@ pub fn noreply_email(login: &str) -> Option<String> {
     let output = crate::github::output_within(cmd, Duration::from_secs(15)).ok()?;
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (output.status.success() && id.chars().all(|c| c.is_ascii_digit()) && !id.is_empty()).then(|| format!("{id}+{login}@users.noreply.github.com"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session started before the background `configure` ends still finds its account's routes,
+    /// and a later `configure_if_unset` never undoes what `configure` set.
+    #[test]
+    fn routes_are_set_at_once_and_never_undone() {
+        *ROUTES.write().unwrap() = None;
+        let env = HashMap::from([("PATH".to_string(), "/nonexistent".to_string())]);
+        let first = GithubSettings { default: Some("ada".into()), emails: BTreeMap::from([("ada".into(), "1+ada@users.noreply.github.com".into())]) };
+        configure_if_unset(&first, &env);
+        assert_eq!(account_for_repo("acme/app").as_deref(), Some("ada"), "the default, before configure ran");
+        assert_eq!(ROUTES.read().unwrap().as_ref().unwrap().emails.get("ada").map(String::as_str), Some("1+ada@users.noreply.github.com"));
+
+        let later = GithubSettings { default: Some("bob".into()), ..Default::default() };
+        configure(&later, HashMap::from([("acme/app".to_string(), "cy".to_string())]), &env);
+        configure_if_unset(&first, &env);
+        assert_eq!(account_for_repo("acme/app").as_deref(), Some("cy"), "configure's routes stay");
+        assert_eq!(account_for_repo("acme/other").as_deref(), Some("bob"));
+        *ROUTES.write().unwrap() = None;
+    }
 }

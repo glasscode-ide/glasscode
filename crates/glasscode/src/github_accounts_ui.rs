@@ -28,9 +28,25 @@ impl Workspace {
         self.state.project(project_id).and_then(|p| p.github_account.clone()).or_else(|| self.state.github.default.clone())
     }
 
-    /// The environment that makes a new session in `project_id` act as its GitHub account.
+    /// The environment that makes a new session in `project_id` act as its GitHub account: its
+    /// token, and its commit email. The routes are set here when the background
+    /// [`Self::configure_github`] has not set them yet, so the session restored at launch gets
+    /// its token too (it used to start without one and push as `gh`'s active account). The
+    /// commit email comes from the settings themselves: even without a token the session's
+    /// commits are its account's, never git's own `user.email` of another account.
     pub fn github_env(&self, project_id: &str) -> Vec<(String, String)> {
-        self.github_account_for(project_id).map(|login| github_accounts::env_for(&login)).unwrap_or_default()
+        let Some(login) = self.github_account_for(project_id) else { return Vec::new() };
+        github_accounts::configure_if_unset(&self.state.github, &self.env);
+        let mut env = github_accounts::env_for(&login);
+        if !env.iter().any(|(key, _)| key == "GH_TOKEN") {
+            log::warn!("no token of GitHub account {login} from gh: this session pushes as gh's active account");
+        }
+        if let Some(email) = self.state.github.emails.get(&login).filter(|e| !e.trim().is_empty()) {
+            env.retain(|(key, _)| key != "GIT_AUTHOR_EMAIL" && key != "GIT_COMMITTER_EMAIL");
+            env.push(("GIT_AUTHOR_EMAIL".into(), email.clone()));
+            env.push(("GIT_COMMITTER_EMAIL".into(), email.clone()));
+        }
+        env
     }
 
     /// Tell the core who works where (projects' repositories → accounts). A project's repository
